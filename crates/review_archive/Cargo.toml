@@ -1,0 +1,45 @@
+[package]
+name = "review_archive"
+description = "Archive of public place reviews: a PNG of every review as it first appears, plus structured data for statistics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[features]
+default = ["maps", "gbp", "store"]
+# Public Google Maps pages in a headless Chromium: the `Browser` handle and the `maps` source.
+maps = ["dep:chromiumoxide", "dep:futures"]
+# Business Profiles through the official API. Screenshots still come from the Maps page.
+gbp = ["maps"]
+# SQLite + content-addressed PNGs under a data dir, runs, stats, export.
+store = ["dep:sqlx", "dep:zip", "dep:rand"]
+
+[dependencies]
+review_archive_core.workspace = true
+
+chromiumoxide = { workspace = true, optional = true }
+crc32fast.workspace = true
+eyre.workspace = true
+futures = { workspace = true, optional = true }
+jiff.workspace = true
+rand = { workspace = true, optional = true }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["fs", "sync", "time", "rt", "macros"] }
+tracing.workspace = true
+zip = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum.workspace = true
+png.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

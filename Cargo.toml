@@ -1,6 +1,13 @@
-[package]
-name = "review_archive"
-description = "Archive of public place reviews: a PNG of every review as it first appears, plus structured data for statistics"
+[workspace]
+resolver = "3"
+members = [
+    "crates/review_archive",
+    "crates/review_archive_client",
+    "crates/review_archive_core",
+    "crates/review_archive_server",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["Valeriy Sakharov <valeratrades@gmail.com>"]
@@ -8,18 +15,22 @@ license = "BlueOak-1.0.0"
 repository = "https://github.com/Service-Arb/review_archive"
 readme = "README.md"
 
-[dependencies]
+[workspace.dependencies]
+review_archive = { path = "crates/review_archive", version = "0.1.0", default-features = false }
+review_archive_core = { path = "crates/review_archive_core", version = "0.1.0" }
+review_archive_server = { path = "crates/review_archive_server", version = "0.1.0" }
+
 axum = "0.8"
 chromiumoxide = { version = "0.9", default-features = false }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 crc32fast = "1"
 csv = "1"
+ev_lib = { version = "0.21", default-features = false, features = ["settings", "error_monitoring", "otel"] }
 eyre = "0.6"
 futures = "0.3"
 jiff = { version = "0.2", features = ["serde"] }
 rand = "0.10"
-regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
@@ -31,16 +42,16 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+utoipa = "5"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
-[dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
 png = "0.18"
 tempfile = "3"
 
-[lints.clippy]
+[workspace.lints.clippy]
 float_cmp = "allow"
 len_zero = "allow"
 
-[lints.rust]
+[workspace.lints.rust]
 unused_features = "allow"
