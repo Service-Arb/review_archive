@@ -157,6 +157,7 @@ struct KnownRow {
 	capture_pending: bool,
 	gone_at: Option<String>,
 	published_est: Option<String>,
+	published_raw: Option<String>,
 	author: String,
 	rating: Option<i64>,
 	text: Option<String>,
@@ -234,7 +235,7 @@ impl Store {
 
 	pub async fn known(&self, target: TargetId) -> eyre::Result<Known> {
 		let rows: Vec<KnownRow> = sqlx::query_as(
-			"SELECT id, source_review_id, content_hash, capture_pending, gone_at, published_est, author, rating, text
+			"SELECT id, source_review_id, content_hash, capture_pending, gone_at, published_est, published_raw, author, rating, text
 			 FROM reviews WHERE target_id = ?",
 		)
 		.bind(target.0)
@@ -251,6 +252,7 @@ impl Store {
 					capture_pending: r.capture_pending,
 					gone: r.gone_at.is_some(),
 					published_est: r.published_est.as_deref().map(parse_ts).transpose()?,
+					published_raw: r.published_raw,
 					author: r.author,
 					rating: r.rating.and_then(|r| u8::try_from(r).ok()),
 					text: r.text,

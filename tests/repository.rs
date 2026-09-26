@@ -188,14 +188,15 @@ async fn new_changed_gone_reappeared() {
 	assert_eq!(e.store.capture_count(review_archive::domain::ReviewId(rows["a"].id)).await.unwrap(), 1);
 	assert_eq!(e.store.versions(review_archive::domain::ReviewId(rows["a"].id)).await.unwrap().len(), 1);
 
-	// 4. a partial walk that only reached 2026-08-20 says nothing about older b
+	// 4. a partial walk that only reached 2026-08-10 says nothing about older b
 	e.clock.set("2026-09-04T10:00:00Z");
 	src.set(scan(
 		vec![review("c", 3, "Ok", Some("2026-09-03T10:00:00Z"), false)],
-		Coverage::DownTo(Some("2026-08-20T00:00:00Z".parse().unwrap())),
+		Coverage::DownTo(Some("2026-08-10T00:00:00Z".parse().unwrap())),
 	));
 	let s = e.archive().run(&src, &e.target).await.unwrap();
-	// a (2026-08-25) was walked past and is missing → gone; b (2026-08-01) was not reached
+	// a ("a week ago" as of 2026-08-25, so 2026-08-18 at the earliest) was walked past and is
+	// missing → gone; b (2026-08-01) was not reached
 	assert_eq!((s.counts.new, s.counts.gone), (1, 1));
 	let rows = e.by_source_id().await;
 	assert!(rows["a"].gone_at.is_some() && rows["b"].gone_at.is_none());
@@ -242,4 +243,18 @@ async fn targets_enable_disable() {
 	e.store.set_enabled(e.target.id, false).await.unwrap();
 	assert!(!e.store.target(e.target.id).await.unwrap().enabled);
 	assert!(e.store.set_enabled(TargetId(999), true).await.is_err());
+}
+
+#[tokio::test]
+async fn an_empty_complete_scan_is_partial_and_keeps_the_archive() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false)], Coverage::Complete)));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	e.clock.set("2026-09-02T10:00:00Z");
+	src.set(scan(vec![], Coverage::Complete));
+	let s = e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!((s.status, s.counts.gone), (RunStatus::Partial, 0));
+	assert!(s.error.unwrap().contains("no reviews at all"));
+	assert_eq!(e.by_source_id().await["a"].gone_at, None);
 }

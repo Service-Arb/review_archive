@@ -116,6 +116,7 @@ impl<C: Clock> Archive<'_, C> {
 		let mut warnings = std::mem::take(&mut scan.warnings);
 		let coverage = scan.coverage;
 		let plan = reconcile::plan(&known, &scan);
+		warnings.extend(plan.warnings.iter().cloned());
 
 		let mut captures = HashMap::new();
 		for obs in &scan.reviews {

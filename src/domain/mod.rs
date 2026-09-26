@@ -143,6 +143,8 @@ pub struct KnownReview {
 	pub capture_pending: bool,
 	pub gone: bool,
 	pub published_est: Option<Timestamp>,
+	/// The date as the source last printed it; says how precise `published_est` is.
+	pub published_raw: Option<String>,
 	/// What a capture of it on the public page is matched against (`gbp`).
 	pub author: String,
 	pub rating: Option<u8>,
