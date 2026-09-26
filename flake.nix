@@ -106,7 +106,9 @@
             contents = [ pkgs.chromium ];
             imageEnv = [
               "HOME=/data"
-              # the image has no /tmp; Chromium and the export writer need one
+              # the image has no /tmp, and Chromium's shared memory goes to TMPDIR
+              # (--disable-dev-shm-usage); the binary creates it on start, as the
+              # volume is empty on first boot
               "TMPDIR=/data/tmp"
               "FONTCONFIG_FILE=${fontsConf}"
             ];

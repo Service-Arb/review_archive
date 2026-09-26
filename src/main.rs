@@ -99,6 +99,10 @@ async fn main() -> eyre::Result<()> {
 	tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
 
 	let cli = Cli::parse();
+	// The image points TMPDIR into the data volume, which starts out empty; Chromium puts its
+	// shared memory there (`--disable-dev-shm-usage`) and dies if the directory is missing.
+	let tmp = std::env::temp_dir();
+	std::fs::create_dir_all(&tmp).wrap_err_with(|| format!("creating the temp dir {}", tmp.display()))?;
 	let config = Config::load(cli.config.as_deref())?;
 	let store = Store::open(&config.db_path()).await?;
 
