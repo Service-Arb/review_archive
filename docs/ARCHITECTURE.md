@@ -2,23 +2,60 @@
 
 What the service does and why is in [SPEC.md](SPEC.md). This is where things live.
 
+A cargo workspace of three crates; dependencies point inwards only.
+
 ```text
-src/domain/          what an archive is: targets, observations, the ReviewSource port,
-  reconcile.rs       a scan against what is stored → new / changed / unchanged / gone / reappeared
-  schedule.rs        when a target is next due: interval, jitter, backoff
-  relative_date.rs   "il y a 3 semaines" → an estimated timestamp
-src/sources/maps/    the public Maps page in Chromium over CDP
-  selectors.rs       every assumption about Google's markup, and the in-page scripts
-  parse.rs           cards out of HTML (pure; tested on tests/fixtures/)
-  browser.rs         the session: consent, the review tab, sorting, the walk, screenshots
-src/sources/gbp.rs   the Business Profile API; screenshots matched from Maps cards
-src/store/           SQLite (runtime sqlx queries, embedded migrations) + content-addressed PNGs
-src/archive.rs       one scan of one target: run row, source, blobs, reconcile, write
-src/runner.rs        composition: the source for a target's kind, one browser per pass
-src/scheduler.rs     the `serve` loop
-src/http.rs          the read-only API
-src/export.rs        manifest.json + PNGs, as a directory or a .zip
+crates/review_archive_core/     no I/O: no browser, database, network or clock
+  src/lib.rs                    targets, observations, Known, Scan, Coverage, content hashes
+  src/reconcile.rs              a scan against what is stored → new / changed / unchanged / gone / reappeared
+  src/schedule.rs               when a target is next due: interval, jitter, backoff
+  src/relative_date.rs          "il y a 3 semaines" → an estimated timestamp, and its earliest bound
+  src/maps/selectors.rs         every assumption about Google's markup, and the in-page scripts
+  src/maps/parse.rs             cards out of HTML (tested on tests/fixtures/, insta snapshots)
+  src/maps/mod.rs               walk policies, and what a walk may conclude (coverage)
+  src/gbp.rs                    the Business Profile API's JSON; matching API reviews to Maps cards
+  src/place.rs                  a place id out of what a person pastes
+  src/dto.rs                    the JSON of the HTTP API, shared with the client
+crates/review_archive/          the engine (features: maps, gbp, store)
+  src/archive.rs                the `Archive` facade
+  src/browser/                  the `Browser` handle; the CDP session: consent, sorting, the walk, screenshots
+  src/sources/                  the `ReviewSource` port; the maps and gbp adapters
+  src/store/                    SQLite (runtime sqlx queries, embedded migrations/), PNG blobs, export
+  src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
+  src/places.rs                 Places API search for URLs without an id
+crates/review_archive_server/   the `review_archive` binary: CLI, scheduler loop, HTTP; thin over `Archive`
+  src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
+  src/config.rs                 the TOML config: data dir, bind, browser, defaults
 ```
+
+## Using the library
+
+Embed the engine instead of calling a running archive:
+
+```toml
+review_archive = { version = "0.1", default-features = false, features = ["maps"] }
+```
+
+```rust
+use review_archive::{Archive, CaptureRequest, config::Config};
+
+// No data dir: nothing stored, the reviews and PNGs come back in memory.
+let mut config = Config::default();
+config.browser.profile_dir = Some("/var/lib/my-service/chromium".into());
+let archive = Archive::open(config).await?;
+let got = archive.capture_place(&CaptureRequest::new("ChIJLU7jZClu5kcR4PcOOO6p3I0").lang("fr").max_reviews(20)).await?;
+for r in &got.scan.reviews {
+    // r.capture: Some(PNG with provenance in tEXt chunks) for each card screenshotted
+}
+archive.close().await;
+```
+
+With `store` and `Config::data_dir` set, the same `Archive` also does `add_target`,
+`scan_target`, `stats`, `export`, `reviews`, and gives the schedule (`due`, `next_due`).
+A caller that owns a Chromium already passes it with `Archive::open_with_browser`; one
+with its own platform implements `sources::ReviewSource` and records through
+`Archive::record`. With only HTML in hand, `review_archive_core` parses
+(`maps::parse::cards`) and reconciles (`reconcile::plan`) without any of it.
 
 ## Invariants
 
@@ -44,8 +81,13 @@ src/export.rs        manifest.json + PNGs, as a directory or a .zip
   removed. A second `scan` while `serve` holds the profile fails with that reason.
 - **Markup knowledge lives in `selectors.rs`.** A Maps change is fixed there, against fixtures
   refreshed with `scan --dump-html`, and checked by `cargo insta review`.
-- **The domain has no I/O.** Time comes in as an argument or through `archive::Clock`; jitter is
+- **The core has no I/O.** Time comes in as an argument or through `record::Clock`; jitter is
   derived from the target and its last run, so asking twice gives one answer.
+- **Secrets come from the environment only**, through `ev_lib::settings` in the server; the
+  library takes them as `config::Secrets` and never reads the environment. Each is required
+  only by what uses it and a missing one fails that with its name — except
+  `REVIEW_ARCHIVE_TOKEN`, required at boot when `APP_ENV=production`
+  (`review_archive --print-required-vars` lists what a profile needs).
 - **A capture is the review as it first appeared.** Cards are screenshotted when new (or while
   `capture_pending`), after "More" is expanded. The PNG carries its provenance in `tEXt` chunks
   and is stored under its SHA-256.
