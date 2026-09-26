@@ -80,6 +80,9 @@
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "review_archive_server" ];
           nativeBuildInputs = with pkgs; [ pkg-config ];
+          # ev_lib's `sentry` turns on reqwest's native-tls, which is OpenSSL on Linux
+          # (Security.framework on Darwin, which needs nothing here).
+          buildInputs = lib.optionals pkgs.stdenv.isLinux [ pkgs.openssl ];
           # the parser tests are `cargo test`'s job in the devShell and CI; the
           # live one needs a browser and the network, which the sandbox has neither of
           doCheck = false;
