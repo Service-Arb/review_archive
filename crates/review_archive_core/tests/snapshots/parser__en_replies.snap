@@ -1,0 +1,52 @@
+---
+source: tests/parser.rs
+expression: cards
+---
+- id: Ci9DQUlRQUNvZENodHljRjlvT2tsNU1DMVhZbVpEZDJWSldtYzBaMlJOUTNKWFJHYxAB
+  author: Livia Purciuc
+  author_url: "https://www.google.com/maps/contrib/107230204969829222504/reviews"
+  rating: 4
+  date_raw: 6 hours ago
+  text: ~
+  reply: "Hello Livia, thank you so much for your visit and for this feedback, which we greatly appreciate. Feel free to add to your review in the comments if you wish. We hope to see you again very soon for more delicious discoveries! ✨ The Hippopotamus Team"
+  photo_count: 0
+- id: Ci9DQUlRQUNvZENodHljRjlvT2tVdGNsYzFPRVo0YlVWSmEzQXhTRTU2V0VkTVVVRRAB
+  author: Michael Campagne
+  author_url: "https://www.google.com/maps/contrib/111019439859047558140/reviews"
+  rating: 5
+  date_raw: 19 hours ago
+  text: ~
+  reply: "Hello, thank you for this wonderful recognition of our work. Please feel free to share the details of your experience in the comments. We would be delighted to welcome you back very soon. The Hippopotamus Paris Opéra 2nd Arrondissement Team"
+  photo_count: 0
+- id: Ci9DQUlRQUNvZENodHljRjlvT2xKaFJ6UTNTM1JyYkVSaWFsRldjek0zVlRkaFVtYxAB
+  author: Lilith Braham
+  author_url: "https://www.google.com/maps/contrib/117144675590193679686/reviews"
+  rating: 3
+  date_raw: 21 hours ago
+  text: Modeste is very kind
+  reply: ~
+  photo_count: 0
+- id: Ci9DQUlRQUNvZENodHljRjlvT2s1VFJGRTJabWsyWTFGMU1tRXlhamgwZWpSNGRVRRAB
+  author: clara ni
+  author_url: "https://www.google.com/maps/contrib/112522216729078010314/reviews"
+  rating: 5
+  date_raw: a day ago
+  text: "Excellent service, very friendly staff."
+  reply: "Hello Clara! Your satisfaction is our priority, and we are delighted by your message. Thank you! We look forward to welcoming you back for another meal. The Hippopotamus Paris Opéra 2nd team"
+  photo_count: 0
+- id: Ci9DQUlRQUNvZENodHljRjlvT21waVIxUjBaMDlvVFZOWWRtRnhhMFpoYVRGWFRYYxAB
+  author: dominic rowland
+  author_url: "https://www.google.com/maps/contrib/101435523823098711596/reviews"
+  rating: 1
+  date_raw: 2 days ago
+  text: Horrible food and service. Some of our party were sick afterwards.
+  reply: ~
+  photo_count: 0
+- id: Ci9DQUlRQUNvZENodHljRjlvT2tseWEyTjNVMlp4WWsxYVFXbEtkWHBIT0V0bmMzYxAB
+  author: Paolo Maresu
+  author_url: "https://www.google.com/maps/contrib/112494106283481522695/reviews"
+  rating: 5
+  date_raw: 2 days ago
+  text: "We ate well and the service was prompt; the place is tidy and clean (including the bathroom). We stopped in without a reservation, two of us with a small child, and it was a pleasant stop. There's a changing table in the disabled restroom on the ground floor."
+  reply: Hello Paolo! Thank you so much for this positive and encouraging review. We hope to see you again very soon for another delicious experience. The Hippopotamus Paris Opéra 2nd team
+  photo_count: 0

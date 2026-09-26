@@ -1,0 +1,30 @@
+[package]
+name = "review_archive_core"
+description = "review_archive without I/O: domain types, DTOs, reconciliation, the Google Maps review card parser and relative dates"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[features]
+# `utoipa::ToSchema` on the DTOs, for the server's OpenAPI document.
+openapi = ["dep:utoipa"]
+
+[dependencies]
+csv.workspace = true
+eyre.workspace = true
+jiff.workspace = true
+scraper.workspace = true
+serde.workspace = true
+sha2.workspace = true
+url.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
