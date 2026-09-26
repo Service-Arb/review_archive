@@ -1,7 +1,9 @@
 pub mod archive;
 pub mod config;
 pub mod domain;
+pub mod export;
 pub mod http;
+pub mod places;
 pub mod png_meta;
 pub mod runner;
 pub mod scheduler;
