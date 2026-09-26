@@ -36,7 +36,7 @@ impl Browser {
 	}
 
 	/// Opens the place's review list and walks it.
-	pub async fn walk(&self, place_id: &str, lang: &str, policy: &(dyn WalkPolicy + Sync), max: usize) -> eyre::Result<Walked> {
+	pub async fn walk(&self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy, max: usize) -> eyre::Result<Walked> {
 		let mut guard = self.session.lock().await;
 		if guard.is_none() {
 			let mut s = Session::launch(&self.cfg, &self.profile_dir).await?;
@@ -71,20 +71,22 @@ pub struct MapsSource<'a> {
 
 struct NewestFirst<'a> {
 	known: &'a Known,
+	/// Archived cards in a row, up to the last one read.
+	known_run: usize,
 }
 
 impl WalkPolicy for NewestFirst<'_> {
-	fn is_known(&self, card: &Card) -> bool {
-		self.known.contains(&card.id)
-	}
-
 	fn wants_capture(&self, card: &Card) -> bool {
 		self.known.wants_capture(&card.id)
 	}
 
+	fn observe(&mut self, card: &Card) {
+		self.known_run = if self.known.contains(&card.id) { self.known_run + 1 } else { 0 };
+	}
+
 	/// A full screen of archived cards in a row: everything older is archived too.
-	fn satisfied(&self, cards: &[Card]) -> bool {
-		cards.len() >= SCREEN && cards[cards.len() - SCREEN..].iter().all(|c| self.is_known(c))
+	fn satisfied(&self) -> bool {
+		self.known_run >= SCREEN
 	}
 }
 
@@ -95,7 +97,8 @@ impl ReviewSource for MapsSource<'_> {
 		} else {
 			self.defaults.max_reviews_per_scan
 		};
-		let walked = self.browser.walk(&target.place_id, &target.lang, &NewestFirst { known }, max).await?;
+		let mut policy = NewestFirst { known, known_run: 0 };
+		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, max).await?;
 		Ok(to_scan(walked, max, Timestamp::now()))
 	}
 }

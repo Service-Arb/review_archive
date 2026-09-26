@@ -29,11 +29,12 @@ const UI_TIMEOUT: Duration = Duration::from_secs(20);
 const SORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a walk needs to know about each card, and when it has seen enough.
-pub trait WalkPolicy {
-	fn is_known(&self, card: &Card) -> bool;
+pub trait WalkPolicy: Send {
 	fn wants_capture(&self, card: &Card) -> bool;
+	/// Each card the walk reads, once, in list order.
+	fn observe(&mut self, card: &Card);
 	/// Checked after each step; `true` ends the walk early.
-	fn satisfied(&self, cards: &[Card]) -> bool;
+	fn satisfied(&self) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -238,7 +239,7 @@ impl Session {
 	}
 
 	/// Walks the open review list, capturing the cards the policy asks for.
-	pub async fn walk(&self, policy: &(dyn WalkPolicy + Sync), max: usize, opened: Opened) -> eyre::Result<Walked> {
+	pub async fn walk(&self, policy: &mut dyn WalkPolicy, max: usize, opened: Opened) -> eyre::Result<Walked> {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<Card> = Vec::new();
@@ -277,13 +278,14 @@ impl Session {
 				} else {
 					None
 				};
+				policy.observe(&card);
 				cards.push(card);
 				captures.push(capture);
 			}
 			if cards.len() >= max {
 				break WalkEnd::Cap;
 			}
-			if policy.satisfied(&cards) {
+			if policy.satisfied() {
 				break WalkEnd::Satisfied;
 			}
 			idle = if grew { 0 } else { idle + 1 };

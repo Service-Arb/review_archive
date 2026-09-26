@@ -96,6 +96,8 @@ async fn paginates_and_refreshes_an_expired_token() {
 		.unwrap();
 	server.abort();
 
+	assert_eq!(got.total, Some(3));
+	let got = got.reviews;
 	assert_eq!(got.iter().map(|r| r.review_id.as_str()).collect::<Vec<_>>(), ["r1", "r2", "r3"]);
 	assert_eq!(stub.tokens_issued.load(Ordering::SeqCst), 2, "one token, then one refresh after the 401");
 	// page 1 and the retried page 2; the rejected attempt is refused before it counts
