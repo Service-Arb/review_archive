@@ -116,6 +116,63 @@ configured:
 Config: TOML file (`--config`) for data dir, bind address, defaults; secrets only
 from env.
 
+### HTTP API for other services
+
+Everything the CLI can do is reachable over HTTP, so other services drive the
+archive without shelling into its container. JSON in and out; DTOs live in the
+library (below) and are shared with the client crate. OpenAPI document at
+`GET /openapi.json` (utoipa, as in concierge).
+
+Targets:
+
+- `POST /targets` `{place | maps_url, label?, lang?, interval?, gbp?}` → `201`
+  with the target. Same resolution as `target add`.
+- `PATCH /targets/{id}` `{label?, lang?, interval?, enabled?}`
+- `DELETE /targets/{id}` — disables; archived data is never deleted.
+- `GET /targets/{id}` — target with last run, counts, next scheduled scan.
+
+Jobs (one browser, one queue; on-demand jobs go ahead of scheduled scans):
+
+- `POST /targets/{id}/scan` → `202 {job_id}` — scan now.
+- `POST /captures` `{place | maps_url, lang?, max_reviews?, review_ids?}` →
+  `202 {job_id}` — ad-hoc capture of a place **without** registering a target;
+  results are stored under an implicit, disabled target so nothing is lost.
+  `?wait=<secs>` (cap 120) blocks and returns the result directly if done.
+- `GET /jobs/{id}` → `queued | running | done | failed`, and on `done` the
+  reviews with their capture URLs.
+- `GET /targets/{id}/runs?limit=`
+
+Reviews and captures:
+
+- `GET /reviews/{id}` — review with versions and captures.
+- `GET /targets/{id}/export.zip?since=` — same archive as `export`.
+
+Events:
+
+- `POST /webhooks` `{url, events: [review.new, review.changed, review.gone, review.reappeared, run.failed], secret}`,
+  `GET /webhooks`, `DELETE /webhooks/{id}`. Deliveries are signed
+  (`X-Signature: sha256=<hmac of body>`), retried with backoff, recorded in an
+  outbox table so a restart does not drop them.
+
+## Library
+
+The crate is usable without the server, inside other systems, at the low level:
+
+- `review_archive_core` — no I/O: domain types, DTOs, reconciliation, the Maps
+  card parser and selectors, relative dates. Anyone with their own browser or
+  their own HTML can parse and reconcile.
+- `review_archive` — the engine: `ReviewSource` trait (public, so other
+  platforms plug in), `maps` and `gbp` sources, a `Browser` handle that callers
+  can own or share, `Store` (SQLite + blobs), and a facade
+  `Archive::open(config)` with `capture_place(..)`, `scan_target(..)`,
+  `add_target(..)`, `stats(..)`, `export(..)`. Features: `maps`, `gbp`, `store`.
+  A caller can also run `capture_place` with no store at all and get the reviews
+  and PNG bytes back in memory.
+- `review_archive_server` — binary: CLI, scheduler, HTTP, webhooks. Thin over
+  the facade; no logic that the library does not also expose.
+- `review_archive_client` — typed async HTTP client over the same DTOs, for
+  services that call a running archive instead of embedding it.
+
 ## Repo conventions
 
 Follow `gmaps_optimal_placement` / `aquafix`: edition 2024, nightly via
