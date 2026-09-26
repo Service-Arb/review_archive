@@ -35,7 +35,7 @@ impl ReviewSource for RequestedSource<'_> {
 	async fn scan(&self, target: &Target, known: &Known) -> eyre::Result<Scan> {
 		let mut policy = review_archive_core::maps::Requested::new(known, self.review_ids.clone());
 		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, self.max).await?;
-		Ok(scan_of(walked, self.max, Timestamp::now()))
+		Ok(review_archive_core::maps::scan_to_limit(walked, Timestamp::now()))
 	}
 }
 

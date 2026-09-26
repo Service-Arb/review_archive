@@ -192,9 +192,20 @@ pub fn observed(card: Card, now: Timestamp) -> Observed {
 	}
 }
 
-/// The scan a walk amounts to. `max` is the limit it was given, for the warning when it
-/// was hit.
+/// The scan a walk amounts to. `max` is the limit it was given: hitting it is a warning,
+/// because a scheduled scan that never reaches archived cards leaves a gap.
 pub fn scan_of(walked: Walked, max: usize, now: Timestamp) -> Scan {
+	let capped = walked.end == WalkEnd::Cap;
+	let mut scan = scan_to_limit(walked, now);
+	if capped {
+		scan.warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
+	}
+	scan
+}
+
+/// [`scan_of`] for a walk whose limit was asked for (an ad-hoc capture of the newest `n`):
+/// reaching it is the point, not a warning.
+pub fn scan_to_limit(walked: Walked, now: Timestamp) -> Scan {
 	let Walked {
 		cards,
 		end,
@@ -203,9 +214,6 @@ pub fn scan_of(walked: Walked, max: usize, now: Timestamp) -> Scan {
 		total,
 		..
 	} = walked;
-	if end == WalkEnd::Cap {
-		warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
-	}
 	let reviews: Vec<Observed> = cards.into_iter().map(|(card, capture)| Observed { capture, ..observed(card, now) }).collect();
 	let coverage = coverage(&reviews, end, sorted, total, &mut warnings);
 	Scan { reviews, coverage, warnings }
@@ -295,6 +303,15 @@ mod tests {
 		let s = scan_of(walked(shuffled, WalkEnd::Satisfied, true, None), 200, now());
 		assert_eq!(s.coverage, Coverage::DownTo(None));
 		assert_eq!(s.warnings.len(), 1);
+	}
+
+	#[test]
+	fn a_requested_limit_is_not_a_warning() {
+		let w = || walked(newest_first(), WalkEnd::Cap, true, Some(4000));
+		assert_eq!(scan_of(w(), 3, now()).warnings.len(), 1);
+		let s = scan_to_limit(w(), now());
+		assert!(s.warnings.is_empty());
+		assert!(matches!(s.coverage, Coverage::DownTo(Some(_))));
 	}
 
 	#[test]

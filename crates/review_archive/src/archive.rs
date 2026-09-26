@@ -234,7 +234,7 @@ impl Archive {
 	/// PNGs come back in memory. Works on an archive without a data dir.
 	#[cfg(feature = "maps")]
 	pub async fn capture_place(&self, req: &CaptureRequest) -> eyre::Result<Captured> {
-		use review_archive_core::maps::{CaptureAll, scan_of};
+		use review_archive_core::maps::{CaptureAll, scan_to_limit};
 
 		let lang = req.lang.as_deref().unwrap_or(&self.inner.defaults.lang);
 		let max = req.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
@@ -244,7 +244,7 @@ impl Archive {
 		};
 		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, max).await?;
 		let page_url = walked.page_url.clone();
-		let mut scan = scan_of(walked, max, Timestamp::now());
+		let mut scan = scan_to_limit(walked, Timestamp::now());
 		for r in &mut scan.reviews {
 			if let Some(c) = &mut r.capture {
 				c.png = crate::png_meta::provenance(c, &req.place_id, &r.source_review_id)?;
