@@ -25,10 +25,10 @@ pub struct Resolved {
 /// The place id in `input`, searching for it when the input has only a name. `Some`
 /// resolution when a search happened. `key` is the Places API key, needed only then.
 pub async fn resolve(http: &reqwest::Client, key: Option<&str>, input: &str) -> eyre::Result<(String, Option<Resolved>)> {
-	match place::parse(input)? {
+	match place::parse(input).map_err(|e| crate::rejected::invalid(format!("{e:#}")))? {
 		Parsed::PlaceId(id) => Ok((id, None)),
 		Parsed::Search { query, near } => {
-			let key = key.ok_or_else(|| eyre::eyre!("the URL has no place id; resolving it needs GOOGLE_MAPS_KEY"))?;
+			let key = key.ok_or_else(|| crate::rejected::invalid("the URL has no place id; resolving it needs GOOGLE_MAPS_KEY"))?;
 			let found = search(http, SEARCH_TEXT, key, &query, near).await?;
 			Ok((found.place_id.clone(), Some(found)))
 		}
@@ -72,7 +72,11 @@ pub async fn search(http: &reqwest::Client, endpoint: &str, key: &str, query: &s
 		eyre::bail!("Places text search for {query:?}: {status}: {text}");
 	}
 	let resp: Resp = resp.json().await.wrap_err("decoding Places response")?;
-	let place = resp.places.into_iter().next().ok_or_else(|| eyre::eyre!("Places found nothing for {query:?}"))?;
+	let place = resp
+		.places
+		.into_iter()
+		.next()
+		.ok_or_else(|| crate::rejected::invalid(format!("Places found nothing for {query:?}")))?;
 	Ok(Resolved {
 		place_id: place.id,
 		name: place.display_name.map(|t| t.text),

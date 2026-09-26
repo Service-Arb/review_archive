@@ -2948,6 +2948,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "review_archive_client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "eyre",
+ "jiff",
+ "reqwest 0.13.5",
+ "review_archive",
+ "review_archive_core",
+ "review_archive_server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "review_archive_core"
 version = "0.1.0"
 dependencies = [
@@ -2972,6 +2991,7 @@ dependencies = [
  "color-eyre",
  "ev_lib",
  "eyre",
+ "futures",
  "jiff",
  "rand 0.10.3",
  "review_archive",
@@ -2983,6 +3003,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

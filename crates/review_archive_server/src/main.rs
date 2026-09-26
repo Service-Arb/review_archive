@@ -2,8 +2,6 @@
 //! library's `Archive`.
 
 mod config;
-mod http;
-mod scheduler;
 mod settings;
 
 use std::{path::PathBuf, time::Duration};
@@ -13,6 +11,7 @@ use ev_lib::error_monitoring;
 use eyre::WrapErr;
 use review_archive::{AddTarget, Archive};
 use review_archive_core::{GbpLocation, TargetId, dto::RunStatus, parse_interval, parse_since, schedule};
+use review_archive_server::{http, worker};
 use tokio::sync::watch;
 
 use crate::{config::Config, settings::Settings};
@@ -269,7 +268,8 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 
 async fn serve(archive: Archive, config: &Config, token: &str) -> eyre::Result<()> {
 	let bind = config.bind;
-	let app = http::router(http::AppState::new(archive.clone(), token));
+	let signals = std::sync::Arc::new(worker::Signals::default());
+	let app = http::router(http::AppState::new(archive.clone(), token, signals.clone()));
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
 
@@ -291,12 +291,13 @@ async fn serve(archive: Archive, config: &Config, token: &str) -> eyre::Result<(
 		let _ = tx.send(true);
 		Ok::<_, eyre::Report>(())
 	};
-	let sched = async {
-		let r = scheduler::run(&archive, rx).await;
+	let deliver = worker::deliver(&archive, rx.clone());
+	let work = async {
+		let r = worker::run(&archive, &signals, rx).await;
 		archive.close().await;
 		r
 	};
-	tokio::try_join!(http, sched, signal)?;
+	tokio::try_join!(http, work, deliver, signal)?;
 	Ok(())
 }
 

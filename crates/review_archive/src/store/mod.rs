@@ -300,7 +300,7 @@ impl Store {
 			.fetch_optional(&self.pool)
 			.await
 			.wrap_err_with(|| format!("loading target {id}"))?;
-		row.ok_or_else(|| eyre::eyre!("no target {id}"))?.try_into()
+		row.ok_or_else(|| crate::rejected::not_found(format!("no target {id}")))?.try_into()
 	}
 
 	/// Enables or disables a target. Its archive stays either way.
@@ -311,7 +311,9 @@ impl Store {
 			.execute(&self.pool)
 			.await
 			.wrap_err_with(|| format!("updating target {id}"))?;
-		eyre::ensure!(done.rows_affected() == 1, "no target {id}");
+		if done.rows_affected() != 1 {
+			return Err(crate::rejected::not_found(format!("no target {id}")));
+		}
 		Ok(())
 	}
 
@@ -589,9 +591,14 @@ impl Store {
 
 	/// Changes what the patch sets; interval at least an hour.
 	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<()> {
-		let interval = patch.interval.as_deref().map(review_archive_core::parse_interval).transpose()?;
-		if let Some(i) = interval {
-			eyre::ensure!(i >= schedule::MIN_INTERVAL, "the interval must be at least 1h");
+		let interval = patch
+			.interval
+			.as_deref()
+			.map(review_archive_core::parse_interval)
+			.transpose()
+			.map_err(|e| crate::rejected::invalid(format!("{e:#}")))?;
+		if interval.is_some_and(|i| i < schedule::MIN_INTERVAL) {
+			return Err(crate::rejected::invalid("the interval must be at least 1h"));
 		}
 		let interval_secs = interval.map(|i| i64::try_from(i.as_secs())).transpose().wrap_err("interval too large")?;
 		let done = sqlx::query(
@@ -607,7 +614,9 @@ impl Store {
 		.execute(&self.pool)
 		.await
 		.wrap_err_with(|| format!("updating target {id}"))?;
-		eyre::ensure!(done.rows_affected() == 1, "no target {id}");
+		if done.rows_affected() != 1 {
+			return Err(crate::rejected::not_found(format!("no target {id}")));
+		}
 		Ok(())
 	}
 

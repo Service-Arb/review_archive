@@ -279,7 +279,9 @@ impl Archive {
 	pub async fn add_target(&self, req: AddTarget) -> eyre::Result<Added> {
 		let store = self.store()?;
 		let interval = req.interval.unwrap_or(self.inner.defaults.interval);
-		eyre::ensure!(interval >= schedule::MIN_INTERVAL, "the interval must be at least 1h");
+		if interval < schedule::MIN_INTERVAL {
+			return Err(crate::rejected::invalid("the interval must be at least 1h"));
+		}
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), &req.place).await?;
 		let kind = if req.gbp.is_some() { TargetKind::Gbp } else { TargetKind::Maps };
 		let label = req.label.or_else(|| resolved.as_ref().and_then(|r| r.name.clone())).unwrap_or_else(|| place_id.clone());
@@ -446,7 +448,7 @@ impl Archive {
 			.place
 			.as_deref()
 			.or(req.maps_url.as_deref())
-			.ok_or_else(|| eyre::eyre!("name the place: `place` or `maps_url`"))?;
+			.ok_or_else(|| crate::rejected::invalid("name the place: `place` or `maps_url`"))?;
 		let lang = req.lang.clone().unwrap_or_else(|| self.inner.defaults.lang.clone());
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
 		let target = match store.find_target(&place_id, &lang).await? {
@@ -523,10 +525,17 @@ impl Archive {
 
 	/// Adds a webhook. Its URL must be http(s) and its secret 16+ characters.
 	pub async fn add_webhook(&self, hook: &NewWebhook) -> eyre::Result<WebhookDto> {
-		let url: reqwest::Url = hook.url.parse().map_err(|e| eyre::eyre!("webhook url {:?}: {e}", hook.url))?;
-		eyre::ensure!(matches!(url.scheme(), "http" | "https"), "webhook url must be http or https, not {}", url.scheme());
-		eyre::ensure!(!hook.events.is_empty(), "subscribe the webhook to at least one event");
-		eyre::ensure!(hook.secret.len() >= 16, "the webhook secret is too short to be one (16+ characters)");
+		use crate::rejected::invalid;
+		let url: reqwest::Url = hook.url.parse().map_err(|e| invalid(format!("webhook url {:?}: {e}", hook.url)))?;
+		if !matches!(url.scheme(), "http" | "https") {
+			return Err(invalid(format!("webhook url must be http or https, not {}", url.scheme())));
+		}
+		if hook.events.is_empty() {
+			return Err(invalid("subscribe the webhook to at least one event"));
+		}
+		if hook.secret.len() < 16 {
+			return Err(invalid("the webhook secret is too short to be one (16+ characters)"));
+		}
 		self.store()?.add_webhook(hook, Timestamp::now()).await
 	}
 
