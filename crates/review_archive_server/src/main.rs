@@ -71,7 +71,7 @@ enum TargetCmd {
 		/// e.g. 6h, 12h, 1d; at least 1h.
 		#[arg(long, value_parser = parse_interval)]
 		interval: Option<Duration>,
-		/// Read reviews through the Business Profile API: <account>/<location>.
+		/// Read reviews through the Business Profile API: `<account>/<location>`.
 		#[arg(long)]
 		gbp: Option<GbpLocation>,
 	},

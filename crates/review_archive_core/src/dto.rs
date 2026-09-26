@@ -1,7 +1,7 @@
 //! The JSON the archive speaks: what the HTTP API returns and the CLI prints. Shared by
 //! the server and the client, so the two cannot drift apart.
 //!
-//! Timestamps are strings in [`fmt_ts`](crate::fmt_ts)'s shape.
+//! Timestamps are strings in [`crate::fmt_ts`]'s shape.
 
 use std::fmt;
 
