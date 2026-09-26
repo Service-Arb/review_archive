@@ -1,0 +1,44 @@
+---
+source: tests/parser.rs
+expression: cards
+---
+- id: Ci9DQUlRQUNvZENodHljRjlvT21vdFl5MWpSV05GVVZoaFVUTnZZM3BEV0dSSmVFRRAB
+  author: Cécile G
+  author_url: "https://www.google.com/maps/contrib/116351456539251048376/reviews"
+  rating: 5
+  date_raw: il y a 2 mois
+  text: "l'incontournable à Paris.\narrivée en soirée, pratiquement aucune attente, agréablement surpris.\nbeaucoup de monde par contre au second étage avec des touristes qui monopolisent la rambarde pour surfer sur internet et qui ne profitent pas de la vue.\nvous pouvez vous rendre au trocadero pour une belle vue de la tour ou au champ de Mars pour admirer l'illumination assis dans l’herbe"
+  reply: ~
+  photo_count: 8
+- id: Ci9DQUlRQUNvZENodHljRjlvT2s5UmVXdHdkMGQyZGtONVNISlRPRzQ0U0ZwcVNGRRAB
+  author: Nicolas Huguet
+  author_url: "https://www.google.com/maps/contrib/109437863301288287982/reviews"
+  rating: 5
+  date_raw: il y a un mois
+  text: "Visite absolument incontournable ! Monument exceptionnel et accessible. La vue au dernier étage est fantastique. Un conseil : regardez où vous déambuler car se cogner contre sa structure métallique est tout à fait possible en cheminant. J'en ai été quitte d'une belle bosse."
+  reply: ~
+  photo_count: 9
+- id: Ci9DQUlRQUNvZENodHljRjlvT25BeVRrVk9VMFpzWlZCamRTMXJNMEZLZVVKUlduYxAB
+  author: reg raguin
+  author_url: "https://www.google.com/maps/contrib/104808327632125814043/reviews"
+  rating: 5
+  date_raw: il y a 5 mois
+  text: "Super moment. J'y ai emmené mes petites filles de 8 et 4 ans et elles ont adoré. Nous avons pris l'ascenseur pour monter jusqu'au 2ième étage, nous avons profité des différentes vues de Paris puis nous sommes redescendues jusqu'au 1er afin de prendre un goûter. Le chocolat viennois est très bon et les bretzels sont pas non plus. Nous avons passé un très bon moment. Très bonne organisation."
+  reply: ~
+  photo_count: 21
+- id: Ci9DQUlRQUNvZENodHljRjlvT2psYVFYVm9RVW96VUY5R2NVSlBSSFZmZFdGS1MwRRAB
+  author: Sandrine Bole
+  author_url: "https://www.google.com/maps/contrib/112093436857752803182/reviews"
+  rating: 5
+  date_raw: il y a 2 mois
+  text: "C'est merveilleux, gigantesque et fantastique 🥰🤗 soit vous visitez en montant par l'escalier c'est gratuit... Nous avons payé car nous avons pris l'ascenseur, donc le premier étage 15 €le deuxième étage 24 €et le troisième 36 €... Honnêtement c'est vraiment avoir car on voit vraiment tout Paris🗼🎥💞"
+  reply: ~
+  photo_count: 5
+- id: Ci9DQUlRQUNvZENodHljRjlvT2xaalVYZ3hNazFET1hsaGJWVTFVME5VZGpBeE5HYxAB
+  author: Jc Battut
+  author_url: "https://www.google.com/maps/contrib/115023102613883312974/reviews"
+  rating: 5
+  date_raw: il y a 5 mois
+  text: "La Tour Eiffel est bien plus qu’un emblème de Paris : c’est une construction mythique qui fascine à chaque regard. Pour les amoureux de charpente métallique, c’est un véritable chef-d’œuvre ; on ne sait littéralement plus où poser les yeux tant chaque détail de structure impressionne. Entre élégance, prouesse technique et puissance visuelle, le lieu dégage une émotion unique. Une visite incontournable, aussi belle pour les passionnés d’architecture que pour les simples admirateurs de Paris."
+  reply: ~
+  photo_count: 35
