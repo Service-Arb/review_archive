@@ -166,7 +166,9 @@ fn coverage(reviews: &[Observed], end: WalkEnd, sorted: bool, total: Option<u64>
 mod tests {
 	use super::*;
 
-	fn card(id: &str, date: &str) -> (Card, Option<crate::domain::Capture>) {
+	type WalkedCard = (Card, Option<crate::domain::Capture>);
+
+	fn card(id: &str, date: &str) -> WalkedCard {
 		(
 			Card {
 				id: id.into(),
@@ -179,7 +181,7 @@ mod tests {
 		)
 	}
 
-	fn walked(cards: Vec<(Card, Option<crate::domain::Capture>)>, end: WalkEnd, sorted: bool, total: Option<u64>) -> Walked {
+	fn walked(cards: Vec<WalkedCard>, end: WalkEnd, sorted: bool, total: Option<u64>) -> Walked {
 		Walked {
 			cards,
 			end,
@@ -194,7 +196,7 @@ mod tests {
 		"2026-09-26T12:00:00Z".parse().unwrap()
 	}
 
-	fn newest_first() -> Vec<(Card, Option<crate::domain::Capture>)> {
+	fn newest_first() -> Vec<WalkedCard> {
 		vec![card("a", "a day ago"), card("b", "a week ago"), card("c", "2 months ago")]
 	}
 

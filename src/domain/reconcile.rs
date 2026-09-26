@@ -97,7 +97,9 @@ mod tests {
 	}
 
 	/// `(source id, id, text, gone, (published_raw, published_est))`
-	fn known(entries: &[(&str, i64, &str, bool, Option<(&str, &str)>)]) -> Known {
+	type Entry<'a> = (&'a str, i64, &'a str, bool, Option<(&'a str, &'a str)>);
+
+	fn known(entries: &[Entry<'_>]) -> Known {
 		Known {
 			reviews: entries
 				.iter()
