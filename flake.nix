@@ -11,8 +11,10 @@
   outputs = { self, v_flakes }:
     let
       inherit (v_flakes) flake-utils pre-commit-hooks;
-      manifest = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package;
-      pname = manifest.name;
+      manifest = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package;
+      # The binary (crates/review_archive_server, `[[bin]] name`), the image and the
+      # release all go by this name; the workspace root has no package of its own.
+      pname = "review_archive";
     in
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -36,7 +38,10 @@
         pre-commit-check = pre-commit-hooks.lib.${system}.run (v_flakes.files.preCommit { inherit pkgs; stripClaudeSignature = true; });
         rs = v_flakes.rs {
           inherit pkgs rust;
-          build.workspace."./" = [ "git_version" "log_directives" ];
+          build.workspace = {
+            "./crates/review_archive" = [ "git_version" ];
+            "./crates/review_archive_server" = [ "git_version" "log_directives" ];
+          };
         };
         github = v_flakes.github {
           inherit pkgs pname rs;
@@ -73,6 +78,7 @@
           version = manifest.version;
           src = pureSrc;
           cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "review_archive_server" ];
           nativeBuildInputs = with pkgs; [ pkg-config ];
           # the parser tests are `cargo test`'s job in the devShell and CI; the
           # live one needs a browser and the network, which the sandbox has neither of

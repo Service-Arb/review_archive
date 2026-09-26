@@ -1,0 +1,35 @@
+[package]
+name = "review_archive_server"
+description = "The review_archive service: CLI, scheduler and HTTP API over the review_archive library"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+# The binary keeps the name the image, the flake and the docs know it by.
+[[bin]]
+name = "review_archive"
+path = "src/main.rs"
+
+[dependencies]
+review_archive = { workspace = true, features = ["maps", "gbp", "store"] }
+review_archive_core.workspace = true
+
+axum.workspace = true
+clap.workspace = true
+color-eyre.workspace = true
+eyre.workspace = true
+jiff.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
