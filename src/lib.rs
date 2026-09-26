@@ -1,1 +1,1 @@
-//! Archive of public place reviews.
+pub mod domain;
