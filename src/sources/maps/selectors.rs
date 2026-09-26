@@ -58,6 +58,14 @@ pub const REVIEWS_TAB: &[&str] = &[
 	r#"button[jsaction*="reviewChart.moreReviews"]"#,
 ];
 
+/// The place's name heading: present once the place panel has rendered.
+pub const PLACE_TITLE: &[&str] = &["h1.DUwDvf", r#"[role="main"] h1"#];
+/// The star average under the name ("4.6 stars"). A place without reviews has none.
+pub const RATING_SUMMARY: &[&str] = &[r#".F7nice [role="img"][aria-label]"#];
+/// The per-star rows of the review list's histogram, labelled "5 stars, 4,377 reviews" /
+/// "5 étoiles, 396 164 avis". Their sum is how many reviews the list holds.
+pub const HISTOGRAM_ROW: &str = r#"table tr[role="img"][aria-label]"#;
+
 /// The sort menu button of the review list.
 pub const SORT_BUTTON: &[&str] = &[
 	r#"button[data-value="Sort"]"#,
@@ -121,6 +129,9 @@ pub mod js {
 
 	/// `(selectors) => bool`: whether any selector matches.
 	pub const ANY: &str = r#"(sels) => sels.some(s => document.querySelector(s))"#;
+
+	/// `(sel) => [label]`: the `aria-label` of every element matching `sel`, in order.
+	pub const LABELS: &str = r#"(sel) => Array.from(document.querySelectorAll(sel), el => el.getAttribute("aria-label") || "")"#;
 
 	/// `(cardSel, idAttr) => id`: the id of the first card, "" without one (CDP returns no value for null).
 	pub const FIRST_CARD_ID: &str = r#"(cardSel, idAttr) => {

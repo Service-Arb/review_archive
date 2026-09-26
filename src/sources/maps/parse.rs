@@ -87,6 +87,24 @@ fn card(el: ElementRef<'_>) -> Option<Card> {
 	})
 }
 
+/// How many reviews the list holds, from the `aria-label`s of its histogram rows
+/// ([`sel::HISTOGRAM_ROW`]): one row per star, each "<stars> <word>, <count> <word>".
+/// `None` unless there are exactly five rows and every one reads.
+pub fn review_total(row_labels: &[String]) -> Option<u64> {
+	if row_labels.len() != 5 {
+		return None;
+	}
+	row_labels
+		.iter()
+		.map(|l| {
+			// the count follows the first comma and may be grouped with ",", ".", " " or a nbsp
+			let (_, count) = l.split_once(',')?;
+			let digits: String = count.chars().filter(char::is_ascii_digit).collect();
+			digits.parse::<u64>().ok()
+		})
+		.sum()
+}
+
 fn selector(s: &str) -> Selector {
 	// Selectors are compile-time constants in `selectors.rs`; the parser tests parse every one.
 	Selector::parse(s).unwrap_or_else(|e| panic!("bad selector {s:?} in selectors.rs: {e}"))
@@ -157,7 +175,7 @@ mod tests {
 			sel::PHOTO_MORE,
 			sel::PHOTO_MORE_COUNT,
 		];
-		for s in lists.iter().flat_map(|l| l.iter()).chain([&sel::CARD, &sel::js::MARKED_CARD]) {
+		for s in lists.iter().flat_map(|l| l.iter()).chain([&sel::CARD, &sel::js::MARKED_CARD, &sel::HISTOGRAM_ROW]) {
 			// `:has()` is for the browser; scraper does not implement it
 			if !s.contains(":has(") {
 				selector(s);
@@ -173,6 +191,32 @@ mod tests {
 		assert_eq!(leading_rating("4/5"), Some(4));
 		assert_eq!(leading_rating("12 photos"), None);
 		assert_eq!(leading_rating("stars"), None);
+	}
+
+	#[test]
+	fn totals_from_histogram_labels() {
+		let en: Vec<String> = [
+			"5 stars, 4,377 reviews",
+			"4 stars, 1,892 reviews",
+			"3 stars, 976 reviews",
+			"2 stars, 443 reviews",
+			"1 stars, 12 reviews",
+		]
+		.map(String::from)
+		.into();
+		assert_eq!(review_total(&en), Some(4377 + 1892 + 976 + 443 + 12));
+		let fr: Vec<String> = [
+			"5\u{a0}étoiles, 396 164\u{a0}avis",
+			"4\u{a0}étoiles, 63 370\u{a0}avis",
+			"3\u{a0}étoiles, 0\u{a0}avis",
+			"2\u{a0}étoiles, 1\u{a0}avis",
+			"1\u{a0}étoile, 9 880\u{a0}avis",
+		]
+		.map(String::from)
+		.into();
+		assert_eq!(review_total(&fr), Some(396_164 + 63_370 + 1 + 9_880));
+		assert_eq!(review_total(&en[..4]), None, "a row short is not a total");
+		assert_eq!(review_total(&["5 stars"; 5].map(String::from)), None);
 	}
 
 	#[test]

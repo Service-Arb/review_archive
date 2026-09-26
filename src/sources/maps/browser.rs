@@ -38,7 +38,8 @@ pub trait WalkPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum WalkEnd {
-	/// Scrolling stopped producing cards: the whole list was seen.
+	/// Scrolling stopped producing cards, or there was nothing to scroll. Most likely the
+	/// whole list — but a lazy load that stalls looks the same, so it proves nothing alone.
 	ReachedEnd,
 	/// The policy had what it needed.
 	Satisfied,
@@ -52,6 +53,18 @@ pub struct Walked {
 	pub end: WalkEnd,
 	pub page_url: String,
 	pub warnings: Vec<String>,
+	/// Whether the list was seen to re-sort to newest first. When not, its order is unknown.
+	pub sorted: bool,
+	/// How many reviews the page says the list holds, when it says.
+	pub total: Option<u64>,
+}
+
+/// The review list, open and ready to walk.
+#[derive(Debug)]
+pub struct Opened {
+	pub page_url: String,
+	pub sorted: bool,
+	pub total: Option<u64>,
 }
 
 pub struct Session {
@@ -119,8 +132,9 @@ impl Session {
 		self.handler.abort();
 	}
 
-	/// Opens the place and its review list sorted newest first. Returns the page URL.
-	pub async fn open_reviews(&self, place_id: &str, lang: &str) -> eyre::Result<String> {
+	/// Opens the place and its review list sorted newest first. `None`: the place has no
+	/// reviews at all, so there is no list.
+	pub async fn open_reviews(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
 		let res = self.open_reviews_inner(place_id, lang).await;
 		if res.is_err()
 			&& let Some(dir) = &self.dump_html
@@ -147,7 +161,7 @@ impl Session {
 		}
 	}
 
-	async fn open_reviews_inner(&self, place_id: &str, lang: &str) -> eyre::Result<String> {
+	async fn open_reviews_inner(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
 		let url = sel::place_url(place_id, lang);
 		self.page.goto(url.as_str()).await.wrap_err_with(|| format!("loading {url}"))?;
 		self.handle_interstitials().await?;
@@ -159,10 +173,22 @@ impl Session {
 				!limited,
 				"Google served its \"limited view\" of Maps, which has no reviews: this browser session is not trusted with the full page"
 			);
-			return Err(e.wrap_err("no reviews tab on the place page (no reviews yet, or the markup changed)"));
+			// The place rendered, and has no star average: nobody has reviewed it yet.
+			if self.eval::<bool>(js::ANY, (sel::PLACE_TITLE,)).await? && !self.eval::<bool>(js::ANY, (sel::RATING_SUMMARY,)).await? {
+				tracing::info!(place_id, "the place has no reviews");
+				return Ok(None);
+			}
+			return Err(e.wrap_err("no reviews tab on the place page (the markup changed?)"));
 		}
 		eyre::ensure!(self.click_first(sel::REVIEWS_TAB).await?, "could not click the reviews tab");
-		self.wait_for_any(&[sel::CARD]).await.wrap_err("the review list did not appear")?;
+		if let Err(e) = self.wait_for_any(&[sel::CARD]).await {
+			if self.review_total().await? == Some(0) {
+				tracing::info!(place_id, "the review list is empty");
+				return Ok(None);
+			}
+			return Err(e.wrap_err("the review list did not appear"));
+		}
+		let total = self.review_total().await?;
 
 		self.wait_for_any(sel::SORT_BUTTON).await.wrap_err("no sort button on the review list")?;
 		self.dismiss_promo().await?;
@@ -182,26 +208,38 @@ impl Session {
 		// The relevance-sorted cards stay in the DOM until the new list arrives; reading them
 		// would archive the wrong end of the list. Wait for the first card to change.
 		let deadline = tokio::time::Instant::now() + SORT_TIMEOUT;
-		loop {
+		let sorted = loop {
 			tokio::time::sleep(Duration::from_millis(300)).await;
 			let now: String = self.eval(js::FIRST_CARD_ID, (sel::CARD, sel::CARD_ID_ATTR)).await?;
 			if !now.is_empty() && now != before {
-				break;
+				break true;
 			}
 			if tokio::time::Instant::now() >= deadline {
-				// the newest review can also be the most relevant one
-				tracing::info!("first card unchanged after sorting by newest; taking the list as sorted");
-				break;
+				// The newest review can also be the most relevant one — or the click was
+				// swallowed. The walk goes on, but its order is not relied on.
+				tracing::info!("first card unchanged after sorting by newest; the list's order is unconfirmed");
+				break false;
 			}
-		}
+		};
 		tokio::time::sleep(STEP_WAIT).await;
 		self.wait_for_any(&[sel::CARD]).await.wrap_err("the review list did not come back after sorting")?;
 
-		Ok(self.page.url().await?.unwrap_or(url))
+		Ok(Some(Opened {
+			page_url: self.page.url().await?.unwrap_or(url),
+			sorted,
+			total,
+		}))
+	}
+
+	/// The review count the list's histogram adds up to.
+	async fn review_total(&self) -> eyre::Result<Option<u64>> {
+		let labels: Vec<String> = self.eval(js::LABELS, (sel::HISTOGRAM_ROW,)).await?;
+		Ok(parse::review_total(&labels))
 	}
 
 	/// Walks the open review list, capturing the cards the policy asks for.
-	pub async fn walk(&self, policy: &(dyn WalkPolicy + Sync), max: usize, page_url: &str) -> eyre::Result<Walked> {
+	pub async fn walk(&self, policy: &(dyn WalkPolicy + Sync), max: usize, opened: Opened) -> eyre::Result<Walked> {
+		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<Card> = Vec::new();
 		let mut captures = Vec::new();
@@ -253,15 +291,19 @@ impl Session {
 				break WalkEnd::ReachedEnd;
 			}
 			self.check_not_blocked().await?;
-			let scrolled: bool = self.eval(js::SCROLL_FEED, (sel::CARD,)).await?;
-			eyre::ensure!(scrolled, "found no scrollable review feed");
+			// A list short enough to fit the panel has nothing to scroll and nothing more to load.
+			if !self.eval::<bool>(js::SCROLL_FEED, (sel::CARD,)).await? {
+				break WalkEnd::ReachedEnd;
+			}
 			tokio::time::sleep(STEP_WAIT).await;
 		};
 		Ok(Walked {
 			cards: cards.into_iter().zip(captures).collect(),
 			end,
-			page_url: page_url.to_owned(),
+			page_url: opened.page_url,
 			warnings,
+			sorted: opened.sorted,
+			total: opened.total,
 		})
 	}
 
