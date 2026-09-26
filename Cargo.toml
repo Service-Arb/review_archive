@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/review_archive_core", "crates/review_archive", "crates/review_archive_server"]
+members = ["crates/review_archive_core", "crates/review_archive", "crates/review_archive_server", "crates/review_archive_client"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 review_archive = { path = "crates/review_archive", version = "0.1.0", default-features = false }
+review_archive_client = { path = "crates/review_archive_client", version = "0.1.0" }
 review_archive_core = { path = "crates/review_archive_core", version = "0.1.0" }
 review_archive_server = { path = "crates/review_archive_server", version = "0.1.0" }
 

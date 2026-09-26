@@ -1,0 +1,30 @@
+[package]
+name = "review_archive_client"
+description = "Typed async client for a running review_archive's HTTP API"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+review_archive_core.workspace = true
+
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+review_archive = { workspace = true, features = ["maps", "gbp", "store"] }
+review_archive_server.workspace = true
+axum.workspace = true
+eyre.workspace = true
+jiff.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+zip.workspace = true
+
+[lints]
+workspace = true
