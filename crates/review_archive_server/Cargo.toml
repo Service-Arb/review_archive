@@ -23,9 +23,9 @@ review_archive_core = { workspace = true, features = ["openapi"] }
 axum.workspace = true
 clap.workspace = true
 color-eyre.workspace = true
-futures.workspace = true
 ev_lib.workspace = true
 eyre.workspace = true
+futures.workspace = true
 jiff.workspace = true
 rand.workspace = true
 serde.workspace = true

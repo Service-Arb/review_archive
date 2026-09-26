@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/review_archive_core", "crates/review_archive", "crates/review_archive_server", "crates/review_archive_client"]
+members = [
+    "crates/review_archive",
+    "crates/review_archive_client",
+    "crates/review_archive_core",
+    "crates/review_archive_server",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +17,6 @@ readme = "README.md"
 
 [workspace.dependencies]
 review_archive = { path = "crates/review_archive", version = "0.1.0", default-features = false }
-review_archive_client = { path = "crates/review_archive_client", version = "0.1.0" }
 review_archive_core = { path = "crates/review_archive_core", version = "0.1.0" }
 review_archive_server = { path = "crates/review_archive_server", version = "0.1.0" }
 
@@ -27,7 +31,6 @@ eyre = "0.6"
 futures = "0.3"
 jiff = { version = "0.2", features = ["serde"] }
 rand = "0.10"
-regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
