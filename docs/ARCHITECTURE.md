@@ -30,9 +30,18 @@ src/export.rs        manifest.json + PNGs, as a directory or a .zip
   row per distinct content, the first sighting included. `gone_at` is set and cleared, never a
   deletion.
 - **`gone` is only concluded where the scan looked.** `gbp` lists everything, so absent means
-  gone. A `maps` walk is newest first and stops early; it only judges reviews strictly newer
-  than the oldest one it saw, because relative dates are coarse. A walk that reached the end of
-  the list judges everything.
+  gone — unless the API returned fewer reviews than its own `totalReviewCount`. A `maps` walk is
+  newest first and stops early; it only judges reviews whose *earliest* possible date (the
+  estimate less one unit of its phrase: "a month ago" spans a month) is no earlier than the
+  latest possible date of the last card it read. That needs the list to have visibly re-sorted
+  to newest and its dates to run newest first; otherwise the run judges nothing. A walk judges
+  everything only when it read as many cards as the list's histogram counts — an idle feed
+  alone may be a stalled lazy load. A "complete" scan that lists nothing, against an archive
+  with live reviews, is taken as a broken response: nothing is marked gone, the run is
+  `partial`.
+- **One process per browser profile.** A lock file in the profile says so; holding it means
+  any Chromium `Singleton*` files there are stale (a crash, a pod with a new hostname) and are
+  removed. A second `scan` while `serve` holds the profile fails with that reason.
 - **Markup knowledge lives in `selectors.rs`.** A Maps change is fixed there, against fixtures
   refreshed with `scan --dump-html`, and checked by `cargo insta review`.
 - **The domain has no I/O.** Time comes in as an argument or through `archive::Clock`; jitter is
