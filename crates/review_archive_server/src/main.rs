@@ -18,7 +18,7 @@ use tokio::sync::watch;
 use crate::{config::Config, settings::Settings};
 
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about)]
+#[command(name = "review_archive", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics")]
 struct Cli {
 	/// TOML config: data dir, bind address, browser, defaults. Secrets come from the environment only.
 	#[arg(long, global = true)]
