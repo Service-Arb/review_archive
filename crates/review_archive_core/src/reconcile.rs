@@ -21,12 +21,19 @@ pub struct Plan<'a> {
 	pub gone: Vec<ReviewId>,
 	/// Why the scan was not trusted as far as its coverage claimed. Makes the run `partial`.
 	pub warnings: Vec<String>,
+	/// Each listed review's first position in the scan.
+	order: std::collections::HashMap<&'a str, usize>,
 }
 
 impl Plan<'_> {
 	/// Distinct reviews the scan listed.
 	pub fn seen(&self) -> usize {
 		self.new.len() + self.changed.len() + self.unchanged.len()
+	}
+
+	/// Where the scan listed a review, first sighting; after everything for one it did not.
+	pub fn position(&self, source_review_id: &str) -> usize {
+		self.order.get(source_review_id).copied().unwrap_or(usize::MAX)
 	}
 }
 
@@ -40,6 +47,7 @@ pub fn plan<'a>(known: &Known, scan: &'a Scan) -> Plan<'a> {
 		if !seen.insert(obs.source_review_id.as_str()) {
 			continue;
 		}
+		plan.order.insert(obs.source_review_id.as_str(), plan.order.len());
 		match known.reviews.get(&obs.source_review_id) {
 			None => plan.new.push(obs),
 			Some(k) => {

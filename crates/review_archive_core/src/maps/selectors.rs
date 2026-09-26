@@ -48,7 +48,7 @@ pub const CONSENT_REJECT: &[&str] = &[
 ];
 
 /// The control that opens the review list: the tab, else the review count under the rating.
-/// Tab labels are "<name> - Avis" / "Reviews for <name>", so they are matched anywhere.
+/// Tab labels are `"<name> - Avis"` / `"Reviews for <name>"`, so they are matched anywhere.
 pub const REVIEWS_TAB: &[&str] = &[
 	r#"button[role="tab"][aria-label*="review" i]"#,
 	r#"button[role="tab"][aria-label*="Avis" i]"#,

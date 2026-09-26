@@ -2,7 +2,7 @@
 
 What the service does and why is in [SPEC.md](SPEC.md). This is where things live.
 
-A cargo workspace of three crates; dependencies point inwards only.
+A cargo workspace of four crates; dependencies point inwards only.
 
 ```text
 crates/review_archive_core/     no I/O: no browser, database, network or clock
@@ -21,11 +21,18 @@ crates/review_archive/          the engine (features: maps, gbp, store)
   src/browser/                  the `Browser` handle; the CDP session: consent, sorting, the walk, screenshots
   src/sources/                  the `ReviewSource` port; the maps and gbp adapters
   src/store/                    SQLite (runtime sqlx queries, embedded migrations/), PNG blobs, export
+  src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
+  src/store/events.rs           webhook events into the outbox, in the scan's own transaction
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
+  src/webhooks.rs               delivering the outbox: HMAC-SHA256 signature, retries with backoff
   src/places.rs                 Places API search for URLs without an id
-crates/review_archive_server/   the `review_archive` binary: CLI, scheduler loop, HTTP; thin over `Archive`
+  src/rejected.rs               the caller's errors (not found / invalid), for 404 and 400
+crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
+  src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`)
+  src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
   src/config.rs                 the TOML config: data dir, bind, browser, defaults
+crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs
 ```
 
 ## Using the library
@@ -83,6 +90,17 @@ with its own platform implements `sources::ReviewSource` and records through
   refreshed with `scan --dump-html`, and checked by `cargo insta review`.
 - **The core has no I/O.** Time comes in as an argument or through `record::Clock`; jitter is
   derived from the target and its last run, so asking twice gives one answer.
+- **One browser, one queue.** A single worker uses the browser: queued jobs first
+  (`POST /targets/{id}/scan`, `POST /captures`), oldest first, then the most overdue target,
+  with a 5–15 s pause between any two. Jobs live in SQLite; a restart keeps the queued ones
+  and fails the one that was running. An ad-hoc capture is stored under the place's `maps`
+  target for its language, or a new disabled one: nothing captured is lost, nothing extra
+  gets scheduled.
+- **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
+  to `webhook_deliveries` in the same transaction as what they report, and delivered from
+  there: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`), retried with backoff
+  (30 s doubling, cap 6 h, 12 tries). Delivery is at least once; `X-Delivery-Id` lets a
+  receiver drop repeats.
 - **Secrets come from the environment only**, through `ev_lib::settings` in the server; the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except

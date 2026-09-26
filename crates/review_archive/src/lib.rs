@@ -41,13 +41,17 @@ pub mod places;
 pub mod png_meta;
 #[cfg(feature = "store")]
 pub mod record;
+mod rejected;
 pub mod sources;
 #[cfg(feature = "store")]
 pub mod store;
+#[cfg(feature = "store")]
+pub mod webhooks;
 
 #[cfg(feature = "store")]
 pub use archive::{AddTarget, Added};
 pub use archive::{Archive, CaptureRequest, Captured};
+pub use rejected::Rejected;
 pub use review_archive_core as core;
 
 /// What wrote a capture: this crate's version and commit, recorded with every PNG.

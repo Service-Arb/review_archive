@@ -2,23 +2,28 @@
 //! history, captures, runs. PNGs live beside it in [`blobs`].
 
 pub mod blobs;
+mod events;
 pub mod export;
+mod jobs;
+mod webhooks;
 
 use std::{collections::HashMap, path::Path, str::FromStr, time::Duration};
 
 use eyre::WrapErr;
 use jiff::{Timestamp, civil::Date};
+pub use jobs::{ClaimedJob, JobParams};
 use review_archive_core::{
 	GbpLocation, Known, KnownReview, Observed, ReviewId, Target, TargetId, TargetKind,
-	dto::{Counts, DayStats, ReviewDto, RunStatus},
+	dto::{CaptureDto, Counts, DayStats, Event, ReviewDetail, ReviewDto, RunDto, RunStatus, TargetPatch, VersionDto, capture_url},
 	fmt_ts,
 	reconcile::Plan,
-	schedule::LastRun,
+	schedule::{self, LastRun},
 };
 use sqlx::{
 	FromRow, SqliteConnection,
 	sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
+pub use webhooks::Delivery;
 
 fn parse_ts(s: &str) -> eyre::Result<Timestamp> {
 	s.parse().wrap_err_with(|| format!("stored timestamp {s:?}"))
@@ -105,10 +110,83 @@ impl From<ReviewRow> for ReviewDto {
 			last_seen: r.last_seen,
 			gone_at: r.gone_at,
 			capture_pending: r.capture_pending,
+			capture_url: r.capture_sha256.as_deref().map(capture_url),
 			capture_sha256: r.capture_sha256,
 			captured_at: r.captured_at,
 		}
 	}
+}
+
+/// Every column a [`ReviewDto`] needs, the first capture joined in; filter with `WHERE`.
+const REVIEW_SELECT: &str = "SELECT r.id, r.target_id, r.source_review_id, r.author, r.author_url, r.rating, r.text, r.reply, r.photo_count,
+        r.published_raw, r.published_est, r.first_seen, r.last_seen, r.gone_at, r.capture_pending,
+        c.sha256 AS capture_sha256, c.captured_at AS captured_at
+ FROM reviews r
+ LEFT JOIN captures c ON c.id = (SELECT MIN(id) FROM captures WHERE review_id = r.id)";
+
+#[derive(FromRow)]
+struct RunRow {
+	id: i64,
+	target_id: i64,
+	started_at: String,
+	finished_at: Option<String>,
+	status: Option<String>,
+	error: Option<String>,
+	n_seen: i64,
+	n_new: i64,
+	n_changed: i64,
+	n_gone: i64,
+}
+
+const RUN_COLUMNS: &str = "id, target_id, started_at, finished_at, status, error, n_seen, n_new, n_changed, n_gone";
+
+impl TryFrom<RunRow> for RunDto {
+	type Error = eyre::Report;
+
+	fn try_from(r: RunRow) -> eyre::Result<Self> {
+		let status = match r.status.as_deref() {
+			None => None,
+			Some("ok") => Some(RunStatus::Ok),
+			Some("partial") => Some(RunStatus::Partial),
+			Some("failed") => Some(RunStatus::Failed),
+			Some(other) => eyre::bail!("run {} has unknown status {other:?}", r.id),
+		};
+		let n = |v: i64| u32::try_from(v).unwrap_or(u32::MAX);
+		Ok(Self {
+			id: r.id,
+			target_id: r.target_id,
+			started_at: r.started_at,
+			finished_at: r.finished_at,
+			status,
+			error: r.error,
+			counts: Counts {
+				seen: n(r.n_seen),
+				new: n(r.n_new),
+				changed: n(r.n_changed),
+				gone: n(r.n_gone),
+			},
+		})
+	}
+}
+
+/// What [`Store::apply`] wrote.
+#[derive(Clone, Debug, Default)]
+pub struct Applied {
+	/// The counts of the run.
+	pub counts: Counts,
+	/// Every review the scan listed, in its order.
+	pub seen: Vec<ReviewId>,
+}
+
+/// Archived totals of a target.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TargetCounts {
+	/// Reviews archived.
+	pub reviews: i64,
+	/// Of which gone now.
+	pub gone: i64,
+	/// Screenshots.
+	pub captures: i64,
 }
 
 #[derive(FromRow)]
@@ -222,7 +300,7 @@ impl Store {
 			.fetch_optional(&self.pool)
 			.await
 			.wrap_err_with(|| format!("loading target {id}"))?;
-		row.ok_or_else(|| eyre::eyre!("no target {id}"))?.try_into()
+		row.ok_or_else(|| crate::rejected::not_found(format!("no target {id}")))?.try_into()
 	}
 
 	/// Enables or disables a target. Its archive stays either way.
@@ -233,7 +311,9 @@ impl Store {
 			.execute(&self.pool)
 			.await
 			.wrap_err_with(|| format!("updating target {id}"))?;
-		eyre::ensure!(done.rows_affected() == 1, "no target {id}");
+		if done.rows_affected() != 1 {
+			return Err(crate::rejected::not_found(format!("no target {id}")));
+		}
 		Ok(())
 	}
 
@@ -280,6 +360,7 @@ impl Store {
 
 	/// Records how a run ended.
 	pub async fn finish_run(&self, run: RunId, now: Timestamp, status: RunStatus, error: Option<&str>, counts: Counts) -> eyre::Result<()> {
+		let mut tx = self.pool.begin().await?;
 		sqlx::query("UPDATE runs SET finished_at = ?, status = ?, error = ?, n_seen = ?, n_new = ?, n_changed = ?, n_gone = ? WHERE id = ?")
 			.bind(fmt_ts(now))
 			.bind(status.as_str())
@@ -289,9 +370,14 @@ impl Store {
 			.bind(counts.changed)
 			.bind(counts.gone)
 			.bind(run.0)
-			.execute(&self.pool)
+			.execute(&mut *tx)
 			.await
 			.wrap_err("recording run end")?;
+		if status == RunStatus::Failed {
+			let mut emitter = events::Emitter::load(&mut tx, now).await?;
+			emitter.run_failed(&mut tx, run).await?;
+		}
+		tx.commit().await.wrap_err("committing run end")?;
 		Ok(())
 	}
 
@@ -313,9 +399,13 @@ impl Store {
 	}
 
 	/// Applies a reconciled scan in one transaction. `captures` is keyed by `source_review_id`.
-	pub async fn apply(&self, target: TargetId, plan: &Plan<'_>, captures: &HashMap<String, StoredCapture>, scanner_version: &str, now: Timestamp) -> eyre::Result<Counts> {
+	///
+	/// Webhook events for what changed go into the outbox in the same transaction.
+	pub async fn apply(&self, target: TargetId, plan: &Plan<'_>, captures: &HashMap<String, StoredCapture>, scanner_version: &str, now: Timestamp) -> eyre::Result<Applied> {
 		let now_s = fmt_ts(now);
 		let mut tx = self.pool.begin().await?;
+		let mut emitter = events::Emitter::load(&mut tx, now).await?;
+		let mut seen: HashMap<&str, ReviewId> = HashMap::with_capacity(plan.seen());
 
 		for obs in &plan.new {
 			let hash = obs.content_hash();
@@ -342,6 +432,8 @@ impl Store {
 			.wrap_err_with(|| format!("inserting review {}", obs.source_review_id))?;
 			insert_version(&mut tx, ReviewId(id), &now_s, &hash, obs).await?;
 			record_capture(&mut tx, ReviewId(id), captures.get(&obs.source_review_id), scanner_version).await?;
+			seen.insert(&obs.source_review_id, ReviewId(id));
+			emitter.review(&mut tx, Event::ReviewNew, ReviewId(id)).await?;
 		}
 
 		for (id, obs) in &plan.changed {
@@ -368,6 +460,8 @@ impl Store {
 			.wrap_err("updating changed review")?;
 			insert_version(&mut tx, *id, &now_s, &hash, obs).await?;
 			record_capture(&mut tx, *id, captures.get(&obs.source_review_id), scanner_version).await?;
+			seen.insert(&obs.source_review_id, *id);
+			emitter.review(&mut tx, Event::ReviewChanged, *id).await?;
 		}
 
 		for (id, obs) in &plan.unchanged {
@@ -387,6 +481,11 @@ impl Store {
 			.await
 			.wrap_err("touching seen review")?;
 			record_capture(&mut tx, *id, captures.get(&obs.source_review_id), scanner_version).await?;
+			seen.insert(&obs.source_review_id, *id);
+		}
+
+		for id in &plan.reappeared {
+			emitter.review(&mut tx, Event::ReviewReappeared, *id).await?;
 		}
 
 		for id in &plan.gone {
@@ -396,30 +495,39 @@ impl Store {
 				.execute(&mut *tx)
 				.await
 				.wrap_err("marking review gone")?;
+			emitter.review(&mut tx, Event::ReviewGone, *id).await?;
 		}
 
 		tx.commit().await.wrap_err("committing scan")?;
-		Ok(Counts {
-			seen: u32::try_from(plan.seen()).unwrap_or(u32::MAX),
-			new: u32::try_from(plan.new.len()).unwrap_or(u32::MAX),
-			changed: u32::try_from(plan.changed.len()).unwrap_or(u32::MAX),
-			gone: u32::try_from(plan.gone.len()).unwrap_or(u32::MAX),
+		// the scan's order: newest first where the source has one
+		let mut order = Vec::with_capacity(seen.len());
+		let mut listed = std::collections::HashSet::new();
+		for obs in plan.new.iter().copied().chain(plan.changed.iter().map(|(_, o)| *o)).chain(plan.unchanged.iter().map(|(_, o)| *o)) {
+			if listed.insert(obs.source_review_id.as_str()) {
+				order.push(obs);
+			}
+		}
+		order.sort_by_key(|o| plan.position(&o.source_review_id));
+		Ok(Applied {
+			counts: Counts {
+				seen: u32::try_from(plan.seen()).unwrap_or(u32::MAX),
+				new: u32::try_from(plan.new.len()).unwrap_or(u32::MAX),
+				changed: u32::try_from(plan.changed.len()).unwrap_or(u32::MAX),
+				gone: u32::try_from(plan.gone.len()).unwrap_or(u32::MAX),
+			},
+			seen: order.iter().filter_map(|o| seen.get(o.source_review_id.as_str()).copied()).collect(),
 		})
 	}
 
 	/// Reviews of a target, newest sighting first. `since` filters on `first_seen`.
 	pub async fn reviews(&self, target: TargetId, since: Option<Timestamp>, gone: Option<bool>) -> eyre::Result<Vec<ReviewDto>> {
-		let rows: Vec<ReviewRow> = sqlx::query_as(
-			"SELECT r.id, r.target_id, r.source_review_id, r.author, r.author_url, r.rating, r.text, r.reply, r.photo_count,
-			        r.published_raw, r.published_est, r.first_seen, r.last_seen, r.gone_at, r.capture_pending,
-			        c.sha256 AS capture_sha256, c.captured_at AS captured_at
-			 FROM reviews r
-			 LEFT JOIN captures c ON c.id = (SELECT MIN(id) FROM captures WHERE review_id = r.id)
+		let rows: Vec<ReviewRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+			"{REVIEW_SELECT}
 			 WHERE r.target_id = ?1
 			   AND (?2 IS NULL OR r.first_seen >= ?2)
 			   AND (?3 IS NULL OR (r.gone_at IS NOT NULL) = ?3)
-			 ORDER BY r.first_seen DESC, r.id DESC",
-		)
+			 ORDER BY r.first_seen DESC, r.id DESC"
+		)))
 		.bind(target.0)
 		.bind(since.map(fmt_ts))
 		.bind(gone)
@@ -427,6 +535,132 @@ impl Store {
 		.await
 		.wrap_err("listing reviews")?;
 		Ok(rows.into_iter().map(ReviewDto::from).collect())
+	}
+
+	/// These reviews, in the order given; ids that do not exist are left out.
+	pub async fn reviews_by_id(&self, ids: &[ReviewId]) -> eyre::Result<Vec<ReviewDto>> {
+		let mut out = Vec::with_capacity(ids.len());
+		for id in ids {
+			if let Some(r) = review_by_id(&self.pool, *id).await? {
+				out.push(r);
+			}
+		}
+		Ok(out)
+	}
+
+	/// A review with every version and capture; `None` when there is none.
+	pub async fn review(&self, id: ReviewId) -> eyre::Result<Option<ReviewDetail>> {
+		let Some(review) = review_by_id(&self.pool, id).await? else {
+			return Ok(None);
+		};
+		let versions = self
+			.versions(id)
+			.await?
+			.into_iter()
+			.map(|(seen_at, content_hash, rating, text, reply)| VersionDto {
+				seen_at,
+				content_hash,
+				rating,
+				text,
+				reply,
+			})
+			.collect();
+		let captures: Vec<(String, String, i64, i64, String, String)> =
+			sqlx::query_as("SELECT sha256, captured_at, width, height, page_url, scanner_version FROM captures WHERE review_id = ? ORDER BY id")
+				.bind(id.0)
+				.fetch_all(&self.pool)
+				.await
+				.wrap_err("loading captures")?;
+		Ok(Some(ReviewDetail {
+			review,
+			versions,
+			captures: captures
+				.into_iter()
+				.map(|(sha256, captured_at, width, height, page_url, scanner_version)| CaptureDto {
+					url: capture_url(&sha256),
+					sha256,
+					captured_at,
+					width,
+					height,
+					page_url,
+					scanner_version,
+				})
+				.collect(),
+		}))
+	}
+
+	/// Changes what the patch sets; interval at least an hour.
+	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<()> {
+		let interval = patch
+			.interval
+			.as_deref()
+			.map(review_archive_core::parse_interval)
+			.transpose()
+			.map_err(|e| crate::rejected::invalid(format!("{e:#}")))?;
+		if interval.is_some_and(|i| i < schedule::MIN_INTERVAL) {
+			return Err(crate::rejected::invalid("the interval must be at least 1h"));
+		}
+		let interval_secs = interval.map(|i| i64::try_from(i.as_secs())).transpose().wrap_err("interval too large")?;
+		let done = sqlx::query(
+			"UPDATE targets SET label = COALESCE(?, label), lang = COALESCE(?, lang), interval_secs = COALESCE(?, interval_secs),
+			                    enabled = COALESCE(?, enabled)
+			 WHERE id = ?",
+		)
+		.bind(patch.label.as_deref())
+		.bind(patch.lang.as_deref())
+		.bind(interval_secs)
+		.bind(patch.enabled)
+		.bind(id.0)
+		.execute(&self.pool)
+		.await
+		.wrap_err_with(|| format!("updating target {id}"))?;
+		if done.rows_affected() != 1 {
+			return Err(crate::rejected::not_found(format!("no target {id}")));
+		}
+		Ok(())
+	}
+
+	/// A `maps` target on this place and language, if any: where ad-hoc captures go.
+	pub async fn find_target(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Target>> {
+		let row: Option<TargetRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+			"SELECT {TARGET_COLUMNS} FROM targets WHERE kind = 'maps' AND place_id = ? AND lang = ? ORDER BY id LIMIT 1"
+		)))
+		.bind(place_id)
+		.bind(lang)
+		.fetch_optional(&self.pool)
+		.await
+		.wrap_err("looking up a target by place")?;
+		row.map(Target::try_from).transpose()
+	}
+
+	/// How much is archived for a target.
+	pub async fn target_counts(&self, id: TargetId) -> eyre::Result<TargetCounts> {
+		let (reviews, gone, captures): (i64, i64, i64) = sqlx::query_as(
+			"SELECT (SELECT COUNT(*) FROM reviews WHERE target_id = ?1),
+			        (SELECT COUNT(*) FROM reviews WHERE target_id = ?1 AND gone_at IS NOT NULL),
+			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = ?1)",
+		)
+		.bind(id.0)
+		.fetch_one(&self.pool)
+		.await
+		.wrap_err("counting a target's archive")?;
+		Ok(TargetCounts { reviews, gone, captures })
+	}
+
+	/// A target's runs, newest first.
+	pub async fn runs(&self, target: TargetId, limit: u32) -> eyre::Result<Vec<RunDto>> {
+		let rows: Vec<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {RUN_COLUMNS} FROM runs WHERE target_id = ? ORDER BY id DESC LIMIT ?")))
+			.bind(target.0)
+			.bind(limit)
+			.fetch_all(&self.pool)
+			.await
+			.wrap_err("listing runs")?;
+		rows.into_iter().map(RunDto::try_from).collect()
+	}
+
+	/// One run.
+	pub async fn run(&self, id: RunId) -> eyre::Result<Option<RunDto>> {
+		run_by_id(&self.pool, id).await
 	}
 
 	/// Whether a capture with this hash was recorded.
@@ -516,6 +750,24 @@ impl Store {
 			.await
 			.wrap_err("counting captures")
 	}
+}
+
+async fn review_by_id<'e, E: sqlx::SqliteExecutor<'e>>(db: E, id: ReviewId) -> eyre::Result<Option<ReviewDto>> {
+	let row: Option<ReviewRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{REVIEW_SELECT} WHERE r.id = ?")))
+		.bind(id.0)
+		.fetch_optional(db)
+		.await
+		.wrap_err_with(|| format!("loading review {id}"))?;
+	Ok(row.map(ReviewDto::from))
+}
+
+async fn run_by_id<'e, E: sqlx::SqliteExecutor<'e>>(db: E, id: RunId) -> eyre::Result<Option<RunDto>> {
+	let row: Option<RunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?")))
+		.bind(id.0)
+		.fetch_optional(db)
+		.await
+		.wrap_err_with(|| format!("loading run {}", id.0))?;
+	row.map(RunDto::try_from).transpose()
 }
 
 async fn insert_version(tx: &mut SqliteConnection, review: ReviewId, seen_at: &str, hash: &str, obs: &Observed) -> eyre::Result<()> {

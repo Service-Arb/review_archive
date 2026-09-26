@@ -96,7 +96,7 @@ fn card(el: ElementRef<'_>) -> Option<Card> {
 }
 
 /// How many reviews the list holds, from the `aria-label`s of its histogram rows
-/// ([`sel::HISTOGRAM_ROW`]): one row per star, each "<stars> <word>, <count> <word>".
+/// ([`sel::HISTOGRAM_ROW`]): one row per star, each `"<stars> <word>, <count> <word>"`.
 /// `None` unless there are exactly five rows and every one reads.
 pub fn review_total(row_labels: &[String]) -> Option<u64> {
 	if row_labels.len() != 5 {

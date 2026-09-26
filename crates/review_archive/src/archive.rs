@@ -11,9 +11,9 @@ use std::{path::Path, time::Duration};
 use jiff::Timestamp;
 #[cfg(feature = "store")]
 use review_archive_core::{
-	GbpLocation, Target, TargetId, TargetKind,
-	dto::{DayStats, ReviewDto, RunSummary},
-	schedule,
+	GbpLocation, ReviewId, Target, TargetId, TargetKind,
+	dto::{self, DayStats, JobDto, JobKind, NewWebhook, ReviewDetail, ReviewDto, RunDto, TargetDetail, TargetPatch, WebhookDto},
+	fmt_ts, schedule,
 };
 
 #[cfg(feature = "maps")]
@@ -24,10 +24,10 @@ use crate::config::{Config, Defaults};
 #[cfg(feature = "store")]
 use crate::{
 	places::Resolved,
-	record::{Recorder, SystemClock},
+	record::{Recorded, Recorder, SystemClock},
 	sources::ReviewSource,
 	store::{
-		NewTarget, Store,
+		JobParams, NewTarget, Store,
 		blobs::BlobStore,
 		export::{self, Exported},
 	},
@@ -234,7 +234,7 @@ impl Archive {
 	/// PNGs come back in memory. Works on an archive without a data dir.
 	#[cfg(feature = "maps")]
 	pub async fn capture_place(&self, req: &CaptureRequest) -> eyre::Result<Captured> {
-		use review_archive_core::maps::{CaptureAll, scan_of};
+		use review_archive_core::maps::{CaptureAll, scan_to_limit};
 
 		let lang = req.lang.as_deref().unwrap_or(&self.inner.defaults.lang);
 		let max = req.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
@@ -244,7 +244,7 @@ impl Archive {
 		};
 		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, max).await?;
 		let page_url = walked.page_url.clone();
-		let mut scan = scan_of(walked, max, Timestamp::now());
+		let mut scan = scan_to_limit(walked, Timestamp::now());
 		for r in &mut scan.reviews {
 			if let Some(c) = &mut r.capture {
 				c.png = crate::png_meta::provenance(c, &req.place_id, &r.source_review_id)?;
@@ -279,7 +279,9 @@ impl Archive {
 	pub async fn add_target(&self, req: AddTarget) -> eyre::Result<Added> {
 		let store = self.store()?;
 		let interval = req.interval.unwrap_or(self.inner.defaults.interval);
-		eyre::ensure!(interval >= schedule::MIN_INTERVAL, "the interval must be at least 1h");
+		if interval < schedule::MIN_INTERVAL {
+			return Err(crate::rejected::invalid("the interval must be at least 1h"));
+		}
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), &req.place).await?;
 		let kind = if req.gbp.is_some() { TargetKind::Gbp } else { TargetKind::Maps };
 		let label = req.label.or_else(|| resolved.as_ref().and_then(|r| r.name.clone())).unwrap_or_else(|| place_id.clone());
@@ -323,14 +325,19 @@ impl Archive {
 	/// Scans one target now and records the run. A failing source is a `failed` run, not
 	/// an `Err`; `Err` is the archive itself failing.
 	#[cfg(feature = "maps")]
-	pub async fn scan_target(&self, id: TargetId) -> eyre::Result<RunSummary> {
+	pub async fn scan_target(&self, id: TargetId) -> eyre::Result<dto::RunSummary> {
 		let target = self.target(id).await?;
 		self.scan(&target).await
 	}
 
 	/// [`Self::scan_target`], for a target already loaded.
 	#[cfg(feature = "maps")]
-	pub async fn scan(&self, target: &Target) -> eyre::Result<RunSummary> {
+	pub async fn scan(&self, target: &Target) -> eyre::Result<dto::RunSummary> {
+		Ok(self.scan_recorded(target).await?.summary)
+	}
+
+	#[cfg(feature = "maps")]
+	async fn scan_recorded(&self, target: &Target) -> eyre::Result<Recorded> {
 		match target.kind {
 			TargetKind::Maps => {
 				let source = crate::sources::maps::MapsSource {
@@ -358,15 +365,16 @@ impl Archive {
 		}
 	}
 
-	/// Records a scan of `target` by any source.
-	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<RunSummary> {
+	/// Records a scan of `target` by any source: another platform's reviews go into the
+	/// same archive this way.
+	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<Recorded> {
 		let stored = self.stored()?;
 		Recorder {
 			store: &stored.store,
 			blobs: &stored.blobs,
 			clock: &SystemClock,
 		}
-		.run(source, target)
+		.record(source, target)
 		.await
 	}
 
@@ -382,6 +390,168 @@ impl Archive {
 			.clone()
 			.ok_or_else(|| eyre::eyre!("GBP_CLIENT_ID, GBP_CLIENT_SECRET and GBP_REFRESH_TOKEN are not all set (needed for gbp targets)"))?;
 		Ok(self.inner.gbp.get_or_init(|| crate::sources::gbp::Client::new(self.inner.http.clone(), creds)))
+	}
+
+	/// Changes a target's label, language, interval or enabled flag.
+	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<Target> {
+		let store = self.store()?;
+		store.update_target(id, patch).await?;
+		store.target(id).await
+	}
+
+	/// A target with its latest run, what is archived, and when it is scanned next.
+	pub async fn target_detail(&self, id: TargetId) -> eyre::Result<TargetDetail> {
+		let store = self.store()?;
+		let target = store.target(id).await?;
+		let last_run = store.runs(id, 8).await?.into_iter().find(|r| r.finished_at.is_some());
+		let counts = store.target_counts(id).await?;
+		let next_scan_at = if target.enabled {
+			Some(fmt_ts(self.due_at(&target).await?.unwrap_or_else(Timestamp::now)))
+		} else {
+			None
+		};
+		Ok(TargetDetail {
+			target: target.into(),
+			last_run,
+			reviews: counts.reviews,
+			gone: counts.gone,
+			captures: counts.captures,
+			next_scan_at,
+		})
+	}
+
+	/// A target's runs, newest first.
+	pub async fn runs(&self, id: TargetId, limit: u32) -> eyre::Result<Vec<RunDto>> {
+		let store = self.store()?;
+		store.target(id).await?;
+		store.runs(id, limit).await
+	}
+
+	/// A review with every version and capture.
+	pub async fn review(&self, id: ReviewId) -> eyre::Result<Option<ReviewDetail>> {
+		self.store()?.review(id).await
+	}
+
+	/// Queues a scan of a target now, ahead of the scheduled ones. Returns the job id.
+	pub async fn enqueue_scan(&self, id: TargetId) -> eyre::Result<i64> {
+		let store = self.store()?;
+		store.target(id).await?;
+		store.enqueue_job(JobKind::Scan, id, None, Timestamp::now()).await
+	}
+
+	/// Queues an ad-hoc capture of a place. Nothing is registered: the results are kept
+	/// under the place's existing `maps` target for that language if there is one, else
+	/// under a new, disabled one, so nothing captured is lost and nothing gets scheduled.
+	pub async fn enqueue_capture(&self, req: &dto::CaptureRequest) -> eyre::Result<i64> {
+		let store = self.store()?;
+		let place = req
+			.place
+			.as_deref()
+			.or(req.maps_url.as_deref())
+			.ok_or_else(|| crate::rejected::invalid("name the place: `place` or `maps_url`"))?;
+		let lang = req.lang.clone().unwrap_or_else(|| self.inner.defaults.lang.clone());
+		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
+		let target = match store.find_target(&place_id, &lang).await? {
+			Some(t) => t,
+			None => {
+				let name = resolved.and_then(|r| r.name).unwrap_or_else(|| place_id.clone());
+				self.add_target(AddTarget {
+					place: place_id.clone(),
+					label: Some(format!("ad hoc: {name}")),
+					lang: Some(lang),
+					disabled: true,
+					..Default::default()
+				})
+				.await?
+				.target
+			}
+		};
+		let params = JobParams {
+			max_reviews: req.max_reviews,
+			review_ids: req.review_ids.clone(),
+		};
+		store.enqueue_job(JobKind::Capture, target.id, Some(&params), Timestamp::now()).await
+	}
+
+	/// A job, and once done what it saw.
+	pub async fn job(&self, id: i64) -> eyre::Result<Option<JobDto>> {
+		self.store()?.job(id).await
+	}
+
+	/// Fails the jobs a previous process died running. Call once on start, before
+	/// [`Self::run_next_job`].
+	pub async fn recover_jobs(&self) -> eyre::Result<u64> {
+		self.store()?.fail_interrupted_jobs(Timestamp::now()).await
+	}
+
+	/// Runs the oldest queued job to its end, if there is one, and returns it as it ended.
+	/// A failing scan is a `failed` job; `Err` is the archive itself failing.
+	#[cfg(feature = "maps")]
+	pub async fn run_next_job(&self) -> eyre::Result<Option<JobDto>> {
+		let store = self.store()?;
+		let Some(job) = store.claim_job(Timestamp::now()).await? else {
+			return Ok(None);
+		};
+		let outcome = async {
+			let target = store.target(job.target).await?;
+			match job.kind {
+				JobKind::Scan => self.scan_recorded(&target).await,
+				JobKind::Capture => {
+					let source = crate::sources::maps::RequestedSource {
+						browser: &self.inner.browser,
+						max: job.params.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan),
+						review_ids: job.params.review_ids.clone(),
+					};
+					self.record(&source, &target).await
+				}
+			}
+		}
+		.await;
+		match outcome {
+			Ok(rec) => {
+				let (status, error) = match rec.summary.status {
+					dto::RunStatus::Failed => (dto::JobStatus::Failed, rec.summary.error.clone()),
+					dto::RunStatus::Ok | dto::RunStatus::Partial => (dto::JobStatus::Done, None),
+				};
+				store.finish_job(job.id, status, Some(rec.run), error.as_deref(), &rec.seen, Timestamp::now()).await?;
+			}
+			Err(e) => {
+				store.finish_job(job.id, dto::JobStatus::Failed, None, Some(&format!("{e:#}")), &[], Timestamp::now()).await?;
+				return Err(e);
+			}
+		}
+		store.job(job.id).await
+	}
+
+	/// Adds a webhook. Its URL must be http(s) and its secret 16+ characters.
+	pub async fn add_webhook(&self, hook: &NewWebhook) -> eyre::Result<WebhookDto> {
+		use crate::rejected::invalid;
+		let url: reqwest::Url = hook.url.parse().map_err(|e| invalid(format!("webhook url {:?}: {e}", hook.url)))?;
+		if !matches!(url.scheme(), "http" | "https") {
+			return Err(invalid(format!("webhook url must be http or https, not {}", url.scheme())));
+		}
+		if hook.events.is_empty() {
+			return Err(invalid("subscribe the webhook to at least one event"));
+		}
+		if hook.secret.len() < 16 {
+			return Err(invalid("the webhook secret is too short to be one (16+ characters)"));
+		}
+		self.store()?.add_webhook(hook, Timestamp::now()).await
+	}
+
+	/// Every webhook, without secrets.
+	pub async fn webhooks(&self) -> eyre::Result<Vec<WebhookDto>> {
+		self.store()?.webhooks().await
+	}
+
+	/// Removes a webhook, and what it was still owed. `false` when there was none.
+	pub async fn delete_webhook(&self, id: i64) -> eyre::Result<bool> {
+		self.store()?.delete_webhook(id).await
+	}
+
+	/// Sends what the outbox has due, once.
+	pub async fn deliver_webhooks(&self) -> eyre::Result<crate::webhooks::DeliveryReport> {
+		crate::webhooks::deliver_due(self.store()?, &self.inner.http, Timestamp::now()).await
 	}
 
 	/// Reviews of a target: first seen at or after `since`, gone or not.

@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+# `utoipa::ToSchema` on the DTOs, for the server's OpenAPI document.
+openapi = ["dep:utoipa"]
+
 [dependencies]
 csv.workspace = true
 eyre.workspace = true
@@ -16,6 +20,7 @@ scraper.workspace = true
 serde.workspace = true
 sha2.workspace = true
 url.workspace = true
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta.workspace = true
