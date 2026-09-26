@@ -66,8 +66,11 @@ impl IntoResponse for ApiError {
 }
 
 impl From<eyre::Report> for ApiError {
+	/// A 5xx: reported, and the details stay in the log rather than the response.
 	fn from(e: eyre::Report) -> Self {
-		tracing::error!(error = %format!("{e:#}"), "request failed");
+		ev_lib::error_monitoring::report(&*e);
+		// warn, not error: the tracing layer would send an error as a second Sentry event
+		tracing::warn!(error = %format!("{e:#}"), "request failed");
 		Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 	}
 }

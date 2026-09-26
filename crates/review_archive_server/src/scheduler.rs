@@ -6,7 +6,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use rand::RngExt;
 use review_archive::Archive;
-use review_archive_core::schedule;
+use review_archive_core::{dto::RunStatus, schedule};
 use tokio::sync::watch;
 
 /// The longest sleep between looks at the target list, so a target added or re-enabled
@@ -26,7 +26,8 @@ pub async fn run(archive: &Archive, mut shutdown: watch::Receiver<bool>) -> eyre
 				Ok(wait) => wait,
 				Err(e) => {
 					// the archive itself failed (database); try again later rather than spin
-					tracing::error!(error = %format!("{e:#}"), "scheduler pass failed");
+					ev_lib::error_monitoring::report(&*e);
+					tracing::warn!(error = %format!("{e:#}"), "scheduler pass failed");
 					MAX_IDLE
 				}
 			},
@@ -54,6 +55,15 @@ async fn pass(archive: &Archive, mut shutdown: watch::Receiver<bool>) -> eyre::R
 		}
 		let summary = archive.scan(target).await?;
 		tracing::info!("{summary}");
+		if summary.status == RunStatus::Failed {
+			let e = eyre::eyre!(
+				"scan of target {} ({}) failed: {}",
+				summary.target,
+				summary.label,
+				summary.error.as_deref().unwrap_or("no reason given")
+			);
+			ev_lib::error_monitoring::report(&*e);
+		}
 	}
 	let now = Timestamp::now();
 	Ok(match archive.next_due(now).await? {

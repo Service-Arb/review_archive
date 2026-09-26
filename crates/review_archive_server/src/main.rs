@@ -1,16 +1,21 @@
+//! Composition root: settings, error monitoring and telemetry, then the CLI over the
+//! library's `Archive`.
+
 mod config;
 mod http;
 mod scheduler;
+mod settings;
 
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
+use ev_lib::error_monitoring;
 use eyre::WrapErr;
-use review_archive::{AddTarget, Archive, config::Secrets};
+use review_archive::{AddTarget, Archive};
 use review_archive_core::{GbpLocation, TargetId, dto::RunStatus, parse_interval, parse_since, schedule};
 use tokio::sync::watch;
 
-use crate::config::Config;
+use crate::{config::Config, settings::Settings};
 
 #[derive(Parser)]
 #[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about)]
@@ -90,14 +95,61 @@ struct ScanArgs {
 	dump_html: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> eyre::Result<()> {
+// Sentry must be initialised before the async runtime starts, hence no #[tokio::main].
+fn main() -> eyre::Result<()> {
 	color_eyre::install()?;
-	let filter =
-		tracing_subscriber::EnvFilter::try_from_default_env().or_else(|_| tracing_subscriber::EnvFilter::try_new(option_env!("LOG_DIRECTIVES").unwrap_or("info,chromiumoxide=error")))?;
-	tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+
+	// The deploy contract, straight out of the image: the gitops preflight diffs it with the
+	// cluster Secret's keys, so a missing variable is caught before the rollout.
+	if let Some(profile) = settings::print_required_vars_for() {
+		for var in Settings::required_var_names(&profile) {
+			println!("{var}");
+		}
+		return Ok(());
+	}
+	// Exits 78 (EX_CONFIG) on a bad environment, before anything else is built.
+	let settings = ev_lib::settings::or_exit(Settings::from_env());
+
+	// Held for the life of main: dropping it flushes. A no-op without SENTRY_DSN.
+	let _sentry = error_monitoring::init(&error_monitoring::Config {
+		dsn: settings.sentry_dsn.clone(),
+		environment: settings.app_env.clone(),
+		release: error_monitoring::release_name!().map(|r| r.into_owned()),
+		// the same name OTEL uses, so an issue and its trace agree on the service
+		service: std::env::var("OTEL_SERVICE_NAME").ok().filter(|s| !s.trim().is_empty()),
+		traces_sample_rate: error_monitoring::Config::traces_sample_rate_for(&settings.app_env),
+	});
+	let _otel = init_tracing(&settings.app_env)?;
 
 	let cli = Cli::parse();
+	tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()
+		.wrap_err("building the tokio runtime")?
+		.block_on(run(cli, settings))
+}
+
+/// Logs go to stderr, so a CLI command's stdout stays its output. OTLP export only when
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+fn init_tracing(environment: &str) -> eyre::Result<Option<ev_lib::otel::Telemetry>> {
+	use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+	let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(option_env!("LOG_DIRECTIVES").unwrap_or("info,chromiumoxide=error")))?;
+	let (otel_guard, otel_layers) = ev_lib::otel::telemetry(&ev_lib::otel::Config {
+		environment: environment.to_owned(),
+		traces_sample_rate: ev_lib::otel::Config::traces_sample_rate_for(environment),
+	})
+	.unzip();
+	tracing_subscriber::registry()
+		.with(filter)
+		.with(fmt::layer().with_writer(std::io::stderr))
+		.with(error_monitoring::tracing_layer())
+		.with(otel_layers)
+		.init();
+	Ok(otel_guard)
+}
+
+async fn run(cli: Cli, settings: Settings) -> eyre::Result<()> {
 	// The image points TMPDIR into the data volume, which starts out empty; Chromium puts its
 	// shared memory there (`--disable-dev-shm-usage`) and dies if the directory is missing.
 	let tmp = std::env::temp_dir();
@@ -106,12 +158,12 @@ async fn main() -> eyre::Result<()> {
 	if let Cmd::Scan(args) = &cli.cmd {
 		config.browser.dump_html = args.dump_html.clone();
 	}
-	let archive = Archive::open(config.archive(secrets_from_env())).await?;
+	let archive = Archive::open(config.archive(settings.secrets())).await?;
 
 	match cli.cmd {
 		Cmd::Target(cmd) => target_cmd(&archive, cmd).await,
 		Cmd::Scan(args) => scan(&archive, args).await,
-		Cmd::Serve => serve(archive, &config).await,
+		Cmd::Serve => serve(archive, &config, settings.api_token()?).await,
 		Cmd::Export { target, since, out } => {
 			let since = since.as_deref().map(parse_since).transpose()?;
 			let done = archive.export(TargetId(target), since, &out).await?;
@@ -127,22 +179,6 @@ async fn main() -> eyre::Result<()> {
 			}
 			Ok(())
 		}
-	}
-}
-
-fn secrets_from_env() -> Secrets {
-	let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-	let gbp = match (var("GBP_CLIENT_ID"), var("GBP_CLIENT_SECRET"), var("GBP_REFRESH_TOKEN")) {
-		(Some(client_id), Some(client_secret), Some(refresh_token)) => Some(review_archive::sources::gbp::Credentials {
-			client_id,
-			client_secret,
-			refresh_token,
-		}),
-		_ => None,
-	};
-	Secrets {
-		google_maps_key: var("GOOGLE_MAPS_KEY"),
-		gbp,
 	}
 }
 
@@ -231,11 +267,9 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 	Ok(())
 }
 
-async fn serve(archive: Archive, config: &Config) -> eyre::Result<()> {
-	let token = std::env::var("REVIEW_ARCHIVE_TOKEN").wrap_err("REVIEW_ARCHIVE_TOKEN must be set for serve")?;
-	eyre::ensure!(token.len() >= 16, "REVIEW_ARCHIVE_TOKEN is too short to be a secret (16+ characters)");
+async fn serve(archive: Archive, config: &Config, token: &str) -> eyre::Result<()> {
 	let bind = config.bind;
-	let app = http::router(http::AppState::new(archive.clone(), &token));
+	let app = http::router(http::AppState::new(archive.clone(), token));
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
 

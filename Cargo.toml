@@ -20,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 crc32fast = "1"
 csv = "1"
-ev_lib = { version = "0.21", default-features = false }
+ev_lib = { version = "0.21", default-features = false, features = ["settings", "error_monitoring", "otel"] }
 eyre = "0.6"
 futures = "0.3"
 jiff = { version = "0.2", features = ["serde"] }
