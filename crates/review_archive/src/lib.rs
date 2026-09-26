@@ -44,6 +44,8 @@ pub mod record;
 pub mod sources;
 #[cfg(feature = "store")]
 pub mod store;
+#[cfg(feature = "store")]
+pub mod webhooks;
 
 #[cfg(feature = "store")]
 pub use archive::{AddTarget, Added};

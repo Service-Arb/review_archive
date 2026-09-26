@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use jiff::Timestamp;
 use review_archive_core::{
-	Coverage, Scan, Target,
+	Coverage, ReviewId, Scan, Target,
 	dto::{Counts, RunStatus, RunSummary},
 	reconcile,
 };
@@ -14,8 +14,19 @@ use review_archive_core::{
 use crate::{
 	SCANNER_VERSION, png_meta,
 	sources::ReviewSource,
-	store::{Store, StoredCapture, blobs::BlobStore},
+	store::{Applied, RunId, Store, StoredCapture, blobs::BlobStore},
 };
+
+/// A recorded run: the summary, its row, and the reviews it listed.
+#[derive(Clone, Debug)]
+pub struct Recorded {
+	/// As reported.
+	pub summary: RunSummary,
+	/// Its row in `runs`.
+	pub run: RunId,
+	/// Every review the scan listed, in its order; empty for a failed run.
+	pub seen: Vec<ReviewId>,
+}
 
 /// Time is I/O: it comes through here so tests can pin it.
 pub trait Clock: Send + Sync {
@@ -48,11 +59,19 @@ impl<C: Clock> Recorder<'_, C> {
 	/// Scans one target and records the run, whatever its outcome. `Err` is only for the
 	/// archive itself failing (the database); a failing source is a `failed` run.
 	pub async fn run<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<RunSummary> {
+		Ok(self.record(source, target).await?.summary)
+	}
+
+	/// [`Self::run`], with the run's id and the reviews it listed.
+	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<Recorded> {
 		let run = self.store.start_run(target.id, self.clock.now()).await?;
 		let outcome = self.scan_and_apply(source, target).await;
 		let now = self.clock.now();
+		let mut seen = Vec::new();
 		let summary = match outcome {
-			Ok((counts, captured, complete, warnings)) => {
+			Ok((applied, captured, complete, warnings)) => {
+				let counts = applied.counts;
+				seen = applied.seen;
 				let status = if warnings.is_empty() { RunStatus::Ok } else { RunStatus::Partial };
 				let error = (!warnings.is_empty()).then(|| warnings.join("; "));
 				RunSummary {
@@ -79,10 +98,10 @@ impl<C: Clock> Recorder<'_, C> {
 			}
 		};
 		self.store.finish_run(run, now, summary.status, summary.error.as_deref(), summary.counts).await?;
-		Ok(summary)
+		Ok(Recorded { summary, run, seen })
 	}
 
-	async fn scan_and_apply<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<(Counts, u32, bool, Vec<String>)> {
+	async fn scan_and_apply<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<(Applied, u32, bool, Vec<String>)> {
 		let known = self.store.known(target.id).await?;
 		let mut scan: Scan = source.scan(target, &known).await?;
 		let mut warnings = std::mem::take(&mut scan.warnings);
@@ -105,8 +124,8 @@ impl<C: Clock> Recorder<'_, C> {
 		}
 		let captured = u32::try_from(captures.len()).unwrap_or(u32::MAX);
 
-		let counts = self.store.apply(target.id, &plan, &captures, SCANNER_VERSION, self.clock.now()).await?;
-		Ok((counts, captured, coverage == Coverage::Complete, warnings))
+		let applied = self.store.apply(target.id, &plan, &captures, SCANNER_VERSION, self.clock.now()).await?;
+		Ok((applied, captured, coverage == Coverage::Complete, warnings))
 	}
 
 	async fn store_capture(&self, target: &Target, source_review_id: &str, c: &review_archive_core::Capture) -> eyre::Result<StoredCapture> {

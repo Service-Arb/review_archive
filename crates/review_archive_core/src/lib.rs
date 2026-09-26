@@ -66,6 +66,7 @@ impl fmt::Display for ReviewId {
 
 /// Where a target's reviews are read from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum TargetKind {
 	/// The public Google Maps page, in a browser.

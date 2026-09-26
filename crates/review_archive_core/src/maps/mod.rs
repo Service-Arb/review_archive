@@ -140,6 +140,41 @@ impl WalkPolicy for CaptureAll {
 	}
 }
 
+/// An ad-hoc capture into the archive: screenshot what the archive still lacks (of the
+/// named reviews, when named), read down to the walk's limit or until the named ones are
+/// all found.
+#[derive(Debug)]
+pub struct Requested<'a> {
+	known: &'a Known,
+	wanted: Option<HashSet<String>>,
+}
+
+impl<'a> Requested<'a> {
+	/// Against what `known` holds; `review_ids` narrows it to those.
+	pub fn new(known: &'a Known, review_ids: Option<impl IntoIterator<Item = String>>) -> Self {
+		Self {
+			known,
+			wanted: review_ids.map(|ids| ids.into_iter().collect()),
+		}
+	}
+}
+
+impl WalkPolicy for Requested<'_> {
+	fn wants_capture(&self, card: &Card) -> bool {
+		self.known.wants_capture(&card.id) && self.wanted.as_ref().is_none_or(|w| w.contains(&card.id))
+	}
+
+	fn observe(&mut self, card: &Card) {
+		if let Some(w) = &mut self.wanted {
+			w.remove(&card.id);
+		}
+	}
+
+	fn satisfied(&self) -> bool {
+		self.wanted.as_ref().is_some_and(HashSet::is_empty)
+	}
+}
+
 /// A card as an observation, its relative date estimated against `now`.
 pub fn observed(card: Card, now: Timestamp) -> Observed {
 	let published_est = card.date_raw.as_deref().and_then(|d| relative_date::estimate(d, now));

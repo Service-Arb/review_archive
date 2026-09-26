@@ -13,6 +13,7 @@ readme = "README.md"
 [workspace.dependencies]
 review_archive = { path = "crates/review_archive", version = "0.1.0", default-features = false }
 review_archive_core = { path = "crates/review_archive_core", version = "0.1.0" }
+review_archive_server = { path = "crates/review_archive_server", version = "0.1.0" }
 
 axum = "0.8"
 chromiumoxide = { version = "0.9", default-features = false }
@@ -37,6 +38,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+utoipa = "5"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 insta = { version = "1", features = ["yaml"] }
