@@ -2,6 +2,7 @@
 
 pub mod browser;
 pub mod parse;
+pub mod profile;
 pub mod selectors;
 
 use std::path::PathBuf;

@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 
 use super::{
 	parse::{self, Card},
+	profile::ProfileLock,
 	selectors::{self as sel, js},
 };
 use crate::{config::BrowserConfig, domain::Capture};
@@ -74,11 +75,13 @@ pub struct Session {
 	page: Page,
 	/// Where to save the cards' HTML on every walk, for refreshing test fixtures.
 	pub dump_html: Option<PathBuf>,
+	/// Released with the session, after the browser is closed.
+	_profile: ProfileLock,
 }
 
 impl Session {
 	pub async fn launch(cfg: &BrowserConfig, profile_dir: &Path) -> eyre::Result<Self> {
-		tokio::fs::create_dir_all(profile_dir).await.wrap_err_with(|| format!("creating {}", profile_dir.display()))?;
+		let profile = ProfileLock::acquire(profile_dir)?;
 		let mut b = CdpConfig::builder()
 			.user_data_dir(profile_dir)
 			.new_headless_mode()
@@ -119,6 +122,7 @@ impl Session {
 			handler,
 			page,
 			dump_html: None,
+			_profile: profile,
 		})
 	}
 
