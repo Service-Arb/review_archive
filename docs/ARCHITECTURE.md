@@ -108,17 +108,18 @@ with its own platform implements `sources::ReviewSource` and records through
     (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than three in a
   row while a target is overdue — then the most overdue target, with a 5–15 s pause between
   any two. The queue is bounded (`defaults.max_queued_jobs`) and a job already queued is not
-  queued twice. Jobs live in SQLite; a restart keeps the queued ones and fails the job and the
-  run that were running. An ad-hoc capture is stored under the place's `maps` target for its
+  queued twice. Jobs live in SQLite; a restart keeps the queued ones and fails the job and the runs that were running — a
+  hand-run `scan` still going then included, until it records how it really ended. An ad-hoc capture is stored under the place's `maps` target for its
   language, or a new disabled one: nothing captured is lost, nothing extra gets scheduled, and
   its run does not count for the target's schedule.
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
   to `webhook_deliveries` in the same transaction as what they report, and delivered from
     there: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`), retried with backoff
   (30 s doubling, cap 6 h, 12 tries), hooks in parallel. Delivery is at least once;
-  `X-Delivery-Id` lets a receiver drop repeats. A hook only reaches public addresses — its
-  URL is checked when added and every address its host resolves to when sent — unless
-  `webhooks.allowed_hosts` names it; redirects are not followed.
+  `X-Delivery-Id` lets a receiver drop repeats. Where a hook may go: with `webhooks.allowed_hosts` empty, public
+  addresses only — its URL is checked when added and every address its host resolves to when
+  sent; with it set, only the hosts it lists (private addresses allowed), nowhere else.
+  Redirects are not followed.
 - **Secrets come from the environment only**, through `ev_lib::settings` in the server; the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except

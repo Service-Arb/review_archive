@@ -90,7 +90,9 @@ blob dir. Everything under one data dir (`/data` in the container).
 - `captures(id, review_id, captured_at, sha256, width, height, page_url, scanner_version)`
 - `runs(id, target_id, started_at, finished_at, status[ok|partial|failed], error, n_seen, n_new, n_changed, n_gone, ad_hoc)`
   — `ad_hoc` marks the runs of ad-hoc captures. A run a stopped process left open is
-  failed ("interrupted") on the next start.
+  failed ("interrupted") on the next start of `serve` — a hand-run `scan` still going at
+  that moment included; its run is marked ended again, with its real outcome, when it
+  finishes.
 - Blobs: `<data>/blobs/<sha256[0..2]>/<sha256>.png`. PNG gets `tEXt` chunks:
   capture time (UTC, RFC 3339), page URL, target label, source review id.
 
@@ -133,8 +135,8 @@ configured:
 
 Errors are JSON (`{"error": …}`) with 400 for input the archive cannot use (a body or a
 query it cannot read included), 404 for what does not exist, 429 when the job queue is
-full, and a bare `internal error` for a 5xx. Requests take 180 s at most and 64 are
-served at once.
+full, and a bare `internal error` for a 5xx. API requests take 180 s at most (an export as long as it
+needs) and 64 are served at once; `/health` and `/openapi.json` are outside both limits.
 
 Config: TOML file (`--config`) for data dir, bind address, defaults (including
 `max_queued_jobs`), `[webhooks] allowed_hosts`; secrets only from env.
