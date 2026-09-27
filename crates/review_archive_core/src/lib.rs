@@ -67,7 +67,7 @@ impl fmt::Display for ReviewId {
 /// A request the archive turns down: the caller's mistake, not the archive's. It travels
 /// inside `eyre::Report` like any other error; whoever answers requests finds it with
 /// `downcast_ref::<Rejected>()` and says 404, 400 or 429 instead of 500.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, miette::Diagnostic)]
+#[derive(Clone, Debug, Eq, PartialEq, miette::Diagnostic, thiserror::Error)]
 pub enum Rejected {
 	/// What was named does not exist.
 	#[error("{0}")]
