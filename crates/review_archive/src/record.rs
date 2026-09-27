@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use jiff::Timestamp;
 use review_archive_core::{
-	Coverage, ReviewId, Scan, Target,
+	Capture, Coverage, Known, ReviewId, Scan, Target,
 	dto::{Counts, RunStatus, RunSummary},
 	reconcile,
 };
@@ -14,7 +14,7 @@ use review_archive_core::{
 use crate::{
 	SCANNER_VERSION, png_meta,
 	sources::ReviewSource,
-	store::{Applied, RunId, Store, StoredCapture, blobs::BlobStore},
+	store::{RunEnd, RunId, ScanWrite, Store, StoredCapture, blobs::BlobStore, sat_u32},
 };
 
 /// A recorded run: the summary, its row, and the reviews it listed.
@@ -28,87 +28,100 @@ pub struct Recorded {
 	pub seen: Vec<ReviewId>,
 }
 
-/// Time is I/O: it comes through here so tests can pin it.
-pub trait Clock: Send + Sync {
-	/// The current time.
-	fn now(&self) -> Timestamp;
-}
-
-/// The real clock.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-	fn now(&self) -> Timestamp {
-		Timestamp::now()
-	}
-}
-
 /// Records scans of a source into a store.
 #[derive(Debug)]
-pub struct Recorder<'a, C: Clock> {
+pub struct Recorder<'a> {
 	/// Where the rows go.
 	pub store: &'a Store,
 	/// Where the PNGs go.
 	pub blobs: &'a BlobStore,
-	/// What dates the run.
-	pub clock: &'a C,
+	/// What dates the run: [`Timestamp::now`], or a pinned clock in tests (time is I/O).
+	pub now: fn() -> Timestamp,
 }
 
-impl<C: Clock> Recorder<'_, C> {
+impl Recorder<'_> {
 	/// Scans one target and records the run, whatever its outcome. `Err` is only for the
 	/// archive itself failing (the database); a failing source is a `failed` run.
 	pub async fn run<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<RunSummary> {
-		Ok(self.record(source, target).await?.summary)
+		Ok(self.record(source, target, None).await?.summary)
 	}
 
-	/// [`Self::run`], with the run's id and the reviews it listed.
-	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<Recorded> {
-		let run = self.store.start_run(target.id, self.clock.now()).await?;
-		let outcome = self.scan_and_apply(source, target).await;
-		let now = self.clock.now();
-		let mut seen = Vec::new();
-		let summary = match outcome {
-			Ok((applied, captured, complete, warnings)) => {
-				let counts = applied.counts;
-				seen = applied.seen;
-				let status = if warnings.is_empty() { RunStatus::Ok } else { RunStatus::Partial };
-				let error = (!warnings.is_empty()).then(|| warnings.join("; "));
-				RunSummary {
-					target: target.id.0,
-					label: target.label.clone(),
-					status,
-					counts,
-					captured,
-					complete,
-					error,
-				}
-			}
+	/// [`Self::run`], with the run's id and the reviews it listed. With `job`, that job ends
+	/// with the run, in the same transaction.
+	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
+		let known = self.store.known(target.id).await?;
+		let run = self.store.start_run(target.id, source.ad_hoc(), (self.now)()).await?;
+		let mut summary = RunSummary {
+			target: target.id.0,
+			label: target.label.clone(),
+			status: RunStatus::Failed,
+			counts: Counts::default(),
+			captured: 0,
+			complete: false,
+			error: None,
+		};
+		let seen = match source.scan(target, &known).await {
 			Err(e) => {
-				tracing::warn!(target = %target.id, error = %format!("{e:#}"), "scan failed");
-				RunSummary {
-					target: target.id.0,
-					label: target.label.clone(),
+				let error = format!("{e:#}");
+				tracing::warn!(target = %target.id, error, "scan failed");
+				let end = RunEnd {
+					run,
 					status: RunStatus::Failed,
-					counts: Counts::default(),
-					captured: 0,
-					complete: false,
-					error: Some(format!("{e:#}")),
-				}
+					error: Some(&error),
+					job,
+				};
+				self.store.fail_run(end, (self.now)()).await?;
+				summary.error = Some(error);
+				Vec::new()
+			}
+			Ok(mut scan) => {
+				let mut warnings = std::mem::take(&mut scan.warnings);
+				let captures = self.store_captures(target, &known, &scan, &mut warnings).await;
+				let plan = reconcile::plan(&known, &scan);
+				warnings.extend(plan.warnings.iter().cloned());
+				summary.status = if warnings.is_empty() { RunStatus::Ok } else { RunStatus::Partial };
+				summary.error = (!warnings.is_empty()).then(|| warnings.join("; "));
+				summary.captured = sat_u32(captures.len());
+				summary.complete = scan.coverage == Coverage::Complete;
+				let write = ScanWrite {
+					plan: &plan,
+					captures: &captures,
+					cut_after: scan.cut_after.as_deref(),
+					ad_hoc: source.ad_hoc(),
+					scanner_version: SCANNER_VERSION,
+				};
+				let end = RunEnd {
+					run,
+					status: summary.status,
+					error: summary.error.as_deref(),
+					job,
+				};
+				let applied = match self.store.apply(target.id, write, end, (self.now)()).await {
+					Ok(applied) => applied,
+					Err(e) => {
+						// An open run is invisible to the schedule: the target would stay the most
+						// overdue and be scanned again at once, forever. Failed, it backs off.
+						let failed = RunEnd {
+							status: RunStatus::Failed,
+							error: Some("internal error: the scan could not be stored"),
+							..end
+						};
+						if let Err(also) = self.store.fail_run(failed, (self.now)()).await {
+							tracing::warn!(run = run.0, error = %format!("{also:#}"), "could not fail the run either");
+						}
+						return Err(e);
+					}
+				};
+				summary.counts = applied.counts;
+				applied.seen
 			}
 		};
-		self.store.finish_run(run, now, summary.status, summary.error.as_deref(), summary.counts).await?;
 		Ok(Recorded { summary, run, seen })
 	}
 
-	async fn scan_and_apply<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<(Applied, u32, bool, Vec<String>)> {
-		let known = self.store.known(target.id).await?;
-		let mut scan: Scan = source.scan(target, &known).await?;
-		let mut warnings = std::mem::take(&mut scan.warnings);
-		let coverage = scan.coverage;
-		let plan = reconcile::plan(&known, &scan);
-		warnings.extend(plan.warnings.iter().cloned());
-
+	/// Writes the screenshots the archive wants to the blob store; one that fails is a
+	/// warning and stays pending.
+	async fn store_captures(&self, target: &Target, known: &Known, scan: &Scan, warnings: &mut Vec<String>) -> HashMap<String, StoredCapture> {
 		let mut captures = HashMap::new();
 		for obs in &scan.reviews {
 			let Some(c) = &obs.capture else { continue };
@@ -122,13 +135,10 @@ impl<C: Clock> Recorder<'_, C> {
 				Err(e) => warnings.push(format!("capture of {} not stored: {e:#}", obs.source_review_id)),
 			}
 		}
-		let captured = u32::try_from(captures.len()).unwrap_or(u32::MAX);
-
-		let applied = self.store.apply(target.id, &plan, &captures, SCANNER_VERSION, self.clock.now()).await?;
-		Ok((applied, captured, coverage == Coverage::Complete, warnings))
+		captures
 	}
 
-	async fn store_capture(&self, target: &Target, source_review_id: &str, c: &review_archive_core::Capture) -> eyre::Result<StoredCapture> {
+	async fn store_capture(&self, target: &Target, source_review_id: &str, c: &Capture) -> eyre::Result<StoredCapture> {
 		let tagged = png_meta::provenance(c, &target.label, source_review_id)?;
 		let (width, height) = png_meta::dimensions(&tagged)?;
 		let sha256 = self.blobs.put(&tagged).await?;

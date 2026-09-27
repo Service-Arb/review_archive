@@ -6,6 +6,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 
 use crate::{Target, TargetKind, fmt_ts};
 
@@ -37,13 +38,14 @@ pub struct TargetDto {
 
 impl From<Target> for TargetDto {
 	fn from(t: Target) -> Self {
+		let (gbp_account, gbp_location) = t.gbp.map(|g| (g.account, g.location)).unzip();
 		Self {
 			id: t.id.0,
 			label: t.label,
 			kind: t.kind,
 			place_id: t.place_id,
-			gbp_account: t.gbp.as_ref().map(|g| g.account.clone()),
-			gbp_location: t.gbp.map(|g| g.location),
+			gbp_account,
+			gbp_location,
 			lang: t.lang,
 			interval_secs: t.interval.as_secs(),
 			enabled: t.enabled,
@@ -74,7 +76,7 @@ pub struct ReviewDto {
 	pub reply: Option<String>,
 	/// Photos attached.
 	pub photo_count: i64,
-	/// The date as the source printed it.
+	/// The date as the source printed it when `published_est` was made from it.
 	pub published_raw: Option<String>,
 	/// When it was published, estimated when first seen.
 	pub published_est: Option<String>,
@@ -111,7 +113,7 @@ pub struct DayStats {
 	pub new: i64,
 	/// Edits seen that day.
 	pub changed: i64,
-	/// Reviews that went missing that day.
+	/// Reviews that went missing that day, whether or not they came back later.
 	pub gone: i64,
 	/// Mean rating, as first seen, of the reviews first seen that day.
 	pub mean_rating: Option<f64>,
@@ -119,10 +121,11 @@ pub struct DayStats {
 	pub histogram: [i64; 5],
 }
 
-/// How a scan went.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// How a scan went. Stored as its lowercase name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::EnumString)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum RunStatus {
 	/// Everything it tried worked.
 	Ok,
@@ -130,17 +133,6 @@ pub enum RunStatus {
 	Partial,
 	/// Nothing stored; see the error.
 	Failed,
-}
-
-impl RunStatus {
-	/// `"ok"`, `"partial"`, `"failed"`.
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Ok => "ok",
-			Self::Partial => "partial",
-			Self::Failed => "failed",
-		}
-	}
 }
 
 /// What one scan did to the archive.
@@ -180,11 +172,7 @@ pub struct RunSummary {
 
 impl fmt::Display for RunSummary {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let status = match self.status {
-			RunStatus::Ok => "ok",
-			RunStatus::Partial => "partial",
-			RunStatus::Failed => "FAILED",
-		};
+		let status = if self.status == RunStatus::Failed { "FAILED" } else { self.status.as_ref() };
 		write!(
 			f,
 			"#{} {:<24} {status:<8} seen {:>4}  new {:>4}  changed {:>3}  gone {:>3}  captured {:>4}{}",
@@ -205,44 +193,38 @@ impl fmt::Display for RunSummary {
 }
 
 /// `POST /targets`: watch a place. One of `place` and `maps_url`.
+#[skip_serializing_none]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(default)]
 pub struct NewTarget {
 	/// A place id (or a Maps URL; either field takes both).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub place: Option<String>,
 	/// A Google Maps URL; resolved with the Places API when it carries no place id.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub maps_url: Option<String>,
 	/// The place's name when unset.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub label: Option<String>,
 	/// UI language of the Maps page, e.g. `fr`.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub lang: Option<String>,
 	/// `6h`, `1d`, or seconds; at least an hour.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub interval: Option<String>,
 	/// `<account>/<location>`: read reviews through the Business Profile API.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub gbp: Option<String>,
 }
 
 /// `PATCH /targets/{id}`: what to change; absent fields stay.
+#[skip_serializing_none]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(default)]
 pub struct TargetPatch {
 	/// New label.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub label: Option<String>,
 	/// New Maps UI language.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub lang: Option<String>,
 	/// New interval: `6h`, `1d`, or seconds.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub interval: Option<String>,
 	/// Enable or disable scanning.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub enabled: Option<bool>,
 }
 
@@ -275,7 +257,7 @@ pub struct RunDto {
 	pub target_id: i64,
 	/// When it began.
 	pub started_at: String,
-	/// When it ended; `null` while running, or when the process died under it.
+	/// When it ended; `null` while running.
 	pub finished_at: Option<String>,
 	/// `null` until it ends.
 	pub status: Option<RunStatus>,
@@ -286,10 +268,11 @@ pub struct RunDto {
 	pub counts: Counts,
 }
 
-/// What a job does.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// What a job does. Stored as its lowercase name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display, strum::EnumString)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum JobKind {
 	/// A registered target's scan, now.
 	Scan,
@@ -297,20 +280,11 @@ pub enum JobKind {
 	Capture,
 }
 
-impl JobKind {
-	/// As stored.
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Scan => "scan",
-			Self::Capture => "capture",
-		}
-	}
-}
-
-/// Where a job is.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Where a job is. Stored as its lowercase name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display, strum::EnumString)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum JobStatus {
 	/// Waiting for the browser.
 	Queued,
@@ -323,16 +297,6 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
-	/// As stored.
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Queued => "queued",
-			Self::Running => "running",
-			Self::Done => "done",
-			Self::Failed => "failed",
-		}
-	}
-
 	/// Done or failed: it will not change again.
 	pub fn is_finished(self) -> bool {
 		matches!(self, Self::Done | Self::Failed)
@@ -369,29 +333,39 @@ pub struct JobDto {
 	pub error: Option<String>,
 	/// The run it made.
 	pub run: Option<RunDto>,
-	/// On `done`: the reviews the run listed, newest first, with their capture URLs.
+	/// On `done`: the reviews the run listed, newest first, with their capture URLs — only
+	/// the requested ones, for a capture of named reviews.
 	pub reviews: Option<Vec<ReviewDto>>,
 }
 
-/// `POST /captures`: capture a place without registering it. One of `place` and `maps_url`.
+/// What an ad-hoc capture reads.
+#[skip_serializing_none]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CaptureRequest {
-	/// A place id (or a Maps URL).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub place: Option<String>,
-	/// A Google Maps URL.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub maps_url: Option<String>,
-	/// UI language of the Maps page.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub lang: Option<String>,
-	/// Cards read at most; the per-scan default when unset.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+#[serde(default)]
+pub struct CaptureLimits {
+	/// Cards read at most; the per-scan default when unset, `defaults.max_reviews_initial`
+	/// at most.
 	pub max_reviews: Option<usize>,
 	/// Only these Google review ids; the walk stops once all are found.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub review_ids: Option<Vec<String>>,
+}
+
+/// `POST /captures`: capture a place without registering it. One of `place` and `maps_url`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(default)]
+pub struct CaptureRequest {
+	/// A place id (or a Maps URL).
+	pub place: Option<String>,
+	/// A Google Maps URL.
+	pub maps_url: Option<String>,
+	/// UI language of the Maps page.
+	pub lang: Option<String>,
+	/// How much to read.
+	#[serde(flatten)]
+	pub limits: CaptureLimits,
 }
 
 /// One version of a review's content.
@@ -443,48 +417,37 @@ pub struct ReviewDetail {
 	pub captures: Vec<CaptureDto>,
 }
 
-/// What a webhook can subscribe to.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// What a webhook can subscribe to. Stored and sent (`X-Event`) under its dotted name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, strum::AsRefStr, strum::EnumString)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum Event {
 	/// A review archived for the first time.
 	#[serde(rename = "review.new")]
+	#[strum(serialize = "review.new")]
 	ReviewNew,
 	/// A new version of a review.
 	#[serde(rename = "review.changed")]
+	#[strum(serialize = "review.changed")]
 	ReviewChanged,
 	/// A review no longer listed where a scan looked.
 	#[serde(rename = "review.gone")]
+	#[strum(serialize = "review.gone")]
 	ReviewGone,
 	/// A gone review listed again.
 	#[serde(rename = "review.reappeared")]
+	#[strum(serialize = "review.reappeared")]
 	ReviewReappeared,
 	/// A scan failed.
 	#[serde(rename = "run.failed")]
+	#[strum(serialize = "run.failed")]
 	RunFailed,
-}
-
-impl Event {
-	/// Every event.
-	pub const ALL: [Self; 5] = [Self::ReviewNew, Self::ReviewChanged, Self::ReviewGone, Self::ReviewReappeared, Self::RunFailed];
-
-	/// `review.new`, …
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::ReviewNew => "review.new",
-			Self::ReviewChanged => "review.changed",
-			Self::ReviewGone => "review.gone",
-			Self::ReviewReappeared => "review.reappeared",
-			Self::RunFailed => "run.failed",
-		}
-	}
 }
 
 /// `POST /webhooks`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NewWebhook {
-	/// Where deliveries are POSTed; `http` or `https`.
+	/// Where deliveries are POSTed; `http` or `https`, to a host the archive allows.
 	pub url: String,
 	/// What to deliver.
 	pub events: Vec<Event>,
@@ -529,6 +492,63 @@ pub struct EventPayload {
 pub struct ErrorBody {
 	/// What went wrong; `internal error` for a 5xx, whose details stay in the server log.
 	pub error: String,
+}
+
+/// `GET /targets/{id}/reviews`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams), into_params(parameter_in = Query))]
+#[serde(default)]
+pub struct ReviewsQuery {
+	/// `YYYY-MM-DD` or RFC 3339: first seen at or after.
+	pub since: Option<String>,
+	/// Only gone (`true`) or only listed (`false`) reviews.
+	pub gone: Option<bool>,
+}
+
+/// `GET /targets/{id}/runs`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams), into_params(parameter_in = Query))]
+#[serde(default)]
+pub struct RunsQuery {
+	/// At most this many, newest first (default 20, at most 500).
+	pub limit: Option<u32>,
+}
+
+/// `GET /targets/{id}/export.zip`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams), into_params(parameter_in = Query))]
+#[serde(default)]
+pub struct ExportQuery {
+	/// `YYYY-MM-DD` or RFC 3339: reviews first seen at or after.
+	pub since: Option<String>,
+}
+
+/// `POST /captures`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams), into_params(parameter_in = Query))]
+#[serde(default)]
+pub struct WaitQuery {
+	/// Hold the request up to this many seconds (at most 120) and answer with the finished
+	/// job if it finishes by then.
+	pub wait: Option<u64>,
+}
+
+/// `GET /stats`.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams), into_params(parameter_in = Query))]
+#[serde(default)]
+pub struct StatsQuery {
+	/// One target; every target when unset.
+	pub target: Option<i64>,
+	/// `YYYY-MM-DD`, inclusive.
+	pub from: Option<String>,
+	/// `YYYY-MM-DD`, inclusive.
+	pub to: Option<String>,
 }
 
 /// Day stats as CSV, one row per target and day, the histogram as `stars_1` … `stars_5`.

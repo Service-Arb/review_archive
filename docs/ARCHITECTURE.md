@@ -6,17 +6,18 @@ A cargo workspace of four crates; dependencies point inwards only.
 
 ```text
 crates/review_archive_core/     no I/O: no browser, database, network or clock
-  src/lib.rs                    targets, observations, Known, Scan, Coverage, content hashes
+    src/lib.rs                    targets, observations, Known, Scan, Coverage, content hashes;
+                                what callers type in (intervals, langs, dates) and Rejected
   src/reconcile.rs              a scan against what is stored → new / changed / unchanged / gone / reappeared
   src/schedule.rs               when a target is next due: interval, jitter, backoff
   src/relative_date.rs          "il y a 3 semaines" → an estimated timestamp, and its earliest bound
   src/maps/selectors.rs         every assumption about Google's markup, and the in-page scripts
   src/maps/parse.rs             cards out of HTML (tested on tests/fixtures/, insta snapshots)
-  src/maps/mod.rs               walk policies, and what a walk may conclude (coverage)
+    src/maps/mod.rs               walk policies, and what a walk may conclude (coverage, gaps)
   src/gbp.rs                    the Business Profile API's JSON; matching API reviews to Maps cards
   src/place.rs                  a place id out of what a person pastes
-  src/dto.rs                    the JSON of the HTTP API, shared with the client
-crates/review_archive/          the engine (features: maps, gbp, store)
+    src/dto.rs                    the JSON of the HTTP API (bodies and queries), shared with the client
+crates/review_archive/          the engine (features: maps, store)
   src/archive.rs                the `Archive` facade
   src/browser/                  the `Browser` handle; the CDP session: consent, sorting, the walk, screenshots
   src/sources/                  the `ReviewSource` port; the maps and gbp adapters
@@ -24,9 +25,8 @@ crates/review_archive/          the engine (features: maps, gbp, store)
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
   src/store/events.rs           webhook events into the outbox, in the scan's own transaction
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
-  src/webhooks.rs               delivering the outbox: HMAC-SHA256 signature, retries with backoff
+    src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries
   src/places.rs                 Places API search for URLs without an id
-  src/rejected.rs               the caller's errors (not found / invalid), for 404 and 400
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
   src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
@@ -73,6 +73,11 @@ with its own platform implements `sources::ReviewSource` and records through
 - **History is append-only.** Reviews and captures are never deleted; `review_versions` gets a
   row per distinct content, the first sighting included. `gone_at` is set and cleared, never a
   deletion.
+- **A walk that stops short leaves no hole.** A scan stops at a screen of archived cards
+  only once it is past the last card a previous walk was cut short at
+  (`targets.cut_after`), and past every review still waiting for its screenshot; a
+  target's first scan reads the whole list. Ad-hoc captures may record a cut, never
+  clear one.
 - **`gone` is only concluded where the scan looked.** `gbp` lists everything, so absent means
   gone — unless the API returned fewer reviews than its own `totalReviewCount`. A `maps` walk is
   newest first and stops early; it only judges reviews whose *earliest* possible date (the
@@ -84,23 +89,37 @@ with its own platform implements `sources::ReviewSource` and records through
   with live reviews, is taken as a broken response: nothing is marked gone, the run is
   `partial`.
 - **One process per browser profile.** A lock file in the profile says so; holding it means
-  any Chromium `Singleton*` files there are stale (a crash, a pod with a new hostname) and are
-  removed. A second `scan` while `serve` holds the profile fails with that reason.
+    any Chromium `Singleton*` files there are stale (a crash, a pod with a new hostname) and are
+  removed. The profile is claimed before a run is recorded, so a second `scan` while `serve`
+  holds it fails with that reason and leaves no run behind. A browser that failed under a walk
+  is closed; the next walk starts a new one.
 - **Markup knowledge lives in `selectors.rs`.** A Maps change is fixed there, against fixtures
   refreshed with `scan --dump-html`, and checked by `cargo insta review`.
-- **The core has no I/O.** Time comes in as an argument or through `record::Clock`; jitter is
-  derived from the target and its last run, so asking twice gives one answer.
+- **The core has no I/O.** Time comes in as an argument or through `Recorder::now` (a plain
+  `fn`, pinned in tests); jitter is derived from the target and its last run, so asking twice
+  gives one answer.
+- **The caller's mistakes are `Rejected`.** The facade takes the API's DTOs as they come and
+  answers `NotFound`, `Invalid` or `Busy` for what the caller got wrong; the server only maps
+  them to 404, 400 and 429, and anything else to a logged 500.
+- **One write lock per transaction.** A write that reads first begins `IMMEDIATE`, so `serve`'s
+  worker, its HTTP side and a hand-run `scan` never fail on each other's writes. A scan's
+  reviews, events, cut, run end and job end commit together.
 - **One browser, one queue.** A single worker uses the browser: queued jobs first
-  (`POST /targets/{id}/scan`, `POST /captures`), oldest first, then the most overdue target,
-  with a 5–15 s pause between any two. Jobs live in SQLite; a restart keeps the queued ones
-  and fails the one that was running. An ad-hoc capture is stored under the place's `maps`
-  target for its language, or a new disabled one: nothing captured is lost, nothing extra
-  gets scheduled.
+    (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than three in a
+  row while a target is overdue — then the most overdue target, with a 5–15 s pause between
+  any two. The queue is bounded (`defaults.max_queued_jobs`) and a job already queued is not
+  queued twice. Jobs live in SQLite; a restart keeps the queued ones and fails the job and the runs that were running — a
+  hand-run `scan` still going then included, until it records how it really ended. An ad-hoc capture is stored under the place's `maps` target for its
+  language, or a new disabled one: nothing captured is lost, nothing extra gets scheduled, and
+  its run does not count for the target's schedule.
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
   to `webhook_deliveries` in the same transaction as what they report, and delivered from
-  there: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`), retried with backoff
-  (30 s doubling, cap 6 h, 12 tries). Delivery is at least once; `X-Delivery-Id` lets a
-  receiver drop repeats.
+    there: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`), retried with backoff
+  (30 s doubling, cap 6 h, 12 tries), hooks in parallel. Delivery is at least once;
+  `X-Delivery-Id` lets a receiver drop repeats. Where a hook may go: with `webhooks.allowed_hosts` empty, public
+  addresses only — its URL is checked when added and every address its host resolves to when
+  sent; with it set, only the hosts it lists (private addresses allowed), nowhere else.
+  Redirects are not followed.
 - **Secrets come from the environment only**, through `ev_lib::settings` in the server; the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except

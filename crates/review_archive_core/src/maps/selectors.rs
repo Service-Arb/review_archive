@@ -11,7 +11,10 @@
 /// Where a place's page lives. `hl` sets the UI language, which decides the language
 /// of the relative dates the parser reads.
 pub fn place_url(place_id: &str, lang: &str) -> String {
-	format!("https://www.google.com/maps/place/?q=place_id:{place_id}&hl={lang}")
+	// Both are checked before they get here; encoding them anyway means neither can add a
+	// query parameter of its own, and valid values come out as they went in.
+	let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+	format!("https://www.google.com/maps/place/?q=place_id:{}&hl={}", enc(place_id), enc(lang))
 }
 
 /// The EU consent interstitial is served from this host.

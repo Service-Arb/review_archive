@@ -3,12 +3,14 @@
 //!
 //! Read-only: the only calls made are the OAuth token refresh and `reviews.list`.
 
+use std::collections::HashSet;
+
 use eyre::WrapErr;
 use jiff::Timestamp;
 use review_archive_core::{
 	GbpLocation, Known, Observed, Scan, Target,
 	gbp::{FindCards, ReviewList, ReviewsPage, list_coverage, match_captures, observed},
-	maps::WalkEnd,
+	maps::WalkPolicy,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -21,6 +23,9 @@ pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// The Business Profile API.
 pub const API_BASE: &str = "https://mybusiness.googleapis.com";
 const PAGE_SIZE: u32 = 50;
+/// Pages read at most: 50 000 reviews, far past any real location. An API that keeps
+/// answering with a next page is not followed forever.
+const MAX_PAGES: usize = 1000;
 
 /// An OAuth client and a refresh token with the `business.manage` scope.
 #[derive(Clone)]
@@ -71,16 +76,18 @@ impl Client {
 		let url = format!("{}/v4/accounts/{}/locations/{}/reviews", self.api_base, loc.account, loc.location);
 		let mut out = ReviewList { reviews: Vec::new(), total: None };
 		let mut page_token: Option<String> = None;
-		loop {
+		let mut tokens = HashSet::new();
+		for _ in 0..MAX_PAGES {
 			let page: ReviewsPage = self.get(&url, page_token.as_deref()).await?;
 			out.reviews.extend(page.reviews);
 			out.total = out.total.or(page.total_review_count);
 			match page.next_page_token.filter(|t| !t.is_empty()) {
+				Some(t) if !tokens.insert(t.clone()) => eyre::bail!("GET {url}: the API returned page token {t:?} twice"),
 				Some(t) => page_token = Some(t),
-				None => break,
+				None => return Ok(out),
 			}
 		}
-		Ok(out)
+		eyre::bail!("GET {url}: still more pages after {MAX_PAGES}")
 	}
 
 	async fn get<T: serde::de::DeserializeOwned>(&self, url: &str, page_token: Option<&str>) -> eyre::Result<T> {
@@ -158,19 +165,15 @@ impl ReviewSource for GbpSource<'_> {
 
 		let wanted: Vec<&Observed> = reviews.iter().filter(|r| known.wants_capture(&r.source_review_id)).collect();
 		if !wanted.is_empty() {
-			let max = if known.is_empty() {
-				self.defaults.max_reviews_initial
-			} else {
-				self.defaults.max_reviews_per_scan
-			};
+			let max = self.defaults.max_for(known);
 			let mut policy = FindCards::new(&wanted, Timestamp::now());
 			// The API list stands on its own; a failed screenshot pass only leaves captures pending.
 			match self.browser.walk(&target.place_id, &target.lang, &mut policy, max).await {
 				Ok(walked) => {
-					if walked.end == WalkEnd::Cap {
-						tracing::info!(target = %target.id, "Maps walk hit its cap before matching every API review");
-					}
 					warnings.extend(walked.warnings);
+					if walked.end.cut_short() && !policy.satisfied() {
+						warnings.push("the Maps walk stopped before matching every new API review; they stay without a screenshot".to_owned());
+					}
 					let mut matched = match_captures(&reviews, |id| known.wants_capture(id), walked.cards);
 					for r in &mut reviews {
 						r.capture = matched.remove(&r.source_review_id);
@@ -179,6 +182,11 @@ impl ReviewSource for GbpSource<'_> {
 				Err(e) => warnings.push(format!("screenshots skipped, Maps page failed: {e:#}")),
 			}
 		}
-		Ok(Scan { reviews, coverage, warnings })
+		Ok(Scan {
+			reviews,
+			coverage,
+			warnings,
+			cut_after: None,
+		})
 	}
 }

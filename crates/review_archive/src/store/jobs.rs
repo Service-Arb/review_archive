@@ -4,23 +4,13 @@
 use eyre::WrapErr;
 use jiff::Timestamp;
 use review_archive_core::{
-	ReviewId, TargetId,
-	dto::{JobDto, JobKind, JobStatus},
+	Rejected, ReviewId, TargetId,
+	dto::{CaptureLimits, JobDto, JobKind, JobStatus},
 	fmt_ts,
 };
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, SqliteConnection};
 
 use super::{RunId, Store};
-
-/// What an ad-hoc capture is limited to.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct JobParams {
-	/// Cards read at most.
-	pub max_reviews: Option<usize>,
-	/// Only these review ids.
-	pub review_ids: Option<Vec<String>>,
-}
 
 /// A job the caller now owns and must finish.
 #[derive(Clone, Debug)]
@@ -31,8 +21,8 @@ pub struct ClaimedJob {
 	pub kind: JobKind,
 	/// Its target.
 	pub target: TargetId,
-	/// Capture limits.
-	pub params: JobParams,
+	/// What a capture reads.
+	pub limits: CaptureLimits,
 }
 
 #[derive(FromRow)]
@@ -52,36 +42,50 @@ struct JobRow {
 
 const JOB_COLUMNS: &str = "id, kind, target_id, params, status, created_at, started_at, finished_at, run_id, error, review_ids";
 
-fn kind_of(s: &str) -> eyre::Result<JobKind> {
-	match s {
-		"scan" => Ok(JobKind::Scan),
-		"capture" => Ok(JobKind::Capture),
-		other => eyre::bail!("unknown job kind {other:?}"),
+impl JobRow {
+	fn kind(&self) -> eyre::Result<JobKind> {
+		self.kind.parse().wrap_err_with(|| format!("job {} has an unknown kind", self.id))
 	}
-}
 
-fn status_of(s: &str) -> eyre::Result<JobStatus> {
-	match s {
-		"queued" => Ok(JobStatus::Queued),
-		"running" => Ok(JobStatus::Running),
-		"done" => Ok(JobStatus::Done),
-		"failed" => Ok(JobStatus::Failed),
-		other => eyre::bail!("unknown job status {other:?}"),
+	fn limits(&self) -> eyre::Result<CaptureLimits> {
+		Ok(self.params.as_deref().map(serde_json::from_str).transpose().wrap_err("reading job params")?.unwrap_or_default())
 	}
 }
 
 impl Store {
-	/// Queues a job; the worker takes queued jobs oldest first, ahead of scheduled scans.
-	pub async fn enqueue_job(&self, kind: JobKind, target: TargetId, params: Option<&JobParams>, now: Timestamp) -> eyre::Result<i64> {
-		let params = params.map(serde_json::to_string).transpose()?;
-		sqlx::query_scalar("INSERT INTO jobs (kind, target_id, params, status, created_at) VALUES (?, ?, ?, 'queued', ?) RETURNING id")
-			.bind(kind.as_str())
+	/// Queues a job; the worker takes queued jobs oldest first, ahead of scheduled scans. The
+	/// same job already queued is not queued twice: its id comes back. With `max_queued`
+	/// jobs waiting, [`Rejected::Busy`].
+	pub async fn enqueue_job(&self, kind: JobKind, target: TargetId, limits: Option<&CaptureLimits>, max_queued: usize, now: Timestamp) -> eyre::Result<i64> {
+		let params = limits.map(serde_json::to_string).transpose()?;
+		let mut tx = self.write().await?;
+		let same: Option<i64> = sqlx::query_scalar("SELECT id FROM jobs WHERE status = 'queued' AND kind = ? AND target_id = ? AND params IS ? ORDER BY id LIMIT 1")
+			.bind(kind.as_ref())
+			.bind(target.0)
+			.bind(&params)
+			.fetch_optional(&mut *tx)
+			.await
+			.wrap_err("looking for the same job")?;
+		if let Some(id) = same {
+			return Ok(id);
+		}
+		let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'queued'")
+			.fetch_one(&mut *tx)
+			.await
+			.wrap_err("counting queued jobs")?;
+		if usize::try_from(queued).is_ok_and(|q| q >= max_queued) {
+			return Err(Rejected::Busy(format!("{queued} jobs are already waiting for the browser; try again later")).into());
+		}
+		let id = sqlx::query_scalar("INSERT INTO jobs (kind, target_id, params, status, created_at) VALUES (?, ?, ?, 'queued', ?) RETURNING id")
+			.bind(kind.as_ref())
 			.bind(target.0)
 			.bind(params)
 			.bind(fmt_ts(now))
-			.fetch_one(&self.pool)
+			.fetch_one(&mut *tx)
 			.await
-			.wrap_err("queueing a job")
+			.wrap_err("queueing a job")?;
+		tx.commit().await.wrap_err("committing a queued job")?;
+		Ok(id)
 	}
 
 	/// Takes the oldest queued job and marks it running.
@@ -98,39 +102,19 @@ impl Store {
 		let Some(r) = row else { return Ok(None) };
 		Ok(Some(ClaimedJob {
 			id: r.id,
-			kind: kind_of(&r.kind)?,
+			kind: r.kind()?,
 			target: TargetId(r.target_id),
-			params: r.params.as_deref().map(serde_json::from_str).transpose().wrap_err("reading job params")?.unwrap_or_default(),
+			limits: r.limits()?,
 		}))
 	}
 
 	/// Records how a job ended: its run, and the reviews that run listed.
 	pub async fn finish_job(&self, id: i64, status: JobStatus, run: Option<RunId>, error: Option<&str>, reviews: &[ReviewId], now: Timestamp) -> eyre::Result<()> {
-		let ids: Vec<i64> = reviews.iter().map(|r| r.0).collect();
-		sqlx::query("UPDATE jobs SET status = ?, finished_at = ?, run_id = ?, error = ?, review_ids = ? WHERE id = ?")
-			.bind(status.as_str())
-			.bind(fmt_ts(now))
-			.bind(run.map(|r| r.0))
-			.bind(error)
-			.bind(serde_json::to_string(&ids)?)
-			.bind(id)
-			.execute(&self.pool)
-			.await
-			.wrap_err_with(|| format!("finishing job {id}"))?;
-		Ok(())
+		finish(&mut *self.pool.acquire().await?, id, status, run, error, reviews, now).await
 	}
 
-	/// Fails the jobs a previous process was running when it died; queued ones stay queued.
-	pub async fn fail_interrupted_jobs(&self, now: Timestamp) -> eyre::Result<u64> {
-		let done = sqlx::query("UPDATE jobs SET status = 'failed', finished_at = ?, error = 'interrupted: the service stopped while it ran' WHERE status = 'running'")
-			.bind(fmt_ts(now))
-			.execute(&self.pool)
-			.await
-			.wrap_err("failing interrupted jobs")?;
-		Ok(done.rows_affected())
-	}
-
-	/// A job, with its run and (once done) the reviews it saw.
+	/// A job, with its run and (once done) the reviews it saw — for a capture of named
+	/// reviews, those of them it saw.
 	pub async fn job(&self, id: i64) -> eyre::Result<Option<JobDto>> {
 		let row: Option<JobRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id = ?")))
 			.bind(id)
@@ -138,21 +122,25 @@ impl Store {
 			.await
 			.wrap_err_with(|| format!("loading job {id}"))?;
 		let Some(r) = row else { return Ok(None) };
-		let status = status_of(&r.status)?;
+		let status: JobStatus = r.status.parse().wrap_err_with(|| format!("job {id} has an unknown status"))?;
 		let run = match r.run_id {
 			Some(run) => self.run(RunId(run)).await?,
 			None => None,
 		};
 		let reviews = match (status, r.review_ids.as_deref()) {
 			(JobStatus::Done, Some(ids)) => {
-				let ids: Vec<i64> = serde_json::from_str(ids).wrap_err("reading a job's reviews")?;
-				Some(self.reviews_by_id(&ids.into_iter().map(ReviewId).collect::<Vec<_>>()).await?)
+				let ids: Vec<ReviewId> = serde_json::from_str::<Vec<i64>>(ids).wrap_err("reading a job's reviews")?.into_iter().map(ReviewId).collect();
+				let mut reviews = self.reviews_by_id(&ids).await?;
+				if let Some(wanted) = r.limits()?.review_ids {
+					reviews.retain(|r| wanted.contains(&r.source_review_id));
+				}
+				Some(reviews)
 			}
 			_ => None,
 		};
 		Ok(Some(JobDto {
+			kind: r.kind()?,
 			id: r.id,
-			kind: kind_of(&r.kind)?,
 			status,
 			target_id: r.target_id,
 			created_at: r.created_at,
@@ -163,4 +151,19 @@ impl Store {
 			reviews,
 		}))
 	}
+}
+
+pub(super) async fn finish(db: &mut SqliteConnection, id: i64, status: JobStatus, run: Option<RunId>, error: Option<&str>, reviews: &[ReviewId], now: Timestamp) -> eyre::Result<()> {
+	let ids: Vec<i64> = reviews.iter().map(|r| r.0).collect();
+	sqlx::query("UPDATE jobs SET status = ?, finished_at = ?, run_id = ?, error = ?, review_ids = ? WHERE id = ?")
+		.bind(status.as_ref())
+		.bind(fmt_ts(now))
+		.bind(run.map(|r| r.0))
+		.bind(error)
+		.bind(serde_json::to_string(&ids)?)
+		.bind(id)
+		.execute(db)
+		.await
+		.wrap_err_with(|| format!("finishing job {id}"))?;
+	Ok(())
 }

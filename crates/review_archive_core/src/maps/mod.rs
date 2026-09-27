@@ -3,12 +3,13 @@
 //!
 //! Whoever drives the browser (the engine's `Browser`, or your own) reads cards with
 //! [`parse::cards`], asks a [`WalkPolicy`] which to screenshot and when to stop, and
-//! turns the result into a [`Scan`] with [`scan_of`].
+//! turns the result into a [`Scan`] with [`NewestFirst::conclude`], [`Requested::conclude`]
+//! or [`scan_of`].
 
 pub mod parse;
 pub mod selectors;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
 pub use parse::Card;
@@ -38,6 +39,16 @@ pub enum WalkEnd {
 	Satisfied,
 	/// `max` cards were read.
 	Cap,
+	/// The page failed under the walk after it had read cards; what it read stands, and a
+	/// warning says why it stopped.
+	Interrupted,
+}
+
+impl WalkEnd {
+	/// Stopped before the list ran out or the policy was done.
+	pub fn cut_short(self) -> bool {
+		matches!(self, Self::Cap | Self::Interrupted)
+	}
 }
 
 /// A card and its screenshot, if one was taken.
@@ -72,20 +83,101 @@ impl Walked {
 			total: Some(0),
 		}
 	}
+
+	fn last_id(&self) -> Option<String> {
+		self.cards.last().map(|(c, _)| c.id.clone())
+	}
 }
 
-/// The scan of a target already archived: capture what is new or pending, stop after a
-/// full screen of archived cards in a row (everything older is archived too).
+/// The scan of a target: capture what is new or pending, and stop after a full screen of
+/// archived cards in a row (everything older is archived too) — but only once past where
+/// the last walk was cut short, with every pending review found or passed, and never on a
+/// target's first scan, which reads the whole list.
 #[derive(Debug)]
 pub struct NewestFirst<'a> {
 	known: &'a Known,
+	now: Timestamp,
+	/// Archived, not pending, in a row.
 	known_run: usize,
+	/// Read a full screen of archived cards past the cut: the rest of the list is archived.
+	caught_up: bool,
+	/// Past [`Known::cut_after`] (from the start, when there is none).
+	past_cut: bool,
+	/// Pending reviews not yet read, with the earliest each can have been posted.
+	pending: HashMap<&'a str, Timestamp>,
+	/// The latest the last dated card read can have been posted.
+	last_card_at: Option<Timestamp>,
 }
 
 impl<'a> NewestFirst<'a> {
-	/// A policy against what `known` holds.
-	pub fn new(known: &'a Known) -> Self {
-		Self { known, known_run: 0 }
+	/// A policy against what `known` holds; `now` dates the cards' relative dates.
+	pub fn new(known: &'a Known, now: Timestamp) -> Self {
+		let pending = known
+			.reviews
+			.iter()
+			.filter(|(_, k)| k.capture_pending && !k.gone)
+			.filter_map(|(id, k)| Some((id.as_str(), k.earliest()?)))
+			.collect();
+		Self {
+			known,
+			now,
+			known_run: 0,
+			caught_up: false,
+			past_cut: known.cut_after.is_none(),
+			pending,
+			last_card_at: None,
+		}
+	}
+
+	/// Pending reviews the walk has neither read nor gone past.
+	fn unreached(&self) -> usize {
+		self.pending.values().filter(|&&earliest| self.last_card_at.is_none_or(|last| earliest <= last)).count()
+	}
+
+	/// The scan the walk amounts to. `max` is the limit it was given: a scheduled scan that
+	/// hits it before reaching archived cards leaves a gap, which is a warning — and
+	/// [`Scan::cut_after`], so that the next scan fills it. So does one cut short with
+	/// reviews still without a screenshot below it — once: a gap-filling scan that still
+	/// cannot reach them leaves them pending. A walk that never got past the old cut keeps
+	/// it, even at an idle feed. A target's first scan stopping at its limit leaves no gap:
+	/// that limit is how deep the archive goes.
+	pub fn conclude(&self, walked: Walked, max: usize, now: Timestamp) -> Scan {
+		let end = walked.end;
+		let last = walked.last_id();
+		let unreached = self.unreached();
+		let mut scan = scan_of(walked, now);
+		let filling_gap = self.known.cut_after.is_some();
+		let cut_after = if scan.coverage == Coverage::Complete {
+			None
+		} else if !self.past_cut {
+			// not even past the old cut (a limit, a failure, or a feed that stalled): that gap
+			// is still the one to fill
+			self.known.cut_after.clone()
+		} else if !end.cut_short() || (end == WalkEnd::Cap && self.known.initial) {
+			// read to the end, or done; or a first scan at its limit, which is how deep the
+			// archive goes
+			None
+		} else if !self.caught_up {
+			last
+		} else if unreached > 0 && !filling_gap {
+			// caught up, but reviews still without a screenshot lie deeper than this scan may
+			// read: the next one reads deeper, once
+			last
+		} else {
+			if unreached > 0 {
+				scan.warnings
+					.push(format!("{unreached} reviews still without a screenshot lie deeper than a scan reads; they stay pending"));
+			}
+			None
+		};
+		if end == WalkEnd::Cap && (self.known.initial || !self.caught_up) {
+			scan.warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
+		}
+		if end.cut_short() && unreached > 0 && cut_after.is_some() {
+			scan.warnings.push(format!("{unreached} reviews still without a screenshot were not reached"));
+		}
+		scan.cut_after = cut_after;
+		scan
 	}
 }
 
@@ -95,54 +187,29 @@ impl WalkPolicy for NewestFirst<'_> {
 	}
 
 	fn observe(&mut self, card: &Card) {
-		self.known_run = if self.known.contains(&card.id) { self.known_run + 1 } else { 0 };
+		let at = card.date_raw.as_deref().and_then(|d| relative_date::estimate(d, self.now));
+		self.last_card_at = at.or(self.last_card_at);
+		self.pending.remove(card.id.as_str());
+		if !self.past_cut {
+			let cut = self.known.cut_after.as_deref();
+			// the cut card itself, or one that is surely older than it (it may be gone)
+			let older = || at.zip(cut.and_then(|c| self.known.reviews.get(c)?.earliest())).is_some_and(|(at, cut)| at < cut);
+			self.past_cut = cut == Some(card.id.as_str()) || older();
+			return;
+		}
+		let archived = self.known.reviews.get(&card.id).is_some_and(|k| !k.capture_pending);
+		self.known_run = if archived { self.known_run + 1 } else { 0 };
+		self.caught_up |= self.known_run >= SCREEN;
 	}
 
 	fn satisfied(&self) -> bool {
-		self.known_run >= SCREEN
+		!self.known.initial && self.caught_up && self.unreached() == 0
 	}
 }
 
-/// A one-off capture: screenshot every card, or only the named ones — and then stop as
-/// soon as they are all found.
-#[derive(Debug, Default)]
-pub struct CaptureAll {
-	wanted: Option<HashSet<String>>,
-}
-
-impl CaptureAll {
-	/// Every card, down to the walk's limit.
-	pub fn every() -> Self {
-		Self { wanted: None }
-	}
-
-	/// Only these review ids.
-	pub fn only(ids: impl IntoIterator<Item = String>) -> Self {
-		Self {
-			wanted: Some(ids.into_iter().collect()),
-		}
-	}
-}
-
-impl WalkPolicy for CaptureAll {
-	fn wants_capture(&self, card: &Card) -> bool {
-		self.wanted.as_ref().is_none_or(|w| w.contains(&card.id))
-	}
-
-	fn observe(&mut self, card: &Card) {
-		if let Some(w) = &mut self.wanted {
-			w.remove(&card.id);
-		}
-	}
-
-	fn satisfied(&self) -> bool {
-		self.wanted.as_ref().is_some_and(HashSet::is_empty)
-	}
-}
-
-/// An ad-hoc capture into the archive: screenshot what the archive still lacks (of the
-/// named reviews, when named), read down to the walk's limit or until the named ones are
-/// all found.
+/// An ad-hoc capture: screenshot what `known` still lacks (every card, against an empty
+/// one) of the named reviews when named, down to the walk's limit or until the named ones
+/// are all found.
 #[derive(Debug)]
 pub struct Requested<'a> {
 	known: &'a Known,
@@ -156,6 +223,16 @@ impl<'a> Requested<'a> {
 			known,
 			wanted: review_ids.map(|ids| ids.into_iter().collect()),
 		}
+	}
+
+	/// The scan the walk amounts to. Reaching the limit is what was asked for, not a
+	/// warning; it leaves a gap ([`Scan::cut_after`]) only on a target with an archive that
+	/// the walk never reached.
+	pub fn conclude(&self, walked: Walked, now: Timestamp) -> Scan {
+		let reached_archive = walked.cards.iter().any(|(c, _)| self.known.contains(&c.id));
+		let gap = walked.end == WalkEnd::Interrupted || (walked.end == WalkEnd::Cap && !self.known.initial && !reached_archive);
+		let cut_after = gap.then(|| walked.last_id()).flatten();
+		Scan { cut_after, ..scan_of(walked, now) }
 	}
 }
 
@@ -192,20 +269,9 @@ pub fn observed(card: Card, now: Timestamp) -> Observed {
 	}
 }
 
-/// The scan a walk amounts to. `max` is the limit it was given: hitting it is a warning,
-/// because a scheduled scan that never reaches archived cards leaves a gap.
-pub fn scan_of(walked: Walked, max: usize, now: Timestamp) -> Scan {
-	let capped = walked.end == WalkEnd::Cap;
-	let mut scan = scan_to_limit(walked, now);
-	if capped {
-		scan.warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
-	}
-	scan
-}
-
-/// [`scan_of`] for a walk whose limit was asked for (an ad-hoc capture of the newest `n`):
-/// reaching it is the point, not a warning.
-pub fn scan_to_limit(walked: Walked, now: Timestamp) -> Scan {
+/// The scan a walk amounts to: its cards as observations, and how far they can be trusted
+/// to reach. No warning for a limit and no gap; the policies' `conclude` add those.
+pub fn scan_of(walked: Walked, now: Timestamp) -> Scan {
 	let Walked {
 		cards,
 		end,
@@ -216,7 +282,12 @@ pub fn scan_to_limit(walked: Walked, now: Timestamp) -> Scan {
 	} = walked;
 	let reviews: Vec<Observed> = cards.into_iter().map(|(card, capture)| Observed { capture, ..observed(card, now) }).collect();
 	let coverage = coverage(&reviews, end, sorted, total, &mut warnings);
-	Scan { reviews, coverage, warnings }
+	Scan {
+		reviews,
+		coverage,
+		warnings,
+		cut_after: None,
+	}
 }
 
 /// How far a walk can be trusted to have looked.
@@ -244,6 +315,7 @@ fn coverage(reviews: &[Observed], end: WalkEnd, sorted: bool, total: Option<u64>
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::{KnownReview, ReviewId};
 
 	fn card(id: &str, date: &str) -> WalkedCard {
 		(
@@ -277,30 +349,55 @@ mod tests {
 		vec![card("a", "a day ago"), card("b", "a week ago"), card("c", "2 months ago")]
 	}
 
+	/// `ids` archived, as first seen "a week ago" on 2026-09-01 unless pending.
+	fn known(ids: impl IntoIterator<Item = String>, pending: &[&str]) -> Known {
+		Known {
+			reviews: ids
+				.into_iter()
+				.enumerate()
+				.map(|(i, id)| {
+					let review = KnownReview {
+						id: ReviewId(i as i64),
+						content_hash: String::new(),
+						capture_pending: pending.contains(&id.as_str()),
+						gone: false,
+						published_est: Some("2026-08-25T00:00:00Z".parse().unwrap()),
+						published_raw: Some("a week ago".into()),
+						author: String::new(),
+						rating: None,
+						text: None,
+					};
+					(id, review)
+				})
+				.collect(),
+			..Default::default()
+		}
+	}
+
 	#[test]
 	fn the_end_of_the_feed_is_complete_only_when_the_count_agrees() {
-		assert_eq!(scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, Some(3)), 200, now()).coverage, Coverage::Complete);
+		assert_eq!(scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, Some(3)), now()).coverage, Coverage::Complete);
 		// a stalled lazy load: the feed went idle with most of the list unseen
-		let stalled = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, Some(4000)), 200, now());
+		let stalled = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, Some(4000)), now());
 		assert_eq!(stalled.coverage, Coverage::DownTo(Some("2026-07-26T12:00:00Z".parse().unwrap())));
 		// no count on the page: same
-		let uncounted = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, None), 200, now());
+		let uncounted = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, true, None), now());
 		assert!(matches!(uncounted.coverage, Coverage::DownTo(Some(_))));
 	}
 
 	#[test]
 	fn an_unconfirmed_sort_concludes_nothing() {
-		let s = scan_of(walked(newest_first(), WalkEnd::Satisfied, false, Some(4000)), 200, now());
+		let s = scan_of(walked(newest_first(), WalkEnd::Satisfied, false, Some(4000)), now());
 		assert_eq!(s.coverage, Coverage::DownTo(None));
 		// a short list read to its end is complete whatever its order
-		let all = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, false, Some(3)), 200, now());
+		let all = scan_of(walked(newest_first(), WalkEnd::ReachedEnd, false, Some(3)), now());
 		assert_eq!(all.coverage, Coverage::Complete);
 	}
 
 	#[test]
 	fn a_list_out_of_date_order_concludes_nothing() {
 		let shuffled = vec![card("a", "a week ago"), card("b", "a year ago"), card("c", "a day ago")];
-		let s = scan_of(walked(shuffled, WalkEnd::Satisfied, true, None), 200, now());
+		let s = scan_of(walked(shuffled, WalkEnd::Satisfied, true, None), now());
 		assert_eq!(s.coverage, Coverage::DownTo(None));
 		assert_eq!(s.warnings.len(), 1);
 	}
@@ -308,42 +405,24 @@ mod tests {
 	#[test]
 	fn a_requested_limit_is_not_a_warning() {
 		let w = || walked(newest_first(), WalkEnd::Cap, true, Some(4000));
-		assert_eq!(scan_of(w(), 3, now()).warnings.len(), 1);
-		let s = scan_to_limit(w(), now());
+		let archived = known(["z".to_owned()], &[]);
+		assert_eq!(NewestFirst::new(&archived, now()).conclude(w(), 3, now()).warnings.len(), 1);
+		let s = Requested::new(&Known::default(), None::<Vec<String>>).conclude(w(), now());
 		assert!(s.warnings.is_empty());
 		assert!(matches!(s.coverage, Coverage::DownTo(Some(_))));
 	}
 
 	#[test]
 	fn a_place_without_reviews_is_an_empty_complete_scan() {
-		let s = scan_of(Walked::empty(String::new()), 200, now());
-		assert_eq!((s.reviews.len(), s.coverage), (0, Coverage::Complete));
+		let s = NewestFirst::new(&Known::default(), now()).conclude(Walked::empty(String::new()), 200, now());
+		assert_eq!((s.reviews.len(), s.coverage, s.cut_after), (0, Coverage::Complete, None));
 		assert!(s.warnings.is_empty());
 	}
 
 	#[test]
 	fn newest_first_stops_after_a_screen_of_archived_cards() {
-		let known = Known {
-			reviews: (0..SCREEN)
-				.map(|i| {
-					(
-						format!("k{i}"),
-						crate::KnownReview {
-							id: crate::ReviewId(i as i64),
-							content_hash: String::new(),
-							capture_pending: false,
-							gone: false,
-							published_est: None,
-							published_raw: None,
-							author: String::new(),
-							rating: None,
-							text: None,
-						},
-					)
-				})
-				.collect(),
-		};
-		let mut p = NewestFirst::new(&known);
+		let known = known((0..SCREEN).map(|i| format!("k{i}")), &[]);
+		let mut p = NewestFirst::new(&known, now());
 		p.observe(&card("new", "a day ago").0);
 		for i in 0..SCREEN - 1 {
 			p.observe(&card(&format!("k{i}"), "a week ago").0);
@@ -352,16 +431,111 @@ mod tests {
 		p.observe(&card(&format!("k{}", SCREEN - 1), "a week ago").0);
 		assert!(p.satisfied());
 		assert!(p.wants_capture(&card("new", "").0) && !p.wants_capture(&card("k0", "").0));
+
+		// a first scan reads on regardless
+		let first = Known { initial: true, ..known.clone() };
+		let mut p = NewestFirst::new(&first, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a week ago").0));
+		assert!(!p.satisfied());
+	}
+
+	/// A scan capped among new cards leaves the rest unread; the next one reads past where
+	/// it stopped before archived cards can end it, and says where to resume if it is cut
+	/// short again.
+	#[test]
+	fn a_walk_cut_short_is_resumed_past_where_it_stopped() {
+		let archived = known(["old".to_owned()], &[]);
+		let capped = walked(vec![card("n1", "a day ago"), card("n2", "a day ago")], WalkEnd::Cap, true, None);
+		let first = NewestFirst::new(&archived, now()).conclude(capped, 2, now());
+		assert_eq!(first.cut_after.as_deref(), Some("n2"));
+		assert_eq!(first.warnings.len(), 1);
+
+		let mut resumed = known((0..SCREEN).map(|i| format!("n{i}")), &[]);
+		resumed.cut_after = Some(format!("n{}", SCREEN - 1));
+		let mut p = NewestFirst::new(&resumed, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("n{i}"), "a week ago").0));
+		assert!(!p.satisfied(), "still above the cut");
+		// cut short again before getting past the old cut: that one stays
+		let again = walked(vec![card("n0", "a week ago")], WalkEnd::Interrupted, true, None);
+		let mut early = NewestFirst::new(&resumed, now());
+		early.observe(&card("n0", "a week ago").0);
+		assert_eq!(early.conclude(again, 2000, now()).cut_after, resumed.cut_after);
+
+		// past it, a screen of archived cards ends the walk: the gap is closed
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("n{i}"), "a week ago").0));
+		assert!(p.satisfied());
+		let closed = p.conclude(walked(vec![], WalkEnd::Satisfied, true, None), 2000, now());
+		assert_eq!(closed.cut_after, None);
+	}
+
+	/// A pending card deeper than the first screen keeps the walk going until it is read or
+	/// passed; not reaching it is a warning.
+	#[test]
+	fn pending_reviews_are_walked_to() {
+		let mut ids: Vec<String> = (0..SCREEN).map(|i| format!("k{i}")).collect();
+		ids.push("pending".into());
+		let archived = known(ids, &["pending"]);
+		let mut p = NewestFirst::new(&archived, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a day ago").0));
+		assert!(!p.satisfied(), "the pending one (posted 2026-08-18 at the earliest) is further down");
+		let capped = p.conclude(walked(vec![card("k0", "a day ago")], WalkEnd::Cap, true, None), 10, now());
+		assert_eq!(capped.warnings, ["1 reviews still without a screenshot were not reached"]);
+		assert_eq!(capped.cut_after.as_deref(), Some("k0"), "the next scan reads deeper, with the larger limit");
+		p.observe(&card("older", "2 months ago").0);
+		assert!(p.satisfied(), "walked past it: it is gone from the list, or its date moved");
+	}
+
+	/// A pending review deeper than even the gap-filling scan reads is not chased forever:
+	/// that scan gives up on it rather than set another cut.
+	#[test]
+	fn a_pending_review_out_of_reach_is_given_up_on() {
+		let mut ids: Vec<String> = (0..SCREEN).map(|i| format!("k{i}")).collect();
+		ids.extend(["pending".into(), "cut".into()]);
+		let mut deep = known(ids, &["pending"]);
+		deep.cut_after = Some("cut".into());
+		let mut p = NewestFirst::new(&deep, now());
+		p.observe(&card("cut", "a day ago").0);
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a day ago").0));
+		let s = p.conclude(walked(vec![card("k9", "a day ago")], WalkEnd::Cap, true, None), 2000, now());
+		assert_eq!(s.cut_after, None);
+		assert_eq!(s.warnings, ["1 reviews still without a screenshot lie deeper than a scan reads; they stay pending"]);
+	}
+
+	/// The end of a feed that may have stalled does not close a gap the walk never got to;
+	/// a walk that got past the cut to the end of the feed does.
+	#[test]
+	fn an_idle_feed_keeps_a_gap_it_did_not_reach() {
+		let mut gap = known((0..3).map(|i| format!("n{i}")), &[]);
+		gap.cut_after = Some("n2".into());
+		let mut p = NewestFirst::new(&gap, now());
+		p.observe(&card("n0", "a week ago").0);
+		let stalled = p.conclude(walked(vec![card("n0", "a week ago")], WalkEnd::ReachedEnd, true, Some(4000)), 2000, now());
+		assert_eq!(stalled.cut_after.as_deref(), Some("n2"));
+
+		p.observe(&card("n2", "a week ago").0);
+		let ended = p.conclude(walked(vec![card("n2", "a week ago")], WalkEnd::ReachedEnd, true, None), 2000, now());
+		assert_eq!(ended.cut_after, None);
+	}
+
+	/// A page that fails after the walk caught up with the archive leaves nothing unread.
+	#[test]
+	fn an_interruption_after_catching_up_leaves_no_gap() {
+		let archived = known((0..SCREEN).map(|i| format!("k{i}")), &[]);
+		let mut p = NewestFirst::new(&archived, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a week ago").0));
+		let s = p.conclude(walked(vec![card("k9", "a week ago")], WalkEnd::Interrupted, true, None), 200, now());
+		assert_eq!(s.cut_after, None);
 	}
 
 	#[test]
-	fn capture_all_named_stops_when_all_are_found() {
-		let mut p = CaptureAll::only(["b".to_owned()]);
+	fn requested_named_stops_when_all_are_found() {
+		let none = Known::default();
+		let mut p = Requested::new(&none, Some(["b".to_owned()]));
 		assert!(!p.wants_capture(&card("a", "").0) && p.wants_capture(&card("b", "").0));
 		p.observe(&card("a", "").0);
 		assert!(!p.satisfied());
 		p.observe(&card("b", "").0);
 		assert!(p.satisfied());
-		assert!(!CaptureAll::every().satisfied());
+		assert!(!Requested::new(&none, None::<Vec<String>>).satisfied());
 	}
 }

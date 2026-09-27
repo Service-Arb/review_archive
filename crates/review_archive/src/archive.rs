@@ -1,19 +1,25 @@
 //! The facade: one object that owns the browser, the API clients and (with a data dir)
-//! the store, and does what the CLI and the HTTP API do.
+//! the store, and does what the CLI and the HTTP API do. It takes the API's DTOs as they
+//! come and answers with [`Rejected`](review_archive_core::Rejected) for the caller's
+//! mistakes, so whatever serves it only translates.
 
 use std::sync::Arc;
-#[cfg(all(feature = "store", feature = "gbp"))]
+#[cfg(all(feature = "store", feature = "maps"))]
 use std::sync::OnceLock;
 #[cfg(feature = "store")]
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 
 #[cfg(any(feature = "maps", feature = "store"))]
 use jiff::Timestamp;
+#[cfg(any(feature = "maps", feature = "store"))]
+use review_archive_core::check_lang;
+use review_archive_core::dto::CaptureLimits;
 #[cfg(feature = "store")]
 use review_archive_core::{
-	GbpLocation, ReviewId, Target, TargetId, TargetKind,
-	dto::{self, DayStats, JobDto, JobKind, NewWebhook, ReviewDetail, ReviewDto, RunDto, TargetDetail, TargetPatch, WebhookDto},
-	fmt_ts, schedule,
+	GbpLocation, Rejected, ReviewId, Target, TargetId, TargetKind,
+	dto::{self, DayStats, ExportQuery, JobDto, JobKind, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetPatch, WebhookDto},
+	fmt_ts, parse_date, parse_interval, parse_since,
+	schedule::{self, LastRun},
 };
 
 #[cfg(feature = "maps")]
@@ -24,13 +30,14 @@ use crate::config::{Config, Defaults};
 #[cfg(feature = "store")]
 use crate::{
 	places::Resolved,
-	record::{Recorded, Recorder, SystemClock},
+	record::{Recorded, Recorder},
 	sources::ReviewSource,
 	store::{
-		JobParams, NewTarget, Store,
+		InsertTarget, Store,
 		blobs::BlobStore,
-		export::{self, Exported},
+		export::{self, Destination, Exported},
 	},
+	webhooks::{Deliverer, DeliveryReport},
 };
 
 /// A review archive: scans places, keeps what it saw, answers questions about it.
@@ -67,9 +74,11 @@ struct Inner {
 	secrets: Secrets,
 	#[cfg(feature = "store")]
 	http: reqwest::Client,
+	#[cfg(feature = "store")]
+	webhooks: Deliverer,
 	#[cfg(feature = "maps")]
 	browser: Browser,
-	#[cfg(all(feature = "store", feature = "gbp"))]
+	#[cfg(all(feature = "store", feature = "maps"))]
 	gbp: OnceLock<crate::sources::gbp::Client>,
 	#[cfg(feature = "store")]
 	store: Option<Stored>,
@@ -94,10 +103,8 @@ pub struct CaptureRequest {
 	pub place_id: String,
 	/// UI language of the Maps page; the archive's default when `None`.
 	pub lang: Option<String>,
-	/// Cards read at most; the archive's per-scan limit when `None`.
-	pub max_reviews: Option<usize>,
-	/// Only these reviews (by Google's review id); the walk stops once all are found.
-	pub review_ids: Option<Vec<String>>,
+	/// How much to read; the archive's per-scan limit when `max_reviews` is `None`.
+	pub limits: CaptureLimits,
 }
 
 impl CaptureRequest {
@@ -106,8 +113,7 @@ impl CaptureRequest {
 		Self {
 			place_id: place_id.into(),
 			lang: None,
-			max_reviews: None,
-			review_ids: None,
+			limits: CaptureLimits::default(),
 		}
 	}
 
@@ -117,9 +123,9 @@ impl CaptureRequest {
 		self
 	}
 
-	/// Sets [`Self::max_reviews`].
+	/// Sets the most cards read.
 	pub fn max_reviews(mut self, n: usize) -> Self {
-		self.max_reviews = Some(n);
+		self.limits.max_reviews = Some(n);
 		self
 	}
 }
@@ -132,24 +138,6 @@ pub struct Captured {
 	/// The reviews, newest first, each with its PNG (provenance written in) when one was
 	/// taken; how much of the list they span; what went wrong along the way.
 	pub scan: review_archive_core::Scan,
-}
-
-/// A target to add; see [`Archive::add_target`].
-#[cfg(feature = "store")]
-#[derive(Clone, Debug, Default)]
-pub struct AddTarget {
-	/// A place id, or a Google Maps URL (resolved with the Places API when it has no id).
-	pub place: String,
-	/// The place's name, or the id, when `None`.
-	pub label: Option<String>,
-	/// The archive's default when `None`.
-	pub lang: Option<String>,
-	/// The archive's default when `None`; at least an hour.
-	pub interval: Option<Duration>,
-	/// Makes it a `gbp` target.
-	pub gbp: Option<GbpLocation>,
-	/// Added disabled: kept, not scheduled (ad-hoc captures).
-	pub disabled: bool,
 }
 
 /// A target just added, and the search that found its place, if one was needed.
@@ -201,11 +189,15 @@ impl Archive {
 				defaults: config.defaults,
 				#[cfg(feature = "store")]
 				secrets: config.secrets,
+				// Places and the Business Profile API answer in seconds; a hung call must not
+				// hold the one worker forever.
 				#[cfg(feature = "store")]
-				http: reqwest::Client::new(),
+				http: reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?,
+				#[cfg(feature = "store")]
+				webhooks: Deliverer::new(&config.webhooks)?,
 				#[cfg(feature = "maps")]
 				browser,
-				#[cfg(all(feature = "store", feature = "gbp"))]
+				#[cfg(all(feature = "store", feature = "maps"))]
 				gbp: OnceLock::new(),
 				#[cfg(feature = "store")]
 				store,
@@ -224,7 +216,7 @@ impl Archive {
 		&self.inner.browser
 	}
 
-	/// Stops the browser until the next scan needs it.
+	/// Stops the browser until the next scan needs it, and lets go of its profile.
 	pub async fn close(&self) {
 		#[cfg(feature = "maps")]
 		self.inner.browser.close().await;
@@ -234,17 +226,17 @@ impl Archive {
 	/// PNGs come back in memory. Works on an archive without a data dir.
 	#[cfg(feature = "maps")]
 	pub async fn capture_place(&self, req: &CaptureRequest) -> eyre::Result<Captured> {
-		use review_archive_core::maps::{CaptureAll, scan_to_limit};
+		use review_archive_core::{Known, maps::Requested};
 
 		let lang = req.lang.as_deref().unwrap_or(&self.inner.defaults.lang);
-		let max = req.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
-		let mut policy = match &req.review_ids {
-			Some(ids) => CaptureAll::only(ids.iter().cloned()),
-			None => CaptureAll::every(),
-		};
+		check_lang(lang)?;
+		let max = req.limits.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
+		// nothing archived: every card is wanted, and stopping at the limit leaves no gap
+		let nothing = Known { initial: true, ..Known::default() };
+		let mut policy = Requested::new(&nothing, req.limits.review_ids.clone());
 		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, max).await?;
 		let page_url = walked.page_url.clone();
-		let mut scan = scan_to_limit(walked, Timestamp::now());
+		let mut scan = policy.conclude(walked, Timestamp::now());
 		for r in &mut scan.reviews {
 			if let Some(c) = &mut r.capture {
 				c.png = crate::png_meta::provenance(c, &req.place_id, &r.source_review_id)?;
@@ -262,11 +254,6 @@ impl Archive {
 		Ok(&self.stored()?.store)
 	}
 
-	/// The PNG store.
-	pub fn blobs(&self) -> eyre::Result<&BlobStore> {
-		Ok(&self.stored()?.blobs)
-	}
-
 	fn stored(&self) -> eyre::Result<&Stored> {
 		self.inner
 			.store
@@ -274,33 +261,39 @@ impl Archive {
 			.ok_or_else(|| eyre::eyre!("this archive was opened without a data dir, so it stores nothing"))
 	}
 
-	/// Adds a target. A Maps URL without a place id is resolved with the Places API, which
-	/// needs `google_maps_key`.
-	pub async fn add_target(&self, req: AddTarget) -> eyre::Result<Added> {
+	/// Watches a place: a place id, or a Google Maps URL (resolved with the Places API when
+	/// it has no id, which needs `google_maps_key`). A `gbp` location makes it a `gbp`
+	/// target.
+	pub async fn add_target(&self, req: &NewTarget) -> eyre::Result<Added> {
+		let place = req
+			.place
+			.as_deref()
+			.or(req.maps_url.as_deref())
+			.ok_or_else(|| Rejected::invalid("name the place: `place` or `maps_url`"))?;
+		let interval = req.interval.as_deref().map(parse_interval).transpose()?;
+		let gbp = req.gbp.as_deref().map(str::parse::<GbpLocation>).transpose()?;
+		self.insert_target(place, req.label.clone(), req.lang.clone(), interval, gbp, true).await
+	}
+
+	async fn insert_target(&self, place: &str, label: Option<String>, lang: Option<String>, interval: Option<Duration>, gbp: Option<GbpLocation>, enabled: bool) -> eyre::Result<Added> {
 		let store = self.store()?;
-		let interval = req.interval.unwrap_or(self.inner.defaults.interval);
+		let interval = interval.unwrap_or(self.inner.defaults.interval);
 		if interval < schedule::MIN_INTERVAL {
-			return Err(crate::rejected::invalid("the interval must be at least 1h"));
+			return Err(Rejected::invalid("the interval must be at least 1h").into());
 		}
-		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), &req.place).await?;
-		let kind = if req.gbp.is_some() { TargetKind::Gbp } else { TargetKind::Maps };
-		let label = req.label.or_else(|| resolved.as_ref().and_then(|r| r.name.clone())).unwrap_or_else(|| place_id.clone());
-		let id = store
-			.add_target(
-				&NewTarget {
-					label,
-					kind,
-					place_id,
-					gbp: req.gbp,
-					lang: req.lang.unwrap_or_else(|| self.inner.defaults.lang.clone()),
-					interval,
-				},
-				Timestamp::now(),
-			)
-			.await?;
-		if req.disabled {
-			store.set_enabled(id, false).await?;
-		}
+		let lang = lang.unwrap_or_else(|| self.inner.defaults.lang.clone());
+		check_lang(&lang)?;
+		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
+		let target = InsertTarget {
+			label: label.or_else(|| resolved.as_ref().and_then(|r| r.name.clone())).unwrap_or_else(|| place_id.clone()),
+			kind: if gbp.is_some() { TargetKind::Gbp } else { TargetKind::Maps },
+			place_id,
+			gbp,
+			lang,
+			interval,
+			enabled,
+		};
+		let id = store.add_target(&target, Timestamp::now()).await?;
 		Ok(Added {
 			target: store.target(id).await?,
 			resolved,
@@ -317,13 +310,22 @@ impl Archive {
 		self.store()?.target(id).await
 	}
 
-	/// Enables or disables a target. Nothing archived is ever deleted.
-	pub async fn set_enabled(&self, id: TargetId, enabled: bool) -> eyre::Result<()> {
-		self.store()?.set_enabled(id, enabled).await
+	/// Changes a target's label, language, interval or enabled flag. Nothing archived is
+	/// ever deleted.
+	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<Target> {
+		let store = self.store()?;
+		store.update_target(id, patch).await?;
+		store.target(id).await
+	}
+
+	/// The target's last scheduled run and the failures in a row up to it.
+	pub async fn last_run(&self, id: TargetId) -> eyre::Result<Option<LastRun>> {
+		self.store()?.last_run(id).await
 	}
 
 	/// Scans one target now and records the run. A failing source is a `failed` run, not
-	/// an `Err`; `Err` is the archive itself failing.
+	/// an `Err`; `Err` is the archive itself failing — or the browser profile held by
+	/// another process, which is no run at all.
 	#[cfg(feature = "maps")]
 	pub async fn scan_target(&self, id: TargetId) -> eyre::Result<dto::RunSummary> {
 		let target = self.target(id).await?;
@@ -333,22 +335,20 @@ impl Archive {
 	/// [`Self::scan_target`], for a target already loaded.
 	#[cfg(feature = "maps")]
 	pub async fn scan(&self, target: &Target) -> eyre::Result<dto::RunSummary> {
-		Ok(self.scan_recorded(target).await?.summary)
+		Ok(self.scan_recorded(target, None).await?.summary)
 	}
 
 	#[cfg(feature = "maps")]
-	async fn scan_recorded(&self, target: &Target) -> eyre::Result<Recorded> {
+	async fn scan_recorded(&self, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
+		self.inner.browser.claim().await?;
 		match target.kind {
 			TargetKind::Maps => {
 				let source = crate::sources::maps::MapsSource {
 					browser: &self.inner.browser,
 					defaults: &self.inner.defaults,
 				};
-				self.record(&source, target).await
+				self.record_job(&source, target, job).await
 			}
-			#[cfg(not(feature = "gbp"))]
-			TargetKind::Gbp => self.record(&Unavailable(eyre::eyre!("built without the gbp feature")), target).await,
-			#[cfg(feature = "gbp")]
 			TargetKind::Gbp => match self.gbp_client() {
 				Ok(client) => {
 					let source = crate::sources::gbp::GbpSource {
@@ -356,11 +356,11 @@ impl Archive {
 						browser: &self.inner.browser,
 						defaults: &self.inner.defaults,
 					};
-					self.record(&source, target).await
+					self.record_job(&source, target, job).await
 				}
 				// Missing credentials fail the run like any source error, so the target
 				// backs off instead of spinning.
-				Err(e) => self.record(&Unavailable(e), target).await,
+				Err(e) => self.record_job(&Unavailable(e), target, job).await,
 			},
 		}
 	}
@@ -368,17 +368,21 @@ impl Archive {
 	/// Records a scan of `target` by any source: another platform's reviews go into the
 	/// same archive this way.
 	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target) -> eyre::Result<Recorded> {
+		self.record_job(source, target, None).await
+	}
+
+	async fn record_job<S: ReviewSource>(&self, source: &S, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
 		let stored = self.stored()?;
 		Recorder {
 			store: &stored.store,
 			blobs: &stored.blobs,
-			clock: &SystemClock,
+			now: Timestamp::now,
 		}
-		.record(source, target)
+		.record(source, target, job)
 		.await
 	}
 
-	#[cfg(feature = "gbp")]
+	#[cfg(feature = "maps")]
 	fn gbp_client(&self) -> eyre::Result<&crate::sources::gbp::Client> {
 		if let Some(c) = self.inner.gbp.get() {
 			return Ok(c);
@@ -390,13 +394,6 @@ impl Archive {
 			.clone()
 			.ok_or_else(|| eyre::eyre!("GBP_CLIENT_ID, GBP_CLIENT_SECRET and GBP_REFRESH_TOKEN are not all set (needed for gbp targets)"))?;
 		Ok(self.inner.gbp.get_or_init(|| crate::sources::gbp::Client::new(self.inner.http.clone(), creds)))
-	}
-
-	/// Changes a target's label, language, interval or enabled flag.
-	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<Target> {
-		let store = self.store()?;
-		store.update_target(id, patch).await?;
-		store.target(id).await
 	}
 
 	/// A target with its latest run, what is archived, and when it is scanned next.
@@ -420,23 +417,31 @@ impl Archive {
 		})
 	}
 
-	/// A target's runs, newest first.
-	pub async fn runs(&self, id: TargetId, limit: u32) -> eyre::Result<Vec<RunDto>> {
+	/// A target's runs, newest first: 20 unless asked, 500 at most.
+	pub async fn runs(&self, id: TargetId, q: &RunsQuery) -> eyre::Result<Vec<RunDto>> {
 		let store = self.store()?;
 		store.target(id).await?;
-		store.runs(id, limit).await
+		store.runs(id, q.limit.unwrap_or(20).min(500)).await
 	}
 
 	/// A review with every version and capture.
-	pub async fn review(&self, id: ReviewId) -> eyre::Result<Option<ReviewDetail>> {
-		self.store()?.review(id).await
+	pub async fn review(&self, id: ReviewId) -> eyre::Result<ReviewDetail> {
+		Ok(self.store()?.review(id).await?.ok_or_else(|| Rejected::not_found(format!("no review {id}")))?)
+	}
+
+	/// Reviews of a target: first seen at or after `since`, gone or not.
+	pub async fn reviews(&self, target: TargetId, q: &ReviewsQuery) -> eyre::Result<Vec<ReviewDto>> {
+		let since = q.since.as_deref().map(parse_since).transpose()?;
+		let store = self.store()?;
+		store.target(target).await?;
+		store.reviews(target, since, q.gone).await
 	}
 
 	/// Queues a scan of a target now, ahead of the scheduled ones. Returns the job id.
 	pub async fn enqueue_scan(&self, id: TargetId) -> eyre::Result<i64> {
 		let store = self.store()?;
 		store.target(id).await?;
-		store.enqueue_job(JobKind::Scan, id, None, Timestamp::now()).await
+		store.enqueue_job(JobKind::Scan, id, None, self.inner.defaults.max_queued_jobs, Timestamp::now()).await
 	}
 
 	/// Queues an ad-hoc capture of a place. Nothing is registered: the results are kept
@@ -448,40 +453,35 @@ impl Archive {
 			.place
 			.as_deref()
 			.or(req.maps_url.as_deref())
-			.ok_or_else(|| crate::rejected::invalid("name the place: `place` or `maps_url`"))?;
+			.ok_or_else(|| Rejected::invalid("name the place: `place` or `maps_url`"))?;
+		let most = self.inner.defaults.max_reviews_initial;
+		if req.limits.max_reviews.is_some_and(|n| n > most) || req.limits.review_ids.as_ref().is_some_and(|ids| ids.len() > most) {
+			return Err(Rejected::invalid(format!("a capture reads {most} reviews at most")).into());
+		}
 		let lang = req.lang.clone().unwrap_or_else(|| self.inner.defaults.lang.clone());
+		check_lang(&lang)?;
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
 		let target = match store.find_target(&place_id, &lang).await? {
 			Some(t) => t,
 			None => {
 				let name = resolved.and_then(|r| r.name).unwrap_or_else(|| place_id.clone());
-				self.add_target(AddTarget {
-					place: place_id.clone(),
-					label: Some(format!("ad hoc: {name}")),
-					lang: Some(lang),
-					disabled: true,
-					..Default::default()
-				})
-				.await?
-				.target
+				self.insert_target(&place_id, Some(format!("ad hoc: {name}")), Some(lang), None, None, false).await?.target
 			}
 		};
-		let params = JobParams {
-			max_reviews: req.max_reviews,
-			review_ids: req.review_ids.clone(),
-		};
-		store.enqueue_job(JobKind::Capture, target.id, Some(&params), Timestamp::now()).await
+		store
+			.enqueue_job(JobKind::Capture, target.id, Some(&req.limits), self.inner.defaults.max_queued_jobs, Timestamp::now())
+			.await
 	}
 
 	/// A job, and once done what it saw.
-	pub async fn job(&self, id: i64) -> eyre::Result<Option<JobDto>> {
-		self.store()?.job(id).await
+	pub async fn job(&self, id: i64) -> eyre::Result<JobDto> {
+		Ok(self.store()?.job(id).await?.ok_or_else(|| Rejected::not_found(format!("no job {id}")))?)
 	}
 
-	/// Fails the jobs a previous process died running. Call once on start, before
-	/// [`Self::run_next_job`].
-	pub async fn recover_jobs(&self) -> eyre::Result<u64> {
-		self.store()?.fail_interrupted_jobs(Timestamp::now()).await
+	/// Fails the jobs and runs a previous process died running. Call once on start, before
+	/// [`Self::run_next_job`]. Returns the jobs failed.
+	pub async fn recover(&self) -> eyre::Result<u64> {
+		self.store()?.fail_interrupted(Timestamp::now()).await
 	}
 
 	/// Runs the oldest queued job to its end, if there is one, and returns it as it ended.
@@ -495,46 +495,39 @@ impl Archive {
 		let outcome = async {
 			let target = store.target(job.target).await?;
 			match job.kind {
-				JobKind::Scan => self.scan_recorded(&target).await,
+				JobKind::Scan => self.scan_recorded(&target, Some(job.id)).await,
 				JobKind::Capture => {
+					self.inner.browser.claim().await?;
+					let d = &self.inner.defaults;
 					let source = crate::sources::maps::RequestedSource {
 						browser: &self.inner.browser,
-						max: job.params.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan),
-						review_ids: job.params.review_ids.clone(),
+						max: job.limits.max_reviews.unwrap_or(d.max_reviews_per_scan).min(d.max_reviews_initial),
+						limits: &job.limits,
 					};
-					self.record(&source, &target).await
+					self.record_job(&source, &target, Some(job.id)).await
 				}
 			}
 		}
 		.await;
-		match outcome {
-			Ok(rec) => {
-				let (status, error) = match rec.summary.status {
-					dto::RunStatus::Failed => (dto::JobStatus::Failed, rec.summary.error.clone()),
-					dto::RunStatus::Ok | dto::RunStatus::Partial => (dto::JobStatus::Done, None),
-				};
-				store.finish_job(job.id, status, Some(rec.run), error.as_deref(), &rec.seen, Timestamp::now()).await?;
-			}
-			Err(e) => {
-				store.finish_job(job.id, dto::JobStatus::Failed, None, Some(&format!("{e:#}")), &[], Timestamp::now()).await?;
-				return Err(e);
-			}
+		if let Err(e) = outcome {
+			// what the caller did wrong (the target is gone) is theirs to read; the rest stays in the log
+			let error = e.downcast_ref::<Rejected>().map_or_else(|| "internal error".to_owned(), ToString::to_string);
+			tracing::warn!(job = job.id, error = %format!("{e:#}"), "job failed");
+			store.finish_job(job.id, dto::JobStatus::Failed, None, Some(&error), &[], Timestamp::now()).await?;
+			return Err(e);
 		}
 		store.job(job.id).await
 	}
 
-	/// Adds a webhook. Its URL must be http(s) and its secret 16+ characters.
+	/// Adds a webhook: its URL http(s) to a host webhooks may go to, its secret 16+
+	/// characters.
 	pub async fn add_webhook(&self, hook: &NewWebhook) -> eyre::Result<WebhookDto> {
-		use crate::rejected::invalid;
-		let url: reqwest::Url = hook.url.parse().map_err(|e| invalid(format!("webhook url {:?}: {e}", hook.url)))?;
-		if !matches!(url.scheme(), "http" | "https") {
-			return Err(invalid(format!("webhook url must be http or https, not {}", url.scheme())));
-		}
+		self.inner.webhooks.check_url(&hook.url)?;
 		if hook.events.is_empty() {
-			return Err(invalid("subscribe the webhook to at least one event"));
+			return Err(Rejected::invalid("subscribe the webhook to at least one event").into());
 		}
 		if hook.secret.len() < 16 {
-			return Err(invalid("the webhook secret is too short to be one (16+ characters)"));
+			return Err(Rejected::invalid("the webhook secret is too short to be one (16+ characters)").into());
 		}
 		self.store()?.add_webhook(hook, Timestamp::now()).await
 	}
@@ -544,45 +537,46 @@ impl Archive {
 		self.store()?.webhooks().await
 	}
 
-	/// Removes a webhook, and what it was still owed. `false` when there was none.
-	pub async fn delete_webhook(&self, id: i64) -> eyre::Result<bool> {
-		self.store()?.delete_webhook(id).await
+	/// Removes a webhook, and what it was still owed.
+	pub async fn delete_webhook(&self, id: i64) -> eyre::Result<()> {
+		if !self.store()?.delete_webhook(id).await? {
+			return Err(Rejected::not_found(format!("no webhook {id}")).into());
+		}
+		Ok(())
 	}
 
 	/// Sends what the outbox has due, once.
-	pub async fn deliver_webhooks(&self) -> eyre::Result<crate::webhooks::DeliveryReport> {
-		crate::webhooks::deliver_due(self.store()?, &self.inner.http, Timestamp::now()).await
+	pub async fn deliver_webhooks(&self) -> eyre::Result<DeliveryReport> {
+		self.inner.webhooks.deliver_due(self.store()?, Timestamp::now()).await
 	}
 
-	/// Reviews of a target: first seen at or after `since`, gone or not.
-	pub async fn reviews(&self, target: TargetId, since: Option<Timestamp>, gone: Option<bool>) -> eyre::Result<Vec<ReviewDto>> {
-		self.store()?.reviews(target, since, gone).await
-	}
-
-	/// The PNG of a recorded capture. `None` for a hash the archive never recorded, even if
-	/// a file by that name exists.
-	pub async fn capture_png(&self, sha256: &str) -> eyre::Result<Option<Vec<u8>>> {
+	/// The PNG of a recorded capture. [`Rejected::NotFound`] for a hash the archive never
+	/// recorded, even if a file by that name exists.
+	pub async fn capture_png(&self, sha256: &str) -> eyre::Result<Vec<u8>> {
 		let stored = self.stored()?;
-		let Some(path) = stored.blobs.path_of(sha256) else {
-			return Ok(None);
-		};
+		let not_found = || Rejected::not_found("no such capture");
+		let path = stored.blobs.path_of(sha256).ok_or_else(not_found)?;
 		if !stored.store.capture_exists(sha256).await? {
-			return Ok(None);
+			return Err(not_found().into());
 		}
 		match tokio::fs::read(&path).await {
-			Ok(b) => Ok(Some(b)),
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+			Ok(b) => Ok(b),
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found().into()),
 			Err(e) => Err(eyre::Report::new(e).wrap_err(format!("reading {}", path.display()))),
 		}
 	}
 
 	/// Per target and UTC day over `[from, to]`: new, changed, gone, mean rating, histogram.
-	pub async fn stats(&self, target: Option<TargetId>, from: Option<jiff::civil::Date>, to: Option<jiff::civil::Date>) -> eyre::Result<Vec<DayStats>> {
-		self.store()?.stats(target, from, to).await
+	pub async fn stats(&self, q: &StatsQuery) -> eyre::Result<Vec<DayStats>> {
+		let from = q.from.as_deref().map(parse_date).transpose()?;
+		let to = q.to.as_deref().map(parse_date).transpose()?;
+		self.store()?.stats(q.target.map(TargetId), from, to).await
 	}
 
-	/// Writes a target's reviews and first screenshots to `out`: a directory, or a `.zip`.
-	pub async fn export(&self, target: TargetId, since: Option<Timestamp>, out: &Path) -> eyre::Result<Exported> {
+	/// Writes a target's reviews (first seen at or after `since`) and first screenshots to
+	/// `out`.
+	pub async fn export(&self, target: TargetId, q: &ExportQuery, out: Destination) -> eyre::Result<Exported> {
+		let since = q.since.as_deref().map(parse_since).transpose()?;
 		let stored = self.stored()?;
 		export::export(&stored.store, &stored.blobs, target, since, out, Timestamp::now()).await
 	}
@@ -608,10 +602,7 @@ impl Archive {
 
 	async fn due_times(&self) -> eyre::Result<Vec<(Target, Option<Timestamp>)>> {
 		let mut out = Vec::new();
-		for t in self.targets().await? {
-			if !t.enabled {
-				continue;
-			}
+		for t in self.targets().await?.into_iter().filter(|t| t.enabled) {
 			let due = self.due_at(&t).await?;
 			out.push((t, due));
 		}

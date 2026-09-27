@@ -6,9 +6,11 @@
 //! profile instead of a fresh one. Google may answer with a "limited view" of Maps that
 //! has no reviews (headless, or a fresh profile); the scan then fails and says so.
 
-use std::time::Duration;
-
-use review_archive::{AddTarget, Archive, CaptureRequest, config::Config, core::dto::RunStatus};
+use review_archive::{
+	Archive, CaptureRequest,
+	config::Config,
+	core::dto::{NewTarget, ReviewsQuery, RunStatus},
+};
 
 /// The Eiffel Tower: public, and reviewed every few minutes.
 const PLACE_ID: &str = "ChIJLU7jZClu5kcR4PcOOO6p3I0";
@@ -33,10 +35,10 @@ async fn live_scan_of_a_real_place() {
 	let dir = tempfile::tempdir().unwrap();
 	let archive = Archive::open(config(dir.path())).await.unwrap();
 	let added = archive
-		.add_target(AddTarget {
-			place: PLACE_ID.into(),
+		.add_target(&NewTarget {
+			place: Some(PLACE_ID.into()),
 			label: Some("Tour Eiffel".into()),
-			interval: Some(Duration::from_secs(6 * 3600)),
+			interval: Some("6h".into()),
 			..Default::default()
 		})
 		.await
@@ -49,10 +51,10 @@ async fn live_scan_of_a_real_place() {
 	assert_ne!(summary.status, RunStatus::Failed, "{summary}");
 	assert_eq!(summary.counts.new, 12);
 	assert!(summary.captured >= 10, "{summary}");
-	let reviews = archive.reviews(id, None, None).await.unwrap();
+	let reviews = archive.reviews(id, &ReviewsQuery::default()).await.unwrap();
 	assert!(reviews.iter().all(|r| r.rating.is_some() && r.published_est.is_some()));
 	let sha = reviews.iter().find_map(|r| r.capture_sha256.clone()).unwrap();
-	let png = archive.capture_png(&sha).await.unwrap().unwrap();
+	let png = archive.capture_png(&sha).await.unwrap();
 	assert!(review_archive::png_meta::dimensions(&png).unwrap().0 >= 400);
 }
 

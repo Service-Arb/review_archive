@@ -16,15 +16,24 @@ use axum::{
 };
 use jiff::Timestamp;
 use review_archive::{
+	config::WebhookConfig,
 	core::{
 		Coverage, Known, Observed, ReviewId, Scan, Target, TargetKind,
 		dto::{Event, EventPayload, JobKind, JobStatus, NewWebhook, RunStatus},
 	},
-	record::{Recorder, SystemClock},
+	record::Recorder,
 	sources::ReviewSource,
-	store::{NewTarget, Store, blobs::BlobStore},
-	webhooks::{MAX_ATTEMPTS, deliver_due, signature},
+	store::{InsertTarget, Store, blobs::BlobStore},
+	webhooks::{Deliverer, MAX_ATTEMPTS, signature},
 };
+
+/// The receivers here listen on loopback, which only a listed host may reach.
+fn deliverer() -> Deliverer {
+	Deliverer::new(&WebhookConfig {
+		allowed_hosts: vec!["127.0.0.1".into()],
+	})
+	.unwrap()
+}
 
 struct Scripted(Mutex<Result<Scan, String>>);
 
@@ -49,6 +58,7 @@ fn complete(reviews: Vec<Observed>) -> Result<Scan, String> {
 		reviews,
 		coverage: Coverage::Complete,
 		warnings: vec![],
+		cut_after: None,
 	})
 }
 
@@ -77,13 +87,14 @@ async fn receiver() -> (Receiver, String, tokio::task::JoinHandle<()>) {
 async fn target(store: &Store) -> Target {
 	let id = store
 		.add_target(
-			&NewTarget {
+			&InsertTarget {
 				label: "t".into(),
 				kind: TargetKind::Maps,
 				place_id: "ChIJtesttesttesttest".into(),
 				gbp: None,
 				lang: "en".into(),
 				interval: Duration::from_secs(6 * 3600),
+				enabled: true,
 			},
 			Timestamp::now(),
 		)
@@ -101,7 +112,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	let t = target(&store).await;
 	let (rx, url, server) = receiver().await;
 	let secret = "0123456789abcdef-shh";
-	store
+	let hook = store
 		.add_webhook(
 			&NewWebhook {
 				url: url.clone(),
@@ -111,16 +122,17 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 			Timestamp::now(),
 		)
 		.await
-		.unwrap();
+		.unwrap()
+		.id;
 	let rec = Recorder {
 		store: &store,
 		blobs: &blobs,
-		clock: &SystemClock,
+		now: Timestamp::now,
 	};
 
 	// two new reviews, then one of them gone, then a failed run; `changed` is not subscribed
 	let src = Scripted(Mutex::new(complete(vec![review("a", "x"), review("b", "y")])));
-	let first = rec.record(&src, &t).await.unwrap();
+	let first = rec.record(&src, &t, None).await.unwrap();
 	assert_eq!(first.seen.len(), 2);
 	*src.0.lock().unwrap() = complete(vec![review("a", "edited")]);
 	rec.run(&src, &t).await.unwrap();
@@ -129,17 +141,17 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 
 	// the receiver fails the first try of the first delivery
 	rx.statuses.lock().unwrap().push(StatusCode::INTERNAL_SERVER_ERROR);
-	let http = reqwest::Client::new();
+	let hooks = deliverer();
 	let now = Timestamp::now();
-	let report = deliver_due(&store, &http, now).await.unwrap();
+	let report = hooks.deliver_due(&store, now).await.unwrap();
 	assert_eq!((report.delivered, report.retrying, report.gave_up), (3, 1, 0));
 
 	// a restart: a new store on the same file still owes the failed one, due after the backoff
 	drop(store);
 	let store = Store::open(&db).await.unwrap();
-	assert_eq!(deliver_due(&store, &http, now).await.unwrap().delivered, 0, "not due yet");
+	assert_eq!(hooks.deliver_due(&store, now).await.unwrap().delivered, 0, "not due yet");
 	let later = now.checked_add(jiff::SignedDuration::from_secs(31)).unwrap();
-	assert_eq!(deliver_due(&store, &http, later).await.unwrap().delivered, 1);
+	assert_eq!(hooks.deliver_due(&store, later).await.unwrap().delivered, 1);
 	server.abort();
 
 	let got = rx.got.lock().unwrap().clone();
@@ -148,7 +160,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	for (headers, body) in &got {
 		assert_eq!(headers["x-signature"].to_str().unwrap(), signature(secret, body), "signed over the raw body");
 		let p: EventPayload = serde_json::from_slice(body).unwrap();
-		assert_eq!(headers["x-event"].to_str().unwrap(), p.event.as_str());
+		assert_eq!(headers["x-event"].to_str().unwrap(), p.event.as_ref());
 		assert_eq!(p.target_id, t.id.0);
 		*events.entry(p.event).or_default() += 1;
 		match p.event {
@@ -160,7 +172,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	assert_eq!(events[&Event::ReviewNew], 3, "a and b, a retried once");
 	assert_eq!(events[&Event::ReviewGone], 1);
 	assert_eq!(events[&Event::RunFailed], 1);
-	assert_eq!(store.delivery_counts(1).await.unwrap(), (0, 4, 0));
+	assert_eq!(store.delivery_counts(hook).await.unwrap(), (0, 4, 0));
 }
 
 #[tokio::test]
@@ -185,16 +197,16 @@ async fn a_dead_receiver_is_given_up_on_and_a_removed_hook_is_owed_nothing() {
 	Recorder {
 		store: &store,
 		blobs: &blobs,
-		clock: &SystemClock,
+		now: Timestamp::now,
 	}
 	.run(&src, &t)
 	.await
 	.unwrap();
 
-	let http = reqwest::Client::new();
+	let hooks = deliverer();
 	let mut at = Timestamp::now();
 	for _ in 0..MAX_ATTEMPTS {
-		deliver_due(&store, &http, at).await.unwrap();
+		hooks.deliver_due(&store, at).await.unwrap();
 		at = at.checked_add(jiff::SignedDuration::from_hours(7)).unwrap();
 	}
 	assert_eq!(store.delivery_counts(dead.id).await.unwrap(), (0, 0, 1));
@@ -210,8 +222,8 @@ async fn jobs_are_taken_oldest_first_and_a_crash_fails_the_running_one() {
 	let store = Store::open(&dir.path().join("db.sqlite")).await.unwrap();
 	let t = target(&store).await;
 	let now = Timestamp::now();
-	let a = store.enqueue_job(JobKind::Scan, t.id, None, now).await.unwrap();
-	let b = store.enqueue_job(JobKind::Capture, t.id, None, now).await.unwrap();
+	let a = store.enqueue_job(JobKind::Scan, t.id, None, 20, now).await.unwrap();
+	let b = store.enqueue_job(JobKind::Capture, t.id, None, 20, now).await.unwrap();
 
 	let claimed = store.claim_job(now).await.unwrap().unwrap();
 	assert_eq!((claimed.id, claimed.kind), (a, JobKind::Scan));
@@ -223,10 +235,59 @@ async fn jobs_are_taken_oldest_first_and_a_crash_fails_the_running_one() {
 
 	// b is taken, then the process dies
 	assert_eq!(store.claim_job(now).await.unwrap().unwrap().id, b);
-	assert_eq!(store.fail_interrupted_jobs(now).await.unwrap(), 1);
+	assert_eq!(store.fail_interrupted(now).await.unwrap(), 1);
 	let b = store.job(b).await.unwrap().unwrap();
 	assert_eq!(b.status, JobStatus::Failed);
 	assert!(b.error.unwrap().contains("interrupted"));
 	assert!(store.claim_job(now).await.unwrap().is_none());
 	assert!(store.job(12345).await.unwrap().is_none());
+}
+
+/// `review.changed` and `review.reappeared` carry the review as the scan left it: the new
+/// text, and no longer gone.
+#[tokio::test]
+async fn an_edited_review_that_is_back_sends_changed_and_reappeared() {
+	let dir = tempfile::tempdir().unwrap();
+	let store = Store::open(&dir.path().join("db.sqlite")).await.unwrap();
+	let blobs = BlobStore::new(dir.path().join("blobs"));
+	let t = target(&store).await;
+	let (rx, url, server) = receiver().await;
+	store
+		.add_webhook(
+			&NewWebhook {
+				url,
+				events: vec![Event::ReviewChanged, Event::ReviewReappeared],
+				secret: "0123456789abcdef".into(),
+			},
+			Timestamp::now(),
+		)
+		.await
+		.unwrap();
+	let rec = Recorder {
+		store: &store,
+		blobs: &blobs,
+		now: Timestamp::now,
+	};
+	let src = Scripted(Mutex::new(complete(vec![review("a", "x"), review("b", "y")])));
+	rec.run(&src, &t).await.unwrap();
+	*src.0.lock().unwrap() = complete(vec![review("b", "y")]);
+	assert_eq!(rec.run(&src, &t).await.unwrap().counts.gone, 1);
+	*src.0.lock().unwrap() = complete(vec![review("a", "x, edited"), review("b", "y")]);
+	rec.run(&src, &t).await.unwrap();
+
+	let report = deliverer().deliver_due(&store, Timestamp::now()).await.unwrap();
+	server.abort();
+	assert_eq!(report.delivered, 2);
+	let got: Vec<EventPayload> = rx.got.lock().unwrap().iter().map(|(_, body)| serde_json::from_slice(body).unwrap()).collect();
+	let summary: Vec<(Event, Option<String>, Option<String>)> = got
+		.into_iter()
+		.map(|p| {
+			let r = p.review.unwrap();
+			(p.event, r.text, r.gone_at)
+		})
+		.collect();
+	assert_eq!(
+		summary,
+		[(Event::ReviewChanged, Some("x, edited".into()), None), (Event::ReviewReappeared, Some("x, edited".into()), None),]
+	);
 }

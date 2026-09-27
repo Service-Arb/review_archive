@@ -12,7 +12,7 @@ use review_archive_core::{
 };
 use sqlx::SqliteConnection;
 
-use super::{RunId, review_by_id, run_by_id};
+use super::{RunId, review_by_id, run_by_id, webhooks::parse_events};
 
 /// The hooks as they were when the transaction began, and what each wants.
 pub(super) struct Emitter {
@@ -25,10 +25,7 @@ impl Emitter {
 		let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, events FROM webhooks").fetch_all(&mut *tx).await.wrap_err("loading webhooks")?;
 		let hooks = rows
 			.into_iter()
-			.map(|(id, events)| {
-				let events: Vec<Event> = serde_json::from_str(&events).wrap_err_with(|| format!("webhook {id} has unreadable events"))?;
-				Ok((id, events.into_iter().collect()))
-			})
+			.map(|(id, events)| Ok((id, parse_events(id, &events)?.into_iter().collect())))
 			.collect::<eyre::Result<_>>()?;
 		Ok(Self { hooks, now })
 	}
@@ -77,7 +74,7 @@ impl Emitter {
 		for hook in hooks {
 			sqlx::query("INSERT INTO webhook_deliveries (webhook_id, event, payload, created_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)")
 				.bind(hook)
-				.bind(payload.event.as_str())
+				.bind(payload.event.as_ref())
 				.bind(&body)
 				.bind(&now)
 				.bind(&now)

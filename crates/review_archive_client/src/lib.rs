@@ -4,10 +4,14 @@
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), review_archive_client::Error> {
-//! use review_archive_client::{Client, dto::CaptureRequest};
+//! use review_archive_client::{Client, dto::{CaptureLimits, CaptureRequest}};
 //!
 //! let client = Client::new("http://review-archive:59110", "the-bearer-token")?;
-//! let req = CaptureRequest { place: Some("ChIJLU7jZClu5kcR4PcOOO6p3I0".into()), max_reviews: Some(10), ..Default::default() };
+//! let req = CaptureRequest {
+//!     place: Some("ChIJLU7jZClu5kcR4PcOOO6p3I0".into()),
+//!     limits: CaptureLimits { max_reviews: Some(10), ..Default::default() },
+//!     ..Default::default()
+//! };
 //! match client.capture(&req, Some(60)).await? {
 //!     review_archive_client::Captured::Done(job) => {
 //!         for r in job.reviews.unwrap_or_default() {
@@ -23,21 +27,25 @@
 
 use std::fmt;
 
-use reqwest::{Method, RequestBuilder, StatusCode};
+use reqwest::{Method, RequestBuilder, StatusCode, Url};
 pub use review_archive_core::dto;
 use review_archive_core::dto::{
-	CaptureRequest, DayStats, ErrorBody, JobAccepted, JobDto, NewTarget, NewWebhook, ReviewDetail, ReviewDto, RunDto, TargetDetail, TargetDto, TargetPatch, WebhookDto,
+	CaptureRequest, DayStats, ErrorBody, ExportQuery, JobAccepted, JobDto, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail,
+	TargetDto, TargetPatch, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
 /// What went wrong with a call.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
 	/// The request did not complete, or its answer did not decode.
-	Http(reqwest::Error),
-	/// The base URL is unusable.
+	#[error("review_archive request failed: {0}")]
+	Http(#[from] reqwest::Error),
+	/// The base URL is unusable, or a path leads off it.
+	#[error("review_archive URL: {0}")]
 	Url(String),
 	/// The archive answered with an error status.
+	#[error("review_archive answered {status}: {message}")]
 	Api {
 		/// The status.
 		status: StatusCode,
@@ -57,31 +65,6 @@ impl Error {
 	}
 }
 
-impl fmt::Display for Error {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Http(e) => write!(f, "review_archive request failed: {e}"),
-			Self::Url(m) => write!(f, "review_archive base URL: {m}"),
-			Self::Api { status, message } => write!(f, "review_archive answered {status}: {message}"),
-		}
-	}
-}
-
-impl std::error::Error for Error {
-	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-		match self {
-			Self::Http(e) => Some(e),
-			Self::Url(_) | Self::Api { .. } => None,
-		}
-	}
-}
-
-impl From<reqwest::Error> for Error {
-	fn from(e: reqwest::Error) -> Self {
-		Self::Http(e)
-	}
-}
-
 /// What `POST /captures` answered.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Captured {
@@ -92,11 +75,17 @@ pub enum Captured {
 }
 
 /// A running archive.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
 	http: reqwest::Client,
-	base: url::Url,
+	base: Url,
 	token: String,
+}
+
+impl fmt::Debug for Client {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Client").field("base", &self.base.as_str()).finish_non_exhaustive()
+	}
 }
 
 impl Client {
@@ -108,7 +97,7 @@ impl Client {
 
 	/// The same, on an HTTP client the caller configured (timeouts, proxies of its own).
 	pub fn with_http(http: reqwest::Client, base: &str, token: impl Into<String>) -> Result<Self, Error> {
-		let mut base: url::Url = base.parse().map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
+		let mut base: Url = base.parse().map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
 		if !base.path().ends_with('/') {
 			let path = format!("{}/", base.path());
 			base.set_path(&path);
@@ -116,8 +105,13 @@ impl Client {
 		Ok(Self { http, base, token: token.into() })
 	}
 
+	/// The token goes only to the archive: a path that resolves to another origin (an
+	/// absolute URL, `//host/…`) is refused.
 	fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, Error> {
 		let url = self.base.join(path.trim_start_matches('/')).map_err(|e| Error::Url(format!("{path:?}: {e}")))?;
+		if url.origin() != self.base.origin() {
+			return Err(Error::Url(format!("{path:?} is not on {}", self.base)));
+		}
 		Ok(self.http.request(method, url).bearer_auth(&self.token))
 	}
 
@@ -163,23 +157,16 @@ impl Client {
 
 	/// `GET /targets/{id}/reviews`.
 	pub async fn reviews(&self, target: i64, since: Option<&str>, gone: Option<bool>) -> Result<Vec<ReviewDto>, Error> {
-		let mut req = self.request(Method::GET, &format!("targets/{target}/reviews"))?;
-		if let Some(since) = since {
-			req = req.query(&[("since", since)]);
-		}
-		if let Some(gone) = gone {
-			req = req.query(&[("gone", gone)]);
-		}
-		Self::json(req).await
+		let q = ReviewsQuery {
+			since: since.map(str::to_owned),
+			gone,
+		};
+		Self::json(self.request(Method::GET, &format!("targets/{target}/reviews"))?.query(&q)).await
 	}
 
 	/// `GET /targets/{id}/runs`, newest first.
 	pub async fn runs(&self, target: i64, limit: Option<u32>) -> Result<Vec<RunDto>, Error> {
-		let mut req = self.request(Method::GET, &format!("targets/{target}/runs"))?;
-		if let Some(limit) = limit {
-			req = req.query(&[("limit", limit)]);
-		}
-		Self::json(req).await
+		Self::json(self.request(Method::GET, &format!("targets/{target}/runs"))?.query(&RunsQuery { limit })).await
 	}
 
 	/// `POST /targets/{id}/scan`: scan now. Returns the job id.
@@ -191,11 +178,7 @@ impl Client {
 	/// `POST /captures`: capture a place without registering it, waiting up to `wait`
 	/// seconds (at most 120) for the result.
 	pub async fn capture(&self, req: &CaptureRequest, wait: Option<u64>) -> Result<Captured, Error> {
-		let mut r = self.request(Method::POST, "captures")?.json(req);
-		if let Some(wait) = wait {
-			r = r.query(&[("wait", wait)]);
-		}
-		let resp = Self::send(r).await?;
+		let resp = Self::send(self.request(Method::POST, "captures")?.json(req).query(&WaitQuery { wait })).await?;
 		if resp.status() == StatusCode::ACCEPTED {
 			let accepted: JobAccepted = resp.json().await?;
 			return Ok(Captured::Queued(accepted.job_id));
@@ -220,26 +203,22 @@ impl Client {
 
 	/// `GET /targets/{id}/export.zip`: `manifest.json` and the first capture of each review.
 	pub async fn export_zip(&self, target: i64, since: Option<&str>) -> Result<Vec<u8>, Error> {
-		let mut req = self.request(Method::GET, &format!("targets/{target}/export.zip"))?;
-		if let Some(since) = since {
-			req = req.query(&[("since", since)]);
-		}
-		Ok(Self::send(req).await?.bytes().await?.to_vec())
+		let q = ExportQuery { since: since.map(str::to_owned) };
+		Ok(Self::send(self.request(Method::GET, &format!("targets/{target}/export.zip"))?.query(&q))
+			.await?
+			.bytes()
+			.await?
+			.to_vec())
 	}
 
 	/// `GET /stats`.
 	pub async fn stats(&self, target: Option<i64>, from: Option<&str>, to: Option<&str>) -> Result<Vec<DayStats>, Error> {
-		let mut req = self.request(Method::GET, "stats")?;
-		if let Some(t) = target {
-			req = req.query(&[("target", t)]);
-		}
-		if let Some(from) = from {
-			req = req.query(&[("from", from)]);
-		}
-		if let Some(to) = to {
-			req = req.query(&[("to", to)]);
-		}
-		Self::json(req).await
+		let q = StatsQuery {
+			target,
+			from: from.map(str::to_owned),
+			to: to.map(str::to_owned),
+		};
+		Self::json(self.request(Method::GET, "stats")?.query(&q)).await
 	}
 
 	/// `POST /webhooks`.
@@ -256,5 +235,20 @@ impl Client {
 	pub async fn delete_webhook(&self, id: i64) -> Result<(), Error> {
 		Self::send(self.request(Method::DELETE, &format!("webhooks/{id}"))?).await?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_token_stays_on_the_archive() {
+		let c = Client::new("http://archive:59110/api", "secret-token-0123456789").unwrap();
+		assert!(!format!("{c:?}").contains("secret-token"));
+		assert!(c.request(Method::GET, "/captures/x.png").is_ok());
+		for elsewhere in ["https://evil.example/x.png", "http://archive:59111/x"] {
+			assert!(matches!(c.request(Method::GET, elsewhere), Err(Error::Url(_))), "{elsewhere}");
+		}
 	}
 }

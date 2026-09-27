@@ -1,30 +1,38 @@
 //! The archive end to end on a temp SQLite: a scripted source, real storage.
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{cell::Cell, collections::HashMap, sync::Mutex, time::Duration};
 
 use jiff::Timestamp;
 use review_archive::{
-	core::{Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind, dto::RunStatus},
-	record::{Clock, Recorder},
+	core::{
+		Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind,
+		dto::{RunStatus, TargetPatch},
+	},
+	record::Recorder,
 	sources::ReviewSource,
-	store::{NewTarget, Store, blobs::BlobStore},
+	store::{InsertTarget, Store, blobs::BlobStore},
 };
 
-struct FixedClock(Mutex<Timestamp>);
+thread_local! {
+	// `#[tokio::test]` runs each test on a thread of its own
+	static NOW: Cell<Timestamp> = const { Cell::new(Timestamp::UNIX_EPOCH) };
+}
+
+/// The pinned clock the recorder reads.
+fn now() -> Timestamp {
+	NOW.get()
+}
+
+struct FixedClock;
 
 impl FixedClock {
 	fn at(s: &str) -> Self {
-		Self(Mutex::new(s.parse().unwrap()))
+		Self.set(s);
+		Self
 	}
 
 	fn set(&self, s: &str) {
-		*self.0.lock().unwrap() = s.parse().unwrap();
-	}
-}
-
-impl Clock for FixedClock {
-	fn now(&self) -> Timestamp {
-		*self.0.lock().unwrap()
+		NOW.set(s.parse().unwrap());
 	}
 }
 
@@ -73,6 +81,7 @@ fn scan(reviews: Vec<Observed>, coverage: Coverage) -> Result<Scan, String> {
 		reviews,
 		coverage,
 		warnings: vec![],
+		cut_after: None,
 	})
 }
 
@@ -91,15 +100,16 @@ async fn env() -> Env {
 	let clock = FixedClock::at("2026-09-01T10:00:00Z");
 	let id = store
 		.add_target(
-			&NewTarget {
+			&InsertTarget {
 				label: "Café test".into(),
 				kind: TargetKind::Maps,
 				place_id: "ChIJtesttesttesttest".into(),
 				gbp: None,
 				lang: "fr".into(),
 				interval: Duration::from_secs(6 * 3600),
+				enabled: true,
 			},
-			clock.now(),
+			now(),
 		)
 		.await
 		.unwrap();
@@ -114,11 +124,11 @@ async fn env() -> Env {
 }
 
 impl Env {
-	fn archive(&self) -> Recorder<'_, FixedClock> {
+	fn archive(&self) -> Recorder<'_> {
 		Recorder {
 			store: &self.store,
 			blobs: &self.blobs,
-			clock: &self.clock,
+			now,
 		}
 	}
 
@@ -170,7 +180,7 @@ async fn new_changed_gone_reappeared() {
 	assert!(!rows["b"].capture_pending);
 	let versions = e.store.versions(ReviewId(rows["b"].id)).await.unwrap();
 	assert_eq!(
-		versions.iter().map(|v| (v.2, v.3.clone())).collect::<Vec<_>>(),
+		versions.iter().map(|v| (v.rating, v.text.clone())).collect::<Vec<_>>(),
 		[(Some(2), Some("Slow".into())), (Some(4), Some("Slow but kind".into()))],
 		"history keeps the original"
 	);
@@ -211,7 +221,8 @@ async fn new_changed_gone_reappeared() {
 	// stats per day
 	let stats = e.store.stats(Some(e.target.id), None, None).await.unwrap();
 	let days: Vec<(&str, i64, i64, i64)> = stats.iter().map(|d| (d.day.as_str(), d.new, d.changed, d.gone)).collect();
-	assert_eq!(days, [("2026-09-01", 2, 0, 0), ("2026-09-02", 0, 1, 0), ("2026-09-04", 1, 0, 1)]);
+	// a went missing on the 2nd and again on the 4th: both days count it
+	assert_eq!(days, [("2026-09-01", 2, 0, 0), ("2026-09-02", 0, 1, 1), ("2026-09-04", 1, 0, 1)]);
 	assert_eq!(stats[0].histogram, [0, 1, 0, 0, 1]);
 	assert_eq!(stats[0].mean_rating, Some(3.5));
 }
@@ -231,6 +242,7 @@ async fn failures_are_runs_and_back_off() {
 		reviews: vec![review("a", 5, "x", None, false)],
 		coverage: Coverage::DownTo(None),
 		warnings: vec!["screenshot of a failed".into()],
+		cut_after: None,
 	}));
 	let s = e.archive().run(&src, &e.target).await.unwrap();
 	assert_eq!(s.status, RunStatus::Partial);
@@ -241,9 +253,13 @@ async fn failures_are_runs_and_back_off() {
 #[tokio::test]
 async fn targets_enable_disable() {
 	let e = env().await;
-	e.store.set_enabled(e.target.id, false).await.unwrap();
+	let enabled = |on| TargetPatch {
+		enabled: Some(on),
+		..Default::default()
+	};
+	e.store.update_target(e.target.id, &enabled(false)).await.unwrap();
 	assert!(!e.store.target(e.target.id).await.unwrap().enabled);
-	assert!(e.store.set_enabled(TargetId(999), true).await.is_err());
+	assert!(e.store.update_target(TargetId(999), &enabled(true)).await.is_err());
 }
 
 #[tokio::test]
@@ -258,4 +274,189 @@ async fn an_empty_complete_scan_is_partial_and_keeps_the_archive() {
 	assert_eq!((s.status, s.counts.gone), (RunStatus::Partial, 0));
 	assert!(s.error.unwrap().contains("no reviews at all"));
 	assert_eq!(e.by_source_id().await["a"].gone_at, None);
+}
+
+/// A review as Maps printed its date on one scan.
+fn dated(id: &str, text: &str, raw: &str, est: &str) -> Observed {
+	Observed {
+		source_review_id: id.into(),
+		author: format!("author of {id}"),
+		rating: Some(4),
+		text: Some(text.into()),
+		published_raw: Some(raw.into()),
+		published_est: Some(est.parse().unwrap()),
+		..Default::default()
+	}
+}
+
+/// First seen as "a year ago" on 2026-09-01, the review was published somewhere in
+/// (2024-09-01, 2025-09-01]. Its author edits it; Maps then prints "Edited a day ago". The
+/// estimate on record is still the first one (2025-09-01), so the text that says how precise
+/// that estimate is must still be the year-wide phrase — otherwise the review is taken to be
+/// no older than 2025-08-31 and a walk that stopped at 2025-08-15 "walked past" it.
+#[tokio::test]
+async fn an_edit_does_not_narrow_how_old_a_review_can_be() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![dated("old", "Nice", "a year ago", "2025-09-01T10:00:00Z")], Coverage::DownTo(None))));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	e.clock.set("2026-09-02T10:00:00Z");
+	src.set(scan(vec![dated("old", "Nice, edited", "Edited a day ago", "2026-09-01T10:00:00Z")], Coverage::DownTo(None)));
+	let s = e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(s.counts.changed, 1);
+
+	// a walk down to a card estimated at 2025-08-15 that did not list it
+	e.clock.set("2026-09-03T10:00:00Z");
+	src.set(scan(
+		vec![dated("other", "Hi", "a day ago", "2026-09-02T10:00:00Z")],
+		Coverage::DownTo(Some("2025-08-15T00:00:00Z".parse().unwrap())),
+	));
+	let s = e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(s.counts.gone, 0, "the review may be as old as 2024-09-01: the walk did not reach it");
+	assert_eq!(e.by_source_id().await["old"].gone_at, None);
+}
+
+/// Stats are history: a day on which a review went missing keeps its `gone` count when the
+/// review is listed again later (the `review.gone` webhook for that day was sent, too).
+#[tokio::test]
+async fn a_gone_day_keeps_its_count_after_the_review_reappears() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::Complete)));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	e.clock.set("2026-09-02T10:00:00Z");
+	src.set(scan(vec![review("b", 4, "y", None, false)], Coverage::Complete));
+	assert_eq!(e.archive().run(&src, &e.target).await.unwrap().counts.gone, 1);
+
+	e.clock.set("2026-09-03T10:00:00Z");
+	src.set(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::Complete));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	let stats = e.store.stats(Some(e.target.id), None, None).await.unwrap();
+	let gone_on_the_2nd = stats.iter().find(|d| d.day == "2026-09-02").map(|d| d.gone);
+	assert_eq!(gone_on_the_2nd, Some(1), "{stats:?}");
+}
+
+/// [`Scripted`] as an ad-hoc capture.
+struct AdHoc<'a>(&'a Scripted);
+
+impl ReviewSource for AdHoc<'_> {
+	async fn scan(&self, t: &Target, k: &Known) -> eyre::Result<Scan> {
+		self.0.scan(t, k).await
+	}
+
+	fn ad_hoc(&self) -> bool {
+		true
+	}
+}
+
+fn cut(reviews: Vec<Observed>, cut_after: Option<&str>) -> Result<Scan, String> {
+	Ok(Scan {
+		reviews,
+		coverage: Coverage::DownTo(None),
+		warnings: vec![],
+		cut_after: cut_after.map(str::to_owned),
+	})
+}
+
+/// A capture neither ends a target's first, whole-list walk nor moves its schedule.
+#[tokio::test]
+async fn an_ad_hoc_capture_is_not_the_targets_scan() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false)], Coverage::DownTo(None))));
+	e.archive().run(&AdHoc(&src), &e.target).await.unwrap();
+	assert!(e.store.known(e.target.id).await.unwrap().initial, "still to be walked whole");
+	assert_eq!(e.store.last_run(e.target.id).await.unwrap(), None, "not scheduled");
+
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert!(!e.store.known(e.target.id).await.unwrap().initial);
+	assert!(e.store.last_run(e.target.id).await.unwrap().is_some());
+}
+
+/// Where a walk was cut short is kept until a scan gets past it; a capture may leave a
+/// gap of its own but never covers up one.
+#[tokio::test]
+async fn a_cut_walk_is_remembered_until_a_scan_gets_past_it() {
+	let e = env().await;
+	let marker = || async { e.store.known(e.target.id).await.unwrap().cut_after };
+	let src = Scripted(Mutex::new(cut(vec![review("a", 5, "x", None, false)], Some("a"))));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"));
+
+	src.set(cut(vec![review("b", 5, "y", None, false)], Some("b")));
+	e.archive().run(&AdHoc(&src), &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"), "the older gap is the one to fill");
+
+	src.set(Err("blocked".into()));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"), "a failed run changes nothing");
+
+	src.set(cut(vec![], None));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await, None);
+}
+
+/// A job queue that only grows is refused at its limit; asking twice for the same job
+/// queues it once.
+#[tokio::test]
+async fn the_job_queue_is_bounded_and_deduplicated() {
+	use review_archive::core::{
+		Rejected,
+		dto::{CaptureLimits, JobKind},
+	};
+
+	let e = env().await;
+	let at = now();
+	let scan = e.store.enqueue_job(JobKind::Scan, e.target.id, None, 2, at).await.unwrap();
+	assert_eq!(e.store.enqueue_job(JobKind::Scan, e.target.id, None, 2, at).await.unwrap(), scan);
+	let five = CaptureLimits {
+		max_reviews: Some(5),
+		..Default::default()
+	};
+	e.store.enqueue_job(JobKind::Capture, e.target.id, Some(&five), 2, at).await.unwrap();
+	let busy = e.store.enqueue_job(JobKind::Capture, e.target.id, None, 2, at).await.unwrap_err();
+	assert!(matches!(busy.downcast_ref::<Rejected>(), Some(Rejected::Busy(_))), "{busy:#}");
+}
+
+/// A capture of named reviews answers with those, and its run and job end together.
+#[tokio::test]
+async fn a_capture_of_named_reviews_returns_those() {
+	use review_archive::core::dto::{CaptureLimits, JobKind, JobStatus};
+
+	let e = env().await;
+	let only_b = CaptureLimits {
+		review_ids: Some(vec!["b".into()]),
+		..Default::default()
+	};
+	let id = e.store.enqueue_job(JobKind::Capture, e.target.id, Some(&only_b), 20, now()).await.unwrap();
+	e.store.claim_job(now()).await.unwrap();
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::DownTo(None))));
+	e.archive().record(&AdHoc(&src), &e.target, Some(id)).await.unwrap();
+	let job = e.store.job(id).await.unwrap().unwrap();
+	assert_eq!(job.status, JobStatus::Done);
+	assert_eq!(job.reviews.unwrap().iter().map(|r| r.source_review_id.as_str()).collect::<Vec<_>>(), ["b"]);
+}
+
+/// A run the process died in is failed on the next start, not left open forever.
+#[tokio::test]
+async fn an_interrupted_run_is_failed_on_start() {
+	let e = env().await;
+	let run = e.store.start_run(e.target.id, false, now()).await.unwrap();
+	e.store.fail_interrupted(now()).await.unwrap();
+	let run = e.store.run(run).await.unwrap().unwrap();
+	assert_eq!(run.status, Some(RunStatus::Failed));
+	assert!(run.error.unwrap().contains("interrupted"));
+}
+
+/// A scan the store cannot write is an error for the caller, and a failed run for the
+/// schedule: the target backs off instead of being scanned again at once.
+#[tokio::test]
+async fn a_scan_the_store_refuses_is_a_failed_run() {
+	let e = env().await;
+	// the schema allows 1–5 stars
+	let src = Scripted(Mutex::new(scan(vec![review("a", 9, "x", None, false)], Coverage::DownTo(None))));
+	assert!(e.archive().run(&src, &e.target).await.is_err());
+	let last = e.store.last_run(e.target.id).await.unwrap().expect("the run is finished");
+	assert_eq!(last.consecutive_failures, 1);
+	assert!(e.by_source_id().await.is_empty(), "nothing of it was stored");
 }

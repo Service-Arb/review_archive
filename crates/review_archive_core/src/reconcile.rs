@@ -1,10 +1,8 @@
 //! A scan against what is already archived: what is new, what changed, what is gone.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use jiff::Timestamp;
-
-use crate::{Coverage, Known, KnownReview, Observed, ReviewId, Scan, relative_date};
+use crate::{Coverage, Known, Observed, ReviewId, Scan};
 
 /// What to write for one scan.
 #[derive(Debug, Default)]
@@ -22,7 +20,7 @@ pub struct Plan<'a> {
 	/// Why the scan was not trusted as far as its coverage claimed. Makes the run `partial`.
 	pub warnings: Vec<String>,
 	/// Each listed review's first position in the scan.
-	order: std::collections::HashMap<&'a str, usize>,
+	order: HashMap<&'a str, usize>,
 }
 
 impl Plan<'_> {
@@ -80,7 +78,7 @@ pub fn plan<'a>(known: &Known, scan: &'a Scan) -> Plan<'a> {
 			// `oldest` — which is the latest that card can be. A known review was in that prefix
 			// only if even the earliest it can be is no earlier: estimates are coarse ("a month
 			// ago" spans a month), and the one on record was made on an earlier day.
-			Coverage::DownTo(Some(oldest)) => earliest(k).is_some_and(|lo| lo >= oldest),
+			Coverage::DownTo(Some(oldest)) => k.earliest().is_some_and(|lo| lo >= oldest),
 			Coverage::DownTo(None) => false,
 		};
 		if covered {
@@ -91,14 +89,12 @@ pub fn plan<'a>(known: &Known, scan: &'a Scan) -> Plan<'a> {
 	plan
 }
 
-/// The earliest a known review can have been published; `None` when that is unknowable.
-fn earliest(k: &KnownReview) -> Option<Timestamp> {
-	relative_date::lower_bound(k.published_raw.as_deref()?, k.published_est?)
-}
-
 #[cfg(test)]
 mod tests {
+	use jiff::Timestamp;
+
 	use super::*;
+	use crate::KnownReview;
 
 	fn obs(id: &str, text: &str) -> Observed {
 		Observed {
@@ -134,6 +130,7 @@ mod tests {
 					)
 				})
 				.collect(),
+			..Default::default()
 		}
 	}
 
@@ -148,6 +145,7 @@ mod tests {
 			reviews: vec![obs("new", "hi"), obs("a", "same"), obs("b", "edited"), obs("c", "back"), obs("a", "same")],
 			coverage: Coverage::DownTo(None),
 			warnings: vec![],
+			cut_after: None,
 		};
 		let p = plan(&k, &scan);
 		assert_eq!(p.new.iter().map(|o| o.source_review_id.as_str()).collect::<Vec<_>>(), ["new"]);
@@ -165,6 +163,7 @@ mod tests {
 			reviews: vec![obs("c", "x")],
 			coverage: Coverage::Complete,
 			warnings: vec![],
+			cut_after: None,
 		};
 		// b is already gone and stays so without being marked again
 		assert_eq!(plan(&k, &scan).gone, [ReviewId(1)]);
@@ -183,6 +182,7 @@ mod tests {
 			reviews: vec![],
 			coverage: Coverage::DownTo(Some(ts("2026-08-01T00:00:00Z"))),
 			warnings: vec![],
+			cut_after: None,
 		};
 		assert_eq!(plan(&k, &scan).gone, [ReviewId(1)]);
 
@@ -203,6 +203,7 @@ mod tests {
 			reviews: vec![obs("other", "y")],
 			coverage: Coverage::DownTo(Some(ts("2026-07-26T12:00:00Z"))),
 			warnings: vec![],
+			cut_after: None,
 		};
 		assert!(plan(&k, &scan).gone.is_empty());
 		// walked well past even the earliest it can be: gone
@@ -222,6 +223,7 @@ mod tests {
 			reviews: vec![],
 			coverage: Coverage::Complete,
 			warnings: vec![],
+			cut_after: None,
 		};
 		let p = plan(&k, &scan);
 		assert!(p.gone.is_empty());
