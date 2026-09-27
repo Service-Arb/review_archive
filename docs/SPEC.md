@@ -35,7 +35,9 @@ Out — do not build, even as an option:
 - URL: `https://www.google.com/maps/place/?q=place_id:<PLACE_ID>&hl=<lang>`.
 - EU consent interstitial (`consent.google.com`): click the reject-all button;
   persist the resulting cookies in the profile dir so it is not shown again.
-- Open the Reviews tab, sort by *Newest*, scroll the feed. Stop when a full screen of
+- Open the Reviews tab, sort by *Newest* (when Google answers with its sign-in dialog
+  instead, read what it shows in its own order and mark the run `partial`), scroll the
+  feed. Stop when a full screen of
   cards is already known (cards still without a screenshot do not count, and the walk
   goes on until it has read or passed every one of those), or at `max_reviews_per_scan`
   (default 200).

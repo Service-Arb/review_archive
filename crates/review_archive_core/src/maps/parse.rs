@@ -170,6 +170,7 @@ mod tests {
 			sel::REVIEWS_TAB,
 			sel::SORT_BUTTON,
 			sel::SORT_NEWEST,
+			sel::SIGN_IN_GATE,
 			sel::EXPAND,
 			sel::AUTHOR_NAME,
 			sel::AUTHOR_LINK,
