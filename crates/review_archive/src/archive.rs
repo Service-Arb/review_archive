@@ -159,7 +159,11 @@ impl Archive {
 			let profile = config
 				.profile_dir()
 				.ok_or_else(|| eyre::eyre!("the browser needs a profile dir: set a data dir or browser.profile_dir"))?;
-			Browser::new(config.browser.clone(), profile)
+			let cfg = crate::config::BrowserConfig {
+				diagnostics_dir: config.diagnostics_dir(),
+				..config.browser.clone()
+			};
+			Browser::new(cfg, profile)
 		};
 		Self::open_inner(
 			config,

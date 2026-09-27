@@ -29,6 +29,7 @@ const STEP_WAIT: Duration = Duration::from_millis(1500);
 const END_AFTER_IDLE_STEPS: u32 = 5;
 const UI_TIMEOUT: Duration = Duration::from_secs(20);
 const SORT_TIMEOUT: Duration = Duration::from_secs(10);
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The review list, open and ready to walk.
 #[derive(Debug)]
@@ -36,6 +37,15 @@ pub(crate) struct Opened {
 	pub page_url: String,
 	pub sorted: bool,
 	pub total: Option<u64>,
+	/// What went wrong on the way without failing it; the walk's warnings start with these.
+	pub warnings: Vec<String>,
+}
+
+/// What the sort button opened.
+enum SortMenu {
+	Open,
+	/// Google's sign-in dialog, in place of the menu.
+	SignInRequired,
 }
 
 pub(crate) struct Session {
@@ -109,33 +119,6 @@ impl Session {
 	/// Opens the place and its review list sorted newest first. `None`: the place has no
 	/// reviews at all, so there is no list.
 	pub(crate) async fn open_reviews(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
-		let res = self.open_reviews_inner(place_id, lang).await;
-		if res.is_err()
-			&& let Some(dir) = &self.dump_html
-		{
-			self.dump_page(dir).await;
-		}
-		res
-	}
-
-	/// The whole page and a screenshot of it, for seeing what a failed step was looking at.
-	async fn dump_page(&self, dir: &Path) {
-		let stamp = Timestamp::now().as_millisecond();
-		let html = self.page.content().await.map_err(eyre::Report::new);
-		let shot = self.page.screenshot(chromiumoxide::page::ScreenshotParams::builder().build()).await.map_err(eyre::Report::new);
-		let written = async {
-			tokio::fs::create_dir_all(dir).await?;
-			tokio::fs::write(dir.join(format!("page-{stamp}.html")), html?).await?;
-			tokio::fs::write(dir.join(format!("page-{stamp}.png")), shot?).await?;
-			eyre::Ok(())
-		};
-		match written.await {
-			Ok(()) => tracing::info!(dir = %dir.display(), "dumped the page"),
-			Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not dump the page"),
-		}
-	}
-
-	async fn open_reviews_inner(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
 		let url = sel::place_url(place_id, lang);
 		self.page.goto(url.as_str()).await.wrap_err_with(|| format!("loading {url}"))?;
 		self.handle_interstitials().await?;
@@ -165,18 +148,53 @@ impl Session {
 		let total = self.review_total().await?;
 
 		self.wait_for_any(sel::SORT_BUTTON).await.wrap_err("no sort button on the review list")?;
-		self.dismiss_promo().await?;
+		let mut warnings = Vec::new();
+		let sorted = match self.open_sort_menu().await? {
+			SortMenu::Open => self.pick_newest().await?,
+			SortMenu::SignInRequired => {
+				self.dismiss_promo().await?;
+				tracing::info!(place_id, "Google asks to sign in before sorting; reading the list in its own order");
+				warnings.push(
+					"Google asks this signed-out browser to sign in before it sorts the reviews or shows more than the first few; the ones shown were read in its own order".to_owned(),
+				);
+				false
+			}
+		};
+
+		Ok(Some(Opened {
+			page_url: self.page.url().await?.unwrap_or(url),
+			sorted,
+			total,
+			warnings,
+		}))
+	}
+
+	/// Clicks the sort button until the sort menu or Google's sign-in dialog shows.
+	async fn open_sort_menu(&self) -> eyre::Result<SortMenu> {
+		let either = [sel::SORT_NEWEST, sel::SIGN_IN_GATE].concat();
+		let mut gated = 0;
 		// A click that lands while the list is still hydrating is swallowed; retry a few times.
-		let mut menu_open = false;
 		for _ in 0..4 {
 			self.dismiss_promo().await?;
-			eyre::ensure!(self.click_first(sel::SORT_BUTTON).await?, "could not open the sort menu");
-			if self.wait_for_any_within(sel::SORT_NEWEST, Duration::from_secs(5)).await.is_ok() {
-				menu_open = true;
-				break;
+			eyre::ensure!(self.click_first(sel::SORT_BUTTON).await?, "could not click the sort button");
+			if self.wait_for_any_within(&either, Duration::from_secs(5)).await.is_err() {
+				continue;
+			}
+			if self.eval::<bool>(js::ANY, (sel::SORT_NEWEST,)).await? {
+				return Ok(SortMenu::Open);
+			}
+			// The same dialog also turns up by itself over a fresh profile's list; only a
+			// second showing in answer to the button says the menu is gated.
+			gated += 1;
+			if gated == 2 {
+				return Ok(SortMenu::SignInRequired);
 			}
 		}
-		eyre::ensure!(menu_open, "the sort menu has no 'newest' entry (or would not open)");
+		eyre::bail!("the sort button opened neither the sort menu nor Google's sign-in dialog")
+	}
+
+	/// Picks "newest" in the open sort menu; `false`: the list was not seen to re-sort.
+	async fn pick_newest(&self) -> eyre::Result<bool> {
 		let before: String = self.eval(js::FIRST_CARD_ID, (sel::CARD, sel::CARD_ID_ATTR)).await?;
 		eyre::ensure!(self.click_first(sel::SORT_NEWEST).await?, "could not pick 'newest'");
 		// The relevance-sorted cards stay in the DOM until the new list arrives; reading them
@@ -197,12 +215,28 @@ impl Session {
 		};
 		tokio::time::sleep(STEP_WAIT).await;
 		self.wait_for_any(&[sel::CARD]).await.wrap_err("the review list did not come back after sorting")?;
+		Ok(sorted)
+	}
 
-		Ok(Some(Opened {
-			page_url: self.page.url().await?.unwrap_or(url),
-			sorted,
-			total,
-		}))
+	/// The whole page as HTML and a full-page PNG, `<dir>/<UTC time>-<place id>.{png,html}`,
+	/// for seeing what a failed step was looking at. Returns the path without the extension.
+	pub(crate) async fn save_diagnostic(&self, dir: &Path, place_id: &str) -> eyre::Result<PathBuf> {
+		let name: String = place_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+		let base = dir.join(format!("{}-{name}", Timestamp::now().strftime("%Y%m%dT%H%M%SZ")));
+		// A page that failed may also hang; a diagnostic is not worth holding the walk for.
+		let (html, png) = tokio::time::timeout(DIAGNOSTIC_TIMEOUT, async {
+			let html = self.page.content().await?;
+			let png = self.page.screenshot(chromiumoxide::page::ScreenshotParams::builder().full_page(true).build()).await?;
+			eyre::Ok((html, png))
+		})
+		.await
+		.wrap_err("the page did not answer")??;
+		tokio::fs::create_dir_all(dir).await.wrap_err_with(|| format!("creating {}", dir.display()))?;
+		for (ext, bytes) in [("html", html.as_bytes()), ("png", png.as_slice())] {
+			let path = base.with_extension(ext);
+			tokio::fs::write(&path, bytes).await.wrap_err_with(|| format!("writing {}", path.display()))?;
+		}
+		Ok(base)
 	}
 
 	/// The review count the list's histogram adds up to.
@@ -218,7 +252,7 @@ impl Session {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<WalkedCard> = Vec::new();
-		let mut warnings = Vec::new();
+		let mut warnings = opened.warnings;
 		let mut idle = 0;
 		let end = loop {
 			let step = async {

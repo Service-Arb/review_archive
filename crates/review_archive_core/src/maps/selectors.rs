@@ -35,8 +35,9 @@ pub const LIMITED_VIEW_TEXT: &[&str] = &[
 	"visualizzazione limitata di Google",
 ];
 
-/// "Not now" on the "sign in to get the most out of Maps" dialog a fresh profile is shown
-/// over the review list; it swallows clicks until dismissed. Dismissing is all this does.
+/// "Dismiss" on the "sign in to get the best of Google Maps" dialog, shown over the review
+/// list to a fresh profile and in place of the sort menu (see [`SIGN_IN_GATE`]); it
+/// swallows clicks until dismissed. Dismissing is all this does.
 pub const PROMO_DISMISS: &[&str] = &[r#"[role="dialog"] button[jsaction*=".dismiss"]"#];
 
 /// "Reject all" on the consent page. The two forms differ in a hidden `set_eom`
@@ -80,8 +81,15 @@ pub const SORT_BUTTON: &[&str] = &[
 	r#"button[aria-label*="Ordina" i]"#,
 ];
 
-/// "Newest" in the sort menu: the second entry, whatever it is called.
+/// "Newest" in the sort menu: the second entry, whatever it is called. Scoped to the menu:
+/// the topic chips under the sort button carry `data-index` too, as `role="radio"`.
 pub const SORT_NEWEST: &[&str] = &[r#"[role="menuitemradio"][data-index="1"]"#, r#"#action-menu [data-index="1"]"#];
+
+/// "Sign in" on the dialog Google opens instead of the sort menu for a signed-out browser
+/// (seen 2026-09, windowed and headless alike, on every click and on Enter). Such a list
+/// also stops at its first five cards, with a "See more reviews" button that opens the same
+/// dialog. What is shown is read in Google's own order; nothing here signs in.
+pub const SIGN_IN_GATE: &[&str] = &[r#"[role="dialog"] button[jsaction*=".signIn"]"#];
 
 /// A review card. Inner buttons carry the same attribute, so only the outermost element
 /// with it counts (the parser and the in-page scripts both apply that rule).

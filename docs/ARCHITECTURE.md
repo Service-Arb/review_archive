@@ -69,7 +69,10 @@ with its own platform implements `sources::ReviewSource` and records through
 - **Nothing is ever written to Google.** Sources read. There is no stealth, no fingerprint
   masking, no proxy or account rotation, no CAPTCHA solving. When Google does not serve the
   full page — the "unusual traffic" page, or its "limited view" without reviews — the run
-  fails and the error says which.
+  fails and the error says which. When it asks a signed-out browser to sign in before
+  sorting (such a list also stops at its first few cards), what it shows is read in its own
+  order: the run is `partial`, says why, and judges nothing gone. A failed walk saves the
+  page as `<data_dir>/diagnostics/<UTC time>-<place id>.{png,html}`, and its error says where.
 - **History is append-only.** Reviews and captures are never deleted; `review_versions` gets a
   row per distinct content, the first sighting included. `gone_at` is set and cleared, never a
   deletion.
