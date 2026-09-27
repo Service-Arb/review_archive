@@ -29,6 +29,7 @@ const STEP_WAIT: Duration = Duration::from_millis(1500);
 const END_AFTER_IDLE_STEPS: u32 = 5;
 const UI_TIMEOUT: Duration = Duration::from_secs(20);
 const SORT_TIMEOUT: Duration = Duration::from_secs(10);
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The review list, open and ready to walk.
 #[derive(Debug)]
@@ -118,33 +119,6 @@ impl Session {
 	/// Opens the place and its review list sorted newest first. `None`: the place has no
 	/// reviews at all, so there is no list.
 	pub(crate) async fn open_reviews(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
-		let res = self.open_reviews_inner(place_id, lang).await;
-		if res.is_err()
-			&& let Some(dir) = &self.dump_html
-		{
-			self.dump_page(dir).await;
-		}
-		res
-	}
-
-	/// The whole page and a screenshot of it, for seeing what a failed step was looking at.
-	async fn dump_page(&self, dir: &Path) {
-		let stamp = Timestamp::now().as_millisecond();
-		let html = self.page.content().await.map_err(eyre::Report::new);
-		let shot = self.page.screenshot(chromiumoxide::page::ScreenshotParams::builder().build()).await.map_err(eyre::Report::new);
-		let written = async {
-			tokio::fs::create_dir_all(dir).await?;
-			tokio::fs::write(dir.join(format!("page-{stamp}.html")), html?).await?;
-			tokio::fs::write(dir.join(format!("page-{stamp}.png")), shot?).await?;
-			eyre::Ok(())
-		};
-		match written.await {
-			Ok(()) => tracing::info!(dir = %dir.display(), "dumped the page"),
-			Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not dump the page"),
-		}
-	}
-
-	async fn open_reviews_inner(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Opened>> {
 		let url = sel::place_url(place_id, lang);
 		self.page.goto(url.as_str()).await.wrap_err_with(|| format!("loading {url}"))?;
 		self.handle_interstitials().await?;
@@ -242,6 +216,27 @@ impl Session {
 		tokio::time::sleep(STEP_WAIT).await;
 		self.wait_for_any(&[sel::CARD]).await.wrap_err("the review list did not come back after sorting")?;
 		Ok(sorted)
+	}
+
+	/// The whole page as HTML and a full-page PNG, `<dir>/<UTC time>-<place id>.{png,html}`,
+	/// for seeing what a failed step was looking at. Returns the path without the extension.
+	pub(crate) async fn save_diagnostic(&self, dir: &Path, place_id: &str) -> eyre::Result<PathBuf> {
+		let name: String = place_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+		let base = dir.join(format!("{}-{name}", Timestamp::now().strftime("%Y%m%dT%H%M%SZ")));
+		// A page that failed may also hang; a diagnostic is not worth holding the walk for.
+		let (html, png) = tokio::time::timeout(DIAGNOSTIC_TIMEOUT, async {
+			let html = self.page.content().await?;
+			let png = self.page.screenshot(chromiumoxide::page::ScreenshotParams::builder().full_page(true).build()).await?;
+			eyre::Ok((html, png))
+		})
+		.await
+		.wrap_err("the page did not answer")??;
+		tokio::fs::create_dir_all(dir).await.wrap_err_with(|| format!("creating {}", dir.display()))?;
+		for (ext, bytes) in [("html", html.as_bytes()), ("png", png.as_slice())] {
+			let path = base.with_extension(ext);
+			tokio::fs::write(&path, bytes).await.wrap_err_with(|| format!("writing {}", path.display()))?;
+		}
+		Ok(base)
 	}
 
 	/// The review count the list's histogram adds up to.

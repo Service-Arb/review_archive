@@ -6,7 +6,10 @@
 mod profile;
 mod session;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use review_archive_core::maps::{WalkEnd, WalkPolicy, Walked, selectors};
 
@@ -85,6 +88,17 @@ impl Browser {
 			Ok(None) => Ok(Walked::empty(selectors::place_url(place_id, lang))),
 			Err(e) => Err(e),
 		};
+		let walked = match (walked, &self.inner.cfg.diagnostics_dir) {
+			(Err(e), Some(dir)) => Err(match save_diagnostic(session, dir, place_id).await {
+				Some(saved) => e.wrap_err(saved),
+				None => e,
+			}),
+			(Ok(mut w), Some(dir)) if w.end == WalkEnd::Interrupted => {
+				w.warnings.extend(save_diagnostic(session, dir, place_id).await);
+				Ok(w)
+			}
+			(walked, _) => walked,
+		};
 		// A browser that failed under a walk may be dead (a crashed tab, a lost CDP socket):
 		// the next walk starts a fresh one rather than fail on it forever.
 		if matches!(walked, Err(_) | Ok(Walked { end: WalkEnd::Interrupted, .. }))
@@ -103,6 +117,17 @@ impl Browser {
 		state.lock = None;
 		if let Some(s) = state.session.take() {
 			s.close().await;
+		}
+	}
+}
+
+/// Saves what the page showed when a walk failed; the line that says where, if it could.
+async fn save_diagnostic(session: &Session, dir: &Path, place_id: &str) -> Option<String> {
+	match session.save_diagnostic(dir, place_id).await {
+		Ok(base) => Some(format!("Google's page is saved as {}.{{png,html}}", base.display())),
+		Err(e) => {
+			tracing::warn!(error = %format!("{e:#}"), "could not save the page for diagnosis");
+			None
 		}
 	}
 }
