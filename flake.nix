@@ -64,7 +64,8 @@
         };
         combined = v_flakes.utils.combine { inherit rust; modules = [ rs github readme ]; };
 
-        rustPlatform = pkgs.makeRustPlatform { rustc = rust; cargo = rust; inherit stdenv; };
+        build_rust = v_flakes.rs.build_nightly system;
+        rustPlatform = pkgs.makeRustPlatform { rustc = build_rust; cargo = build_rust; inherit stdenv; };
         # `.cargo` holds dev-only accelerators (sccache rustc-wrapper, cranelift,
         # mold) the hermetic sandbox lacks — drop it so the pure build uses nix's
         # own toolchain instead of failing on a missing `sccache` on PATH.
