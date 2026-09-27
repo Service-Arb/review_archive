@@ -25,6 +25,7 @@ crates/review_archive/          the engine (features: maps, store)
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
   src/store/events.rs           webhook events into the outbox, in the scan's own transaction
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
+  src/failure.rs                the typed errors (miette codes and help), `describe`, and who a failure waits for
     src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries
   src/places.rs                 Places API search for URLs without an id
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
@@ -72,7 +73,14 @@ with its own platform implements `sources::ReviewSource` and records through
   fails and the error says which. When it asks a signed-out browser to sign in before
   sorting (such a list also stops at its first few cards), what it shows is read in its own
   order: the run is `partial`, says why, and judges nothing gone. A failed walk saves the
-  page as `<data_dir>/diagnostics/<UTC time>-<place id>.{png,html}`, and its error says where.
+  page as `<data_dir>/artifacts/<UTC time>-page.{png,html}` (kept 7 days), and its error
+  names them as `[<path>]`s — which is what the server's alerts attach.
+- **A block pauses Maps, not a target.** Google flags the address, so a `blocked` or
+  `limited_view` failure trips `maps_breaker` (SQLite, so a restart keeps it): no Maps walk
+  for any target until its probe time (1 h, doubling to 24 h), then one probes; a walk that
+  gets through clears it. `gbp` lists go on, their screenshots wait. What retrying cannot
+  fix — changed markup or consent page, a refused GBP grant — halts that source until a
+  restart; Chromium that will not start ends `serve`.
 - **History is append-only.** Reviews and captures are never deleted; `review_versions` gets a
   row per distinct content, the first sighting included. `gone_at` is set and cleared, never a
   deletion.

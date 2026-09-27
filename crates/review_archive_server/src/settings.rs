@@ -24,6 +24,11 @@ ev_lib::settings! {
 		/// Unset: errors are logged, not reported.
 		#[secret]
 		sentry_dsn: Option<String>,
+		/// Discord webhooks the files an error or warning points at go to. Both or neither.
+		#[secret]
+		alert_webhook_error: Option<String>,
+		#[secret]
+		alert_webhook_warn: Option<String>,
 		app_env: String = "development",
 	}
 }
@@ -42,6 +47,18 @@ impl Settings {
 		Secrets {
 			google_maps_key: self.google_maps_key.clone(),
 			gbp,
+		}
+	}
+
+	/// Where alerts go: `None` sends none.
+	pub fn alert_webhooks(&self) -> eyre::Result<Option<ev_lib::alerts::Webhooks>> {
+		match (&self.alert_webhook_error, &self.alert_webhook_warn) {
+			(Some(error), Some(warn)) => Ok(Some(ev_lib::alerts::Webhooks {
+				error: error.parse().map_err(|e| eyre::eyre!("ALERT_WEBHOOK_ERROR is not a URL: {e}"))?,
+				warn: warn.parse().map_err(|e| eyre::eyre!("ALERT_WEBHOOK_WARN is not a URL: {e}"))?,
+			})),
+			(None, None) => Ok(None),
+			_ => eyre::bail!("ALERT_WEBHOOK_ERROR and ALERT_WEBHOOK_WARN go together: set both, or neither"),
 		}
 	}
 
@@ -87,6 +104,8 @@ mod tests {
 				"GBP_CLIENT_SECRET",
 				"GBP_REFRESH_TOKEN",
 				"SENTRY_DSN",
+				"ALERT_WEBHOOK_ERROR",
+				"ALERT_WEBHOOK_WARN",
 				"APP_ENV"
 			]
 		);

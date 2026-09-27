@@ -167,6 +167,7 @@
             packages = [
               mold
               pkg-config
+              openssl # sentry's native-tls
               rust
               sqlite # inspecting the archive
               cargo-insta

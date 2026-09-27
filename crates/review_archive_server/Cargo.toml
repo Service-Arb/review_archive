@@ -23,7 +23,8 @@ review_archive_core = { workspace = true, features = ["openapi"] }
 axum = { workspace = true, features = ["macros"] }
 clap.workspace = true
 color-eyre.workspace = true
-ev_lib.workspace = true
+ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel", "alerts"] }
+miette = { workspace = true, features = ["fancy"] }
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true

@@ -39,9 +39,9 @@ impl Config {
 		self.browser.profile_dir.clone().or_else(|| self.data_dir.as_ref().map(|d| d.join("chromium-profile")))
 	}
 
-	/// Where a failed walk saves the page it failed on.
-	pub fn diagnostics_dir(&self) -> Option<PathBuf> {
-		self.browser.diagnostics_dir.clone().or_else(|| self.data_dir.as_ref().map(|d| d.join("diagnostics")))
+	/// What alerts may attach: the page a failed walk was on, kept for a week.
+	pub fn artifacts_dir(&self) -> Option<PathBuf> {
+		self.data_dir.as_ref().map(|d| d.join("artifacts"))
 	}
 }
 
@@ -60,12 +60,10 @@ pub struct BrowserConfig {
 	/// Saves the review cards' HTML of every step here, to refresh the parser fixtures.
 	#[serde(skip)]
 	pub dump_html: Option<PathBuf>,
-	/// A walk that fails saves the page here, as `<UTC time>-<place id>.{png,html}`, and its
-	/// error says where. [`Archive::open`](crate::Archive::open) makes it
-	/// `<data_dir>/diagnostics` when unset; a `Browser` built by hand on `None`
-	/// saves nothing.
+	/// A walk that fails saves the page here and its error says where, as `[<path>]`s.
+	/// [`Archive::open`](crate::Archive::open) opens [`Config::artifacts_dir`]; `None` saves nothing.
 	#[serde(skip)]
-	pub diagnostics_dir: Option<PathBuf>,
+	pub artifacts: Option<ev_lib::alerts::Artifacts>,
 }
 
 /// Scan limits and what a new target defaults to.

@@ -21,18 +21,23 @@ review_archive_core.workspace = true
 
 chromiumoxide = { workspace = true, optional = true }
 crc32fast.workspace = true
+ev_lib = { workspace = true, features = ["alerts"] }
 eyre.workspace = true
 futures = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 jiff.workspace = true
+miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "time", "rt", "macros", "net"] }
 tracing.workspace = true
+tracing-error.workspace = true
+v_utils.workspace = true
 zip = { workspace = true, optional = true }
 
 [dev-dependencies]

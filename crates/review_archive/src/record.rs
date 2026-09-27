@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use jiff::Timestamp;
 use review_archive_core::{
-	Capture, Coverage, Known, ReviewId, Scan, Target,
+	Capture, Coverage, Known, ReviewId, Scan, Target, TargetKind,
 	dto::{Counts, RunStatus, RunSummary},
 	reconcile,
 };
@@ -17,8 +17,8 @@ use crate::{
 	store::{RunEnd, RunId, ScanWrite, Store, StoredCapture, blobs::BlobStore, sat_u32},
 };
 
-/// A recorded run: the summary, its row, and the reviews it listed.
-#[derive(Clone, Debug)]
+/// A recorded run: the summary, its row, the reviews it listed, and why it failed.
+#[derive(Debug)]
 pub struct Recorded {
 	/// As reported.
 	pub summary: RunSummary,
@@ -26,6 +26,8 @@ pub struct Recorded {
 	pub run: RunId,
 	/// Every review the scan listed, in its order; empty for a failed run.
 	pub seen: Vec<ReviewId>,
+	/// The source's error, for a failed run; the summary has it as text.
+	pub failure: Option<eyre::Report>,
 }
 
 /// Records scans of a source into a store.
@@ -60,10 +62,10 @@ impl Recorder<'_> {
 			complete: false,
 			error: None,
 		};
+		let mut failure = None;
 		let seen = match source.scan(target, &known).await {
 			Err(e) => {
-				let error = format!("{e:#}");
-				tracing::warn!(target = %target.id, error, "scan failed");
+				let error = crate::describe(&e);
 				let end = RunEnd {
 					run,
 					status: RunStatus::Failed,
@@ -71,7 +73,17 @@ impl Recorder<'_> {
 					job,
 				};
 				self.store.fail_run(end, (self.now)()).await?;
+				#[cfg(feature = "maps")]
+				if crate::remedy(&e) == crate::Remedy::Pause {
+					let reason = e
+						.downcast_ref::<crate::SessionError>()
+						.and_then(miette::Diagnostic::code)
+						.expect("a pause is a SessionError, which has codes");
+					let b = self.store.trip_breaker(&reason.to_string(), (self.now)()).await?;
+					tracing::error!(error, trips = b.trips, probe_after = %b.probe_after, "Google flagged us: every Maps walk pauses until the probe");
+				}
 				summary.error = Some(error);
+				failure = Some(e);
 				Vec::new()
 			}
 			Ok(mut scan) => {
@@ -113,10 +125,13 @@ impl Recorder<'_> {
 					}
 				};
 				summary.counts = applied.counts;
+				if target.kind == TargetKind::Maps && self.store.reset_breaker().await? {
+					tracing::info!(target = %target.id, "maps unpaused: the probe got through");
+				}
 				applied.seen
 			}
 		};
-		Ok(Recorded { summary, run, seen })
+		Ok(Recorded { summary, run, seen, failure })
 	}
 
 	/// Writes the screenshots the archive wants to the blob store; one that fails is a

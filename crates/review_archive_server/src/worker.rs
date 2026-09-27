@@ -5,11 +5,8 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rand::RngExt;
-use review_archive::Archive;
-use review_archive_core::{
-	dto::{JobStatus, RunStatus},
-	schedule,
-};
+use review_archive::{Archive, Remedy, describe, remedy};
+use review_archive_core::{dto::JobStatus, schedule};
 use tokio::{
 	sync::{Notify, watch},
 	time::Instant,
@@ -72,6 +69,7 @@ pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Rece
 			_ = shutdown.changed() => return Ok(()),
 		};
 		let wait = match step {
+			Ok(Step::Fatal(e)) => return Err(e),
 			Ok(Step::Scanned) => {
 				last_scan = Some(Instant::now());
 				continue;
@@ -95,6 +93,8 @@ pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Rece
 
 enum Step {
 	Scanned,
+	/// The worker cannot go on; the process exits with this.
+	Fatal(eyre::Report),
 	/// Nothing to do for this long.
 	Idle(Duration),
 }
@@ -106,11 +106,15 @@ async fn step(archive: &Archive, signals: &Signals, jobs_in_a_row: &mut u32) -> 
 	}
 	*jobs_in_a_row = 0;
 	if let Some(target) = archive.due(Timestamp::now()).await?.into_iter().next() {
-		let summary = archive.scan(&target).await?;
-		tracing::info!("{summary}");
-		if summary.status == RunStatus::Failed {
-			let why = summary.error.as_deref().unwrap_or("no reason given");
-			report(&eyre::eyre!("scan of target {} ({}) failed: {why}", summary.target, summary.label), "scan failed");
+		let recorded = archive.scan(&target).await?;
+		tracing::info!("{}", recorded.summary);
+		if let Some(e) = recorded.failure {
+			let e = e.wrap_err(format!("scan of target {} ({})", target.id, target.label));
+			if remedy(&e) == Remedy::Fatal {
+				tracing::error!(error = describe(&e), "the worker cannot go on");
+				return Ok(Step::Fatal(e));
+			}
+			report(&e, "scan failed");
 		}
 		return Ok(Step::Scanned);
 	}

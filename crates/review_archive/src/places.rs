@@ -1,10 +1,13 @@
 //! A place id from what a person pastes. The id, or a Maps URL carrying it, needs nothing;
 //! a URL with only a name in it is looked up with the Places API (New).
 
-use eyre::WrapErr;
-use review_archive_core::Rejected;
-use review_archive_core::place::{self, Parsed};
+use review_archive_core::{
+	Rejected,
+	place::{self, Parsed},
+};
 use serde::Deserialize;
+
+use crate::PlacesError;
 
 /// Places API (New) text search.
 pub const SEARCH_TEXT: &str = "https://places.googleapis.com/v1/places:searchText";
@@ -66,13 +69,13 @@ pub async fn search(http: &reqwest::Client, endpoint: &str, key: &str, query: &s
 		.json(&body)
 		.send()
 		.await
-		.wrap_err("Places text search")?;
+		.map_err(PlacesError::from)?;
 	let status = resp.status();
 	if !status.is_success() {
-		let text = resp.text().await.unwrap_or_default();
-		eyre::bail!("Places text search for {query:?}: {status}: {text}");
+		let body = resp.text().await.map_err(PlacesError::from)?;
+		return Err(PlacesError::new_api(query.to_owned(), status.as_u16(), body).into());
 	}
-	let resp: Resp = resp.json().await.wrap_err("decoding Places response")?;
+	let resp: Resp = resp.json().await.map_err(PlacesError::from)?;
 	let place = resp.places.into_iter().next().ok_or_else(|| Rejected::invalid(format!("Places found nothing for {query:?}")))?;
 	Ok(Resolved {
 		place_id: place.id,

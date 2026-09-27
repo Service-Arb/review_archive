@@ -31,12 +31,14 @@
 //! # Ok(()) }
 //! ```
 
+#![feature(error_generic_member_access)]
 #![warn(missing_docs)]
 
 mod archive;
 #[cfg(feature = "maps")]
 pub mod browser;
 pub mod config;
+mod failure;
 pub mod places;
 pub mod png_meta;
 #[cfg(feature = "store")]
@@ -50,6 +52,9 @@ pub mod webhooks;
 #[cfg(feature = "store")]
 pub use archive::Added;
 pub use archive::{Archive, CaptureRequest, Captured};
+#[cfg(feature = "maps")]
+pub use failure::{GbpError, SessionError};
+pub use failure::{PlacesError, Remedy, describe, remedy};
 pub use review_archive_core as core;
 pub use review_archive_core::Rejected;
 
