@@ -112,7 +112,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	let t = target(&store).await;
 	let (rx, url, server) = receiver().await;
 	let secret = "0123456789abcdef-shh";
-	store
+	let hook = store
 		.add_webhook(
 			&NewWebhook {
 				url: url.clone(),
@@ -122,7 +122,8 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 			Timestamp::now(),
 		)
 		.await
-		.unwrap();
+		.unwrap()
+		.id;
 	let rec = Recorder {
 		store: &store,
 		blobs: &blobs,
@@ -171,7 +172,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	assert_eq!(events[&Event::ReviewNew], 3, "a and b, a retried once");
 	assert_eq!(events[&Event::ReviewGone], 1);
 	assert_eq!(events[&Event::RunFailed], 1);
-	assert_eq!(store.delivery_counts(1).await.unwrap(), (0, 4, 0));
+	assert_eq!(store.delivery_counts(hook).await.unwrap(), (0, 4, 0));
 }
 
 #[tokio::test]

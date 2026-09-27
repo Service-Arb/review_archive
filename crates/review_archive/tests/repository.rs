@@ -336,3 +336,114 @@ async fn a_gone_day_keeps_its_count_after_the_review_reappears() {
 	let gone_on_the_2nd = stats.iter().find(|d| d.day == "2026-09-02").map(|d| d.gone);
 	assert_eq!(gone_on_the_2nd, Some(1), "{stats:?}");
 }
+
+/// [`Scripted`] as an ad-hoc capture.
+struct AdHoc<'a>(&'a Scripted);
+
+impl ReviewSource for AdHoc<'_> {
+	async fn scan(&self, t: &Target, k: &Known) -> eyre::Result<Scan> {
+		self.0.scan(t, k).await
+	}
+
+	fn ad_hoc(&self) -> bool {
+		true
+	}
+}
+
+fn cut(reviews: Vec<Observed>, cut_after: Option<&str>) -> Result<Scan, String> {
+	Ok(Scan {
+		reviews,
+		coverage: Coverage::DownTo(None),
+		warnings: vec![],
+		cut_after: cut_after.map(str::to_owned),
+	})
+}
+
+/// A capture neither ends a target's first, whole-list walk nor moves its schedule.
+#[tokio::test]
+async fn an_ad_hoc_capture_is_not_the_targets_scan() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false)], Coverage::DownTo(None))));
+	e.archive().run(&AdHoc(&src), &e.target).await.unwrap();
+	assert!(e.store.known(e.target.id).await.unwrap().initial, "still to be walked whole");
+	assert_eq!(e.store.last_run(e.target.id).await.unwrap(), None, "not scheduled");
+
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert!(!e.store.known(e.target.id).await.unwrap().initial);
+	assert!(e.store.last_run(e.target.id).await.unwrap().is_some());
+}
+
+/// Where a walk was cut short is kept until a scan gets past it; a capture may leave a
+/// gap of its own but never covers up one.
+#[tokio::test]
+async fn a_cut_walk_is_remembered_until_a_scan_gets_past_it() {
+	let e = env().await;
+	let marker = || async { e.store.known(e.target.id).await.unwrap().cut_after };
+	let src = Scripted(Mutex::new(cut(vec![review("a", 5, "x", None, false)], Some("a"))));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"));
+
+	src.set(cut(vec![review("b", 5, "y", None, false)], Some("b")));
+	e.archive().run(&AdHoc(&src), &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"), "the older gap is the one to fill");
+
+	src.set(Err("blocked".into()));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await.as_deref(), Some("a"), "a failed run changes nothing");
+
+	src.set(cut(vec![], None));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(marker().await, None);
+}
+
+/// A job queue that only grows is refused at its limit; asking twice for the same job
+/// queues it once.
+#[tokio::test]
+async fn the_job_queue_is_bounded_and_deduplicated() {
+	use review_archive::core::{
+		Rejected,
+		dto::{CaptureLimits, JobKind},
+	};
+
+	let e = env().await;
+	let at = now();
+	let scan = e.store.enqueue_job(JobKind::Scan, e.target.id, None, 2, at).await.unwrap();
+	assert_eq!(e.store.enqueue_job(JobKind::Scan, e.target.id, None, 2, at).await.unwrap(), scan);
+	let five = CaptureLimits {
+		max_reviews: Some(5),
+		..Default::default()
+	};
+	e.store.enqueue_job(JobKind::Capture, e.target.id, Some(&five), 2, at).await.unwrap();
+	let busy = e.store.enqueue_job(JobKind::Capture, e.target.id, None, 2, at).await.unwrap_err();
+	assert!(matches!(busy.downcast_ref::<Rejected>(), Some(Rejected::Busy(_))), "{busy:#}");
+}
+
+/// A capture of named reviews answers with those, and its run and job end together.
+#[tokio::test]
+async fn a_capture_of_named_reviews_returns_those() {
+	use review_archive::core::dto::{CaptureLimits, JobKind, JobStatus};
+
+	let e = env().await;
+	let only_b = CaptureLimits {
+		review_ids: Some(vec!["b".into()]),
+		..Default::default()
+	};
+	let id = e.store.enqueue_job(JobKind::Capture, e.target.id, Some(&only_b), 20, now()).await.unwrap();
+	e.store.claim_job(now()).await.unwrap();
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::DownTo(None))));
+	e.archive().record(&AdHoc(&src), &e.target, Some(id)).await.unwrap();
+	let job = e.store.job(id).await.unwrap().unwrap();
+	assert_eq!(job.status, JobStatus::Done);
+	assert_eq!(job.reviews.unwrap().iter().map(|r| r.source_review_id.as_str()).collect::<Vec<_>>(), ["b"]);
+}
+
+/// A run the process died in is failed on the next start, not left open forever.
+#[tokio::test]
+async fn an_interrupted_run_is_failed_on_start() {
+	let e = env().await;
+	let run = e.store.start_run(e.target.id, false, now()).await.unwrap();
+	e.store.fail_interrupted(now()).await.unwrap();
+	let run = e.store.run(run).await.unwrap().unwrap();
+	assert_eq!(run.status, Some(RunStatus::Failed));
+	assert!(run.error.unwrap().contains("interrupted"));
+}
