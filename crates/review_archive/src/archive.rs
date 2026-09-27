@@ -11,7 +11,7 @@ use std::{path::Path, time::Duration};
 use jiff::Timestamp;
 #[cfg(feature = "store")]
 use review_archive_core::{
-	GbpLocation, ReviewId, Target, TargetId, TargetKind,
+	GbpLocation, Rejected, ReviewId, Target, TargetId, TargetKind,
 	dto::{self, DayStats, JobDto, JobKind, NewWebhook, ReviewDetail, ReviewDto, RunDto, TargetDetail, TargetPatch, WebhookDto},
 	fmt_ts, schedule,
 };
@@ -237,6 +237,7 @@ impl Archive {
 		use review_archive_core::maps::{CaptureAll, scan_to_limit};
 
 		let lang = req.lang.as_deref().unwrap_or(&self.inner.defaults.lang);
+		review_archive_core::check_lang(lang)?;
 		let max = req.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
 		let mut policy = match &req.review_ids {
 			Some(ids) => CaptureAll::only(ids.iter().cloned()),
@@ -280,8 +281,10 @@ impl Archive {
 		let store = self.store()?;
 		let interval = req.interval.unwrap_or(self.inner.defaults.interval);
 		if interval < schedule::MIN_INTERVAL {
-			return Err(crate::rejected::invalid("the interval must be at least 1h"));
+			return Err(Rejected::invalid("the interval must be at least 1h").into());
 		}
+		let lang = req.lang.unwrap_or_else(|| self.inner.defaults.lang.clone());
+		review_archive_core::check_lang(&lang)?;
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), &req.place).await?;
 		let kind = if req.gbp.is_some() { TargetKind::Gbp } else { TargetKind::Maps };
 		let label = req.label.or_else(|| resolved.as_ref().and_then(|r| r.name.clone())).unwrap_or_else(|| place_id.clone());
@@ -292,7 +295,7 @@ impl Archive {
 					kind,
 					place_id,
 					gbp: req.gbp,
-					lang: req.lang.unwrap_or_else(|| self.inner.defaults.lang.clone()),
+					lang,
 					interval,
 				},
 				Timestamp::now(),
@@ -448,8 +451,9 @@ impl Archive {
 			.place
 			.as_deref()
 			.or(req.maps_url.as_deref())
-			.ok_or_else(|| crate::rejected::invalid("name the place: `place` or `maps_url`"))?;
+			.ok_or_else(|| Rejected::invalid("name the place: `place` or `maps_url`"))?;
 		let lang = req.lang.clone().unwrap_or_else(|| self.inner.defaults.lang.clone());
+		review_archive_core::check_lang(&lang)?;
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
 		let target = match store.find_target(&place_id, &lang).await? {
 			Some(t) => t,
@@ -525,16 +529,16 @@ impl Archive {
 
 	/// Adds a webhook. Its URL must be http(s) and its secret 16+ characters.
 	pub async fn add_webhook(&self, hook: &NewWebhook) -> eyre::Result<WebhookDto> {
-		use crate::rejected::invalid;
+		let invalid = |m: String| eyre::Report::new(Rejected::Invalid(m));
 		let url: reqwest::Url = hook.url.parse().map_err(|e| invalid(format!("webhook url {:?}: {e}", hook.url)))?;
 		if !matches!(url.scheme(), "http" | "https") {
 			return Err(invalid(format!("webhook url must be http or https, not {}", url.scheme())));
 		}
 		if hook.events.is_empty() {
-			return Err(invalid("subscribe the webhook to at least one event"));
+			return Err(invalid("subscribe the webhook to at least one event".into()));
 		}
 		if hook.secret.len() < 16 {
-			return Err(invalid("the webhook secret is too short to be one (16+ characters)"));
+			return Err(invalid("the webhook secret is too short to be one (16+ characters)".into()));
 		}
 		self.store()?.add_webhook(hook, Timestamp::now()).await
 	}

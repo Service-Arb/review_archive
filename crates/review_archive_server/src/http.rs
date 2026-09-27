@@ -102,6 +102,7 @@ impl From<eyre::Report> for ApiError {
 		match e.downcast_ref::<Rejected>() {
 			Some(Rejected::NotFound(m)) => return Self(StatusCode::NOT_FOUND, m.clone()),
 			Some(Rejected::Invalid(m)) => return Self(StatusCode::BAD_REQUEST, m.clone()),
+			Some(Rejected::Busy(m)) => return Self(StatusCode::TOO_MANY_REQUESTS, m.clone()),
 			None => {}
 		}
 		ev_lib::error_monitoring::report(&*e);

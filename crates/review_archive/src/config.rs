@@ -3,7 +3,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use review_archive_core::{parse_interval, schedule};
+use review_archive_core::{check_lang, parse_interval, schedule};
 use serde::Deserialize;
 
 /// Everything [`Archive::open`](crate::Archive::open) needs.
@@ -60,6 +60,7 @@ pub struct BrowserConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct Defaults {
 	/// UI language of the Maps page for new targets.
+	#[serde(deserialize_with = "de_lang")]
 	pub lang: String,
 	/// Scan interval for new targets; at least an hour.
 	#[serde(deserialize_with = "de_interval")]
@@ -107,4 +108,10 @@ impl std::fmt::Debug for Secrets {
 fn de_interval<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
 	let s = String::deserialize(d)?;
 	parse_interval(&s).map_err(serde::de::Error::custom)
+}
+
+fn de_lang<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+	let s = String::deserialize(d)?;
+	check_lang(&s).map_err(serde::de::Error::custom)?;
+	Ok(s)
 }

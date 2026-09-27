@@ -37,7 +37,7 @@ pub fn parse(input: &str) -> eyre::Result<Parsed> {
 	}
 
 	// /maps/place/<Name>/@<lat>,<lng>,<zoom>z/...
-	let segments: Vec<String> = url.path_segments().map(|s| s.map(|p| percent_decode(p).replace('+', " ")).collect()).unwrap_or_default();
+	let segments: Vec<String> = url.path_segments().map(|s| s.map(percent_decode).collect()).unwrap_or_default();
 	let name = segments
 		.iter()
 		.position(|s| s == "place")
@@ -57,6 +57,7 @@ pub fn looks_like_place_id(s: &str) -> bool {
 	s.len() >= 16 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Form decoding: `+` is a space, `%2B` a plus.
 fn percent_decode(s: &str) -> String {
 	url::form_urlencoded::parse(format!("x={s}").as_bytes())
 		.next()

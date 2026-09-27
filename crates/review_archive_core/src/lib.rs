@@ -64,6 +64,41 @@ impl fmt::Display for ReviewId {
 	}
 }
 
+/// A request the archive turns down: the caller's mistake, not the archive's. It travels
+/// inside `eyre::Report` like any other error; whoever answers requests finds it with
+/// `downcast_ref::<Rejected>()` and says 404, 400 or 429 instead of 500.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Rejected {
+	/// What was named does not exist.
+	NotFound(String),
+	/// The input cannot be used; the message says why.
+	Invalid(String),
+	/// Too much is already waiting; asking again later can work.
+	Busy(String),
+}
+
+impl Rejected {
+	/// [`Self::Invalid`].
+	pub fn invalid(msg: impl Into<String>) -> Self {
+		Self::Invalid(msg.into())
+	}
+
+	/// [`Self::NotFound`].
+	pub fn not_found(msg: impl Into<String>) -> Self {
+		Self::NotFound(msg.into())
+	}
+}
+
+impl fmt::Display for Rejected {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::NotFound(m) | Self::Invalid(m) | Self::Busy(m) => f.write_str(m),
+		}
+	}
+}
+
+impl std::error::Error for Rejected {}
+
 /// Where a target's reviews are read from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -107,13 +142,18 @@ pub struct GbpLocation {
 }
 
 impl FromStr for GbpLocation {
-	type Err = eyre::Report;
+	type Err = Rejected;
 
-	fn from_str(s: &str) -> eyre::Result<Self> {
+	/// Both ids are numbers: they become path segments of the API's URL.
+	fn from_str(s: &str) -> Result<Self, Rejected> {
 		let s = s.trim().trim_start_matches("accounts/");
-		let (account, location) = s.split_once('/').ok_or_else(|| eyre::eyre!("expected <account>/<location>, got {s:?}"))?;
+		let bad = || Rejected::invalid(format!("gbp: expected <account>/<location>, two numbers, got {s:?}"));
+		let (account, location) = s.split_once('/').ok_or_else(bad)?;
 		let location = location.trim_start_matches("locations/");
-		eyre::ensure!(!account.is_empty() && !location.is_empty() && !location.contains('/'), "expected <account>/<location>, got {s:?}");
+		let numeric = |id: &str| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
+		if !numeric(account) || !numeric(location) {
+			return Err(bad());
+		}
 		Ok(Self {
 			account: account.to_owned(),
 			location: location.to_owned(),
@@ -282,29 +322,55 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Parses `3600` (seconds), `90m`, `6h`, `1d`, `1w`.
-pub fn parse_interval(s: &str) -> eyre::Result<Duration> {
+pub fn parse_interval(s: &str) -> Result<Duration, Rejected> {
 	let s = s.trim();
 	let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 	let (n, unit) = s.split_at(split);
-	let n: u64 = n.parse().map_err(|_| eyre::eyre!("interval {s:?}: expected a number followed by s, m, h, d or w"))?;
+	let n: u64 = n
+		.parse()
+		.map_err(|_| Rejected::invalid(format!("interval {s:?}: expected a number followed by s, m, h, d or w")))?;
 	let unit_secs = match unit.trim() {
 		"" | "s" => 1,
 		"m" => 60,
 		"h" => 3600,
 		"d" => 86_400,
 		"w" => 7 * 86_400,
-		other => eyre::bail!("interval {s:?}: unknown unit {other:?}, expected s, m, h, d or w"),
+		other => return Err(Rejected::invalid(format!("interval {s:?}: unknown unit {other:?}, expected s, m, h, d or w"))),
 	};
-	Ok(Duration::from_secs(n * unit_secs))
+	// stored as SQLite's signed 64-bit integer
+	n.checked_mul(unit_secs)
+		.filter(|&secs| i64::try_from(secs).is_ok())
+		.map(Duration::from_secs)
+		.ok_or_else(|| Rejected::invalid(format!("interval {s:?} is too long")))
 }
 
 /// A date (`2026-09-01`, from its start in UTC) or a full RFC 3339 timestamp.
-pub fn parse_since(s: &str) -> eyre::Result<Timestamp> {
+pub fn parse_since(s: &str) -> Result<Timestamp, Rejected> {
 	if let Ok(t) = s.parse::<Timestamp>() {
 		return Ok(t);
 	}
-	let d: jiff::civil::Date = s.parse().map_err(|_| eyre::eyre!("expected YYYY-MM-DD or an RFC 3339 timestamp, got {s:?}"))?;
-	Ok(d.to_zoned(jiff::tz::TimeZone::UTC)?.timestamp())
+	s.parse::<jiff::civil::Date>()
+		.ok()
+		.and_then(|d| d.to_zoned(jiff::tz::TimeZone::UTC).ok())
+		.map(|z| z.timestamp())
+		.ok_or_else(|| Rejected::invalid(format!("since: expected YYYY-MM-DD or an RFC 3339 timestamp, got {s:?}")))
+}
+
+/// A Maps UI language: a tag like `fr` or `pt-BR`. It becomes part of the page's URL, so
+/// nothing else is let through.
+pub fn check_lang(lang: &str) -> Result<(), Rejected> {
+	let mut parts = lang.split('-');
+	let primary = parts.next().unwrap_or_default();
+	let subtags: Vec<&str> = parts.collect();
+	let ok = (2..=3).contains(&primary.len())
+		&& primary.bytes().all(|b| b.is_ascii_lowercase())
+		&& subtags.len() <= 2
+		&& subtags.iter().all(|t| (2..=8).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric()));
+	if ok {
+		Ok(())
+	} else {
+		Err(Rejected::invalid(format!("lang {lang:?}: expected a language tag like fr or pt-BR")))
+	}
 }
 
 /// Timestamps as the archive stores and serves them: `YYYY-MM-DDTHH:MM:SSZ`, UTC, whole
@@ -337,6 +403,18 @@ mod tests {
 		assert_eq!("accounts/123/locations/456".parse::<GbpLocation>().unwrap(), want);
 		assert!("123".parse::<GbpLocation>().is_err());
 		assert!("123/".parse::<GbpLocation>().is_err());
+		assert!("123/456?x=1".parse::<GbpLocation>().is_err());
+		assert!("../456".parse::<GbpLocation>().is_err());
+	}
+
+	#[test]
+	fn langs() {
+		for ok in ["fr", "en", "haw", "pt-BR", "zh-Hant-TW"] {
+			assert!(check_lang(ok).is_ok(), "{ok}");
+		}
+		for bad in ["", "f", "FR", "fr&q=x", "fr-", "fr-a", "en-US-x-y", "fr BR"] {
+			assert!(check_lang(bad).is_err(), "{bad}");
+		}
 	}
 
 	#[test]
