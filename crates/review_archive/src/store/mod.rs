@@ -22,7 +22,7 @@ use review_archive_core::{
 	dto::{CaptureDto, Counts, DayStats, Event, JobStatus, ReviewDetail, ReviewDto, RunDto, RunStatus, TargetPatch, VersionDto, capture_url},
 	fmt_ts, parse_interval,
 	reconcile::Plan,
-	schedule::{self, LastRun},
+	schedule::{self, Breaker, LastRun},
 };
 use sqlx::{
 	FromRow, SqliteConnection, Transaction,
@@ -500,6 +500,59 @@ impl Store {
 			finished_at: parse_ts(finished_at)?,
 			consecutive_failures: sat_u32(rows.iter().take_while(|(_, s)| s == RunStatus::Failed.as_ref()).count()),
 		}))
+	}
+
+	/// The pause on Maps Google's block put in force, if one is.
+	pub async fn breaker(&self) -> eyre::Result<Option<Breaker>> {
+		let row: Option<(String, String, i64, String)> = sqlx::query_as("SELECT tripped_at, reason_code, trips, probe_after FROM maps_breaker")
+			.fetch_optional(&self.pool)
+			.await
+			.wrap_err("loading the maps breaker")?;
+		row.map(|(tripped_at, reason, trips, probe_after)| {
+			Ok(Breaker {
+				tripped_at: parse_ts(&tripped_at)?,
+				reason,
+				trips: u32::try_from(trips).wrap_err("the breaker's trips")?,
+				probe_after: parse_ts(&probe_after)?,
+			})
+		})
+		.transpose()
+	}
+
+	/// Pauses Maps, or pauses it for longer after a failed probe.
+	pub async fn trip_breaker(&self, reason: &str, now: Timestamp) -> eyre::Result<Breaker> {
+		let mut tx = self.write().await?;
+		let prev: Option<(String, i64)> = sqlx::query_as("SELECT tripped_at, trips FROM maps_breaker")
+			.fetch_optional(&mut *tx)
+			.await
+			.wrap_err("loading the maps breaker")?;
+		let prev = prev
+			.map(|(tripped_at, trips)| {
+				eyre::Ok(Breaker {
+					tripped_at: parse_ts(&tripped_at)?,
+					reason: String::new(),
+					trips: u32::try_from(trips).wrap_err("the breaker's trips")?,
+					probe_after: now,
+				})
+			})
+			.transpose()?;
+		let b = Breaker::trip(prev, reason, now);
+		sqlx::query("INSERT OR REPLACE INTO maps_breaker (id, tripped_at, reason_code, trips, probe_after) VALUES (1, ?, ?, ?, ?)")
+			.bind(fmt_ts(b.tripped_at))
+			.bind(&b.reason)
+			.bind(i64::from(b.trips))
+			.bind(fmt_ts(b.probe_after))
+			.execute(&mut *tx)
+			.await
+			.wrap_err("tripping the maps breaker")?;
+		tx.commit().await.wrap_err("committing the maps breaker")?;
+		Ok(b)
+	}
+
+	/// Lets Maps go again; whether it was paused.
+	pub async fn reset_breaker(&self) -> eyre::Result<bool> {
+		let done = sqlx::query("DELETE FROM maps_breaker").execute(&self.pool).await.wrap_err("resetting the maps breaker")?;
+		Ok(done.rows_affected() > 0)
 	}
 
 	/// Applies a reconciled scan in one transaction: the reviews, the webhook events for

@@ -67,13 +67,19 @@ impl fmt::Display for ReviewId {
 /// A request the archive turns down: the caller's mistake, not the archive's. It travels
 /// inside `eyre::Report` like any other error; whoever answers requests finds it with
 /// `downcast_ref::<Rejected>()` and says 404, 400 or 429 instead of 500.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, miette::Diagnostic, thiserror::Error)]
 pub enum Rejected {
 	/// What was named does not exist.
+	#[error("{0}")]
+	#[diagnostic(code(review_archive::rejected::not_found))]
 	NotFound(String),
 	/// The input cannot be used; the message says why.
+	#[error("{0}")]
+	#[diagnostic(code(review_archive::rejected::invalid))]
 	Invalid(String),
-	/// Too much is already waiting; asking again later can work.
+	/// Too much is already waiting, or the source is paused; asking again later can work.
+	#[error("{0}")]
+	#[diagnostic(code(review_archive::rejected::busy))]
 	Busy(String),
 }
 
@@ -88,16 +94,6 @@ impl Rejected {
 		Self::NotFound(msg.into())
 	}
 }
-
-impl fmt::Display for Rejected {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::NotFound(m) | Self::Invalid(m) | Self::Busy(m) => f.write_str(m),
-		}
-	}
-}
-
-impl std::error::Error for Rejected {}
 
 /// Where a target's reviews are read from: `maps` or `gbp`, as stored and as the API
 /// spells it.

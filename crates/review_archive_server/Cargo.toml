@@ -17,16 +17,16 @@ name = "review_archive"
 path = "src/main.rs"
 
 [dependencies]
-review_archive = { workspace = true, features = ["maps", "store"] }
-review_archive_core = { workspace = true, features = ["openapi"] }
 
 axum = { workspace = true, features = ["macros"] }
 clap.workspace = true
 color-eyre.workspace = true
-ev_lib.workspace = true
+ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel", "alerts"] }
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
+review_archive = { workspace = true, features = ["maps", "store"] }
+review_archive_core = { workspace = true, features = ["openapi"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -7,15 +7,15 @@ mod settings;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use ev_lib::error_monitoring;
+use ev_lib::{alerts, error_monitoring};
 use eyre::WrapErr;
 use review_archive::{Archive, SCANNER_VERSION, store::export::Destination};
 use review_archive_core::{
 	TargetId,
-	dto::{ExportQuery, NewTarget, RunStatus, StatsQuery, TargetPatch},
+	dto::{ExportQuery, NewTarget, StatsQuery, TargetPatch},
 	schedule,
 };
-use review_archive_server::{http, worker};
+use review_archive_server::{http, report, worker};
 use tokio::sync::watch;
 
 use crate::{config::Config, settings::Settings};
@@ -124,19 +124,44 @@ fn main() -> eyre::Result<()> {
 		service: std::env::var("OTEL_SERVICE_NAME").ok().filter(|s| !s.trim().is_empty()),
 		traces_sample_rate: error_monitoring::Config::traces_sample_rate_for(&settings.app_env),
 	});
-	let _otel = init_tracing(&settings.app_env)?;
-
 	let cli = Cli::parse();
+	let mut config = Config::load(cli.config.as_deref())?;
+	if let Cmd::Scan(args) = &cli.cmd {
+		config.browser.dump_html = args.dump_html.clone();
+	}
+	let alerts = match settings.alert_webhooks()? {
+		Some(webhooks) => Some(alerts::alerts(alerts::Config {
+			artifacts: alerts::Artifacts::open(config.archive(settings.secrets()).artifacts_dir().expect("the server always has a data dir"))?,
+			webhooks,
+			service: "review_archive".to_owned(),
+		})),
+		None => None,
+	};
+	let (alert_layer, deliverer) = alerts.unzip();
+	let _otel = init_tracing(&settings.app_env, alert_layer)?;
+
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
 		.build()
 		.wrap_err("building the tokio runtime")?
-		.block_on(run(cli, settings))
+		.block_on(with_alerts(deliverer, run(cli, config, settings)))
+}
+
+/// Runs `work`, delivering alerts beside it and, once it ends, the ones still queued.
+async fn with_alerts<T>(deliverer: Option<alerts::Deliverer>, work: impl Future<Output = T>) -> T {
+	let Some(deliverer) = deliverer else { return work.await };
+	let done = tokio::sync::Notify::new();
+	let work = async {
+		let out = work.await;
+		done.notify_one();
+		out
+	};
+	tokio::join!(work, deliverer.run(done.notified())).0
 }
 
 /// Logs go to stderr, so a CLI command's stdout stays its output. OTLP export only when
-/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
-fn init_tracing(environment: &str) -> eyre::Result<Option<ev_lib::otel::Telemetry>> {
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set; alerts only when their webhooks are.
+fn init_tracing(environment: &str, alerts: Option<alerts::AlertLayer>) -> eyre::Result<Option<ev_lib::otel::Telemetry>> {
 	use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 	let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(option_env!("LOG_DIRECTIVES").unwrap_or("info,chromiumoxide=error")))?;
@@ -150,19 +175,16 @@ fn init_tracing(environment: &str) -> eyre::Result<Option<ev_lib::otel::Telemetr
 		.with(fmt::layer().with_writer(std::io::stderr))
 		.with(error_monitoring::tracing_layer())
 		.with(otel_layers)
+		.with(alerts)
 		.init();
 	Ok(otel_guard)
 }
 
-async fn run(cli: Cli, settings: Settings) -> eyre::Result<()> {
+async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
 	// The image points TMPDIR into the data volume, which starts out empty; Chromium puts its
 	// shared memory there (`--disable-dev-shm-usage`) and dies if the directory is missing.
 	let tmp = std::env::temp_dir();
 	std::fs::create_dir_all(&tmp).wrap_err_with(|| format!("creating the temp dir {}", tmp.display()))?;
-	let mut config = Config::load(cli.config.as_deref())?;
-	if let Cmd::Scan(args) = &cli.cmd {
-		config.browser.dump_html = args.dump_html.clone();
-	}
 	let archive = Archive::open(config.archive(settings.secrets())).await?;
 
 	match cli.cmd {
@@ -263,11 +285,12 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 			tokio::time::sleep(schedule::pause(rand::random::<f64>())).await;
 		}
 		match archive.scan(t).await {
-			Ok(s) => {
-				if s.status == RunStatus::Failed {
+			Ok(r) => {
+				if let Some(e) = r.failure {
 					failed += 1;
+					report(&e.wrap_err(format!("scan of target {} ({})", t.id, t.label)), "scan failed");
 				}
-				println!("{s}");
+				println!("{}", r.summary);
 			}
 			Err(e) => {
 				archive.close().await;

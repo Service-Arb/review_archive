@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 
-use eyre::WrapErr;
 use jiff::Timestamp;
 use review_archive_core::{
 	GbpLocation, Known, Observed, Scan, Target,
@@ -16,7 +15,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use super::ReviewSource;
-use crate::{browser::Browser, config::Defaults};
+use crate::{GbpError, browser::Browser, config::Defaults};
 
 /// Google's OAuth token endpoint.
 pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -72,7 +71,7 @@ impl Client {
 	}
 
 	/// Every review of the location, all pages.
-	pub async fn reviews(&self, loc: &GbpLocation) -> eyre::Result<ReviewList> {
+	pub async fn reviews(&self, loc: &GbpLocation) -> Result<ReviewList, GbpError> {
 		let url = format!("{}/v4/accounts/{}/locations/{}/reviews", self.api_base, loc.account, loc.location);
 		let mut out = ReviewList { reviews: Vec::new(), total: None };
 		let mut page_token: Option<String> = None;
@@ -82,15 +81,15 @@ impl Client {
 			out.reviews.extend(page.reviews);
 			out.total = out.total.or(page.total_review_count);
 			match page.next_page_token.filter(|t| !t.is_empty()) {
-				Some(t) if !tokens.insert(t.clone()) => eyre::bail!("GET {url}: the API returned page token {t:?} twice"),
+				Some(t) if !tokens.insert(t.clone()) => return Err(eyre::eyre!("GET {url}: the API returned page token {t:?} twice").into()),
 				Some(t) => page_token = Some(t),
 				None => return Ok(out),
 			}
 		}
-		eyre::bail!("GET {url}: still more pages after {MAX_PAGES}")
+		Err(eyre::eyre!("GET {url}: still more pages after {MAX_PAGES}").into())
 	}
 
-	async fn get<T: serde::de::DeserializeOwned>(&self, url: &str, page_token: Option<&str>) -> eyre::Result<T> {
+	async fn get<T: serde::de::DeserializeOwned>(&self, url: &str, page_token: Option<&str>) -> Result<T, GbpError> {
 		// One retry with a fresh token: an access token can expire between two pages.
 		for attempt in 0..2 {
 			let token = self.access_token(attempt > 0).await?;
@@ -98,21 +97,21 @@ impl Client {
 			if let Some(t) = page_token {
 				req = req.query(&[("pageToken", t)]);
 			}
-			let resp = req.send().await.wrap_err_with(|| format!("GET {url}"))?;
+			let resp = req.send().await?;
 			let status = resp.status();
 			if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
 				continue;
 			}
 			if !status.is_success() {
-				let body = resp.text().await.unwrap_or_default();
-				eyre::bail!("GET {url}: {status}: {body}");
+				let body = resp.text().await?;
+				return Err(GbpError::new_api(format!("GET {url}"), status.as_u16(), body));
 			}
-			return resp.json().await.wrap_err_with(|| format!("decoding {url}"));
+			return Ok(resp.json().await?);
 		}
-		eyre::bail!("GET {url}: still unauthorized after refreshing the access token")
+		Err(GbpError::new_unauthorized(url.to_owned()))
 	}
 
-	async fn access_token(&self, force_refresh: bool) -> eyre::Result<String> {
+	async fn access_token(&self, force_refresh: bool) -> Result<String, GbpError> {
 		#[derive(Deserialize)]
 		struct TokenResp {
 			access_token: String,
@@ -131,14 +130,17 @@ impl Client {
 				("refresh_token", self.creds.refresh_token.as_str()),
 			])
 			.send()
-			.await
-			.wrap_err("refreshing the GBP access token")?;
+			.await?;
 		let status = resp.status();
 		if !status.is_success() {
-			let body = resp.text().await.unwrap_or_default();
-			eyre::bail!("refreshing the GBP access token: {status}: {body}");
+			let body = resp.text().await?;
+			// 400 invalid_grant, 401 invalid_client: nothing a retry changes
+			return Err(match status {
+				reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED => GbpError::new_invalid_grant(status.as_u16(), body),
+				_ => GbpError::new_api("refreshing the GBP access token".to_owned(), status.as_u16(), body),
+			});
 		}
-		let t: TokenResp = resp.json().await.wrap_err("decoding the token response")?;
+		let t: TokenResp = resp.json().await?;
 		*cached = Some(t.access_token.clone());
 		Ok(t.access_token)
 	}
@@ -149,8 +151,8 @@ impl Client {
 pub struct GbpSource<'a> {
 	/// The API.
 	pub client: &'a Client,
-	/// Where screenshots are taken.
-	pub browser: &'a Browser,
+	/// Where screenshots are taken, or why they wait: Maps is paused or halted.
+	pub browser: Result<&'a Browser, String>,
 	/// The screenshot walk's limits.
 	pub defaults: &'a Defaults,
 }
@@ -168,7 +170,14 @@ impl ReviewSource for GbpSource<'_> {
 			let max = self.defaults.max_for(known);
 			let mut policy = FindCards::new(&wanted, Timestamp::now());
 			// The API list stands on its own; a failed screenshot pass only leaves captures pending.
-			match self.browser.walk(&target.place_id, &target.lang, &mut policy, max).await {
+			let walked = match self.browser {
+				Ok(browser) => browser
+					.walk(&target.place_id, &target.lang, &mut policy, max)
+					.await
+					.map_err(|e| format!("Maps page failed: {e:#}")),
+				Err(ref why) => Err(why.clone()),
+			};
+			match walked {
 				Ok(walked) => {
 					warnings.extend(walked.warnings);
 					if walked.end.cut_short() && !policy.satisfied() {
@@ -179,7 +188,7 @@ impl ReviewSource for GbpSource<'_> {
 						r.capture = matched.remove(&r.source_review_id);
 					}
 				}
-				Err(e) => warnings.push(format!("screenshots skipped, Maps page failed: {e:#}")),
+				Err(why) => warnings.push(format!("screenshots skipped, {why}")),
 			}
 		}
 		Ok(Scan {

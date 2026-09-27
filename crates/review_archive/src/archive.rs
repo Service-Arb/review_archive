@@ -80,6 +80,9 @@ struct Inner {
 	browser: Browser,
 	#[cfg(all(feature = "store", feature = "maps"))]
 	gbp: OnceLock<crate::sources::gbp::Client>,
+	/// What retrying cannot fix, by source, until the process restarts.
+	#[cfg(all(feature = "store", feature = "maps"))]
+	halted: std::sync::Mutex<Halted>,
 	#[cfg(feature = "store")]
 	store: Option<Stored>,
 }
@@ -160,7 +163,7 @@ impl Archive {
 				.profile_dir()
 				.ok_or_else(|| eyre::eyre!("the browser needs a profile dir: set a data dir or browser.profile_dir"))?;
 			let cfg = crate::config::BrowserConfig {
-				diagnostics_dir: config.diagnostics_dir(),
+				artifacts: config.artifacts_dir().map(ev_lib::alerts::Artifacts::open).transpose()?,
 				..config.browser.clone()
 			};
 			Browser::new(cfg, profile)
@@ -203,6 +206,8 @@ impl Archive {
 				browser,
 				#[cfg(all(feature = "store", feature = "maps"))]
 				gbp: OnceLock::new(),
+				#[cfg(all(feature = "store", feature = "maps"))]
+				halted: std::sync::Mutex::default(),
 				#[cfg(feature = "store")]
 				store,
 			}),
@@ -333,17 +338,20 @@ impl Archive {
 	#[cfg(feature = "maps")]
 	pub async fn scan_target(&self, id: TargetId) -> eyre::Result<dto::RunSummary> {
 		let target = self.target(id).await?;
-		self.scan(&target).await
+		Ok(self.scan(&target).await?.summary)
 	}
 
-	/// [`Self::scan_target`], for a target already loaded.
+	/// [`Self::scan_target`], for a target already loaded; with the source's error when the run failed.
 	#[cfg(feature = "maps")]
-	pub async fn scan(&self, target: &Target) -> eyre::Result<dto::RunSummary> {
-		Ok(self.scan_recorded(target, None).await?.summary)
+	pub async fn scan(&self, target: &Target) -> eyre::Result<Recorded> {
+		self.scan_recorded(target, None).await
 	}
 
 	#[cfg(feature = "maps")]
 	async fn scan_recorded(&self, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
+		if let Some(why) = self.closed(target.kind, Timestamp::now()).await? {
+			return Err(Rejected::Busy(why).into());
+		}
 		self.inner.browser.claim().await?;
 		match target.kind {
 			TargetKind::Maps => {
@@ -357,7 +365,10 @@ impl Archive {
 				Ok(client) => {
 					let source = crate::sources::gbp::GbpSource {
 						client,
-						browser: &self.inner.browser,
+						browser: match self.closed(TargetKind::Maps, Timestamp::now()).await? {
+							Some(why) => Err(why),
+							None => Ok(&self.inner.browser),
+						},
 						defaults: &self.inner.defaults,
 					};
 					self.record_job(&source, target, job).await
@@ -377,13 +388,44 @@ impl Archive {
 
 	async fn record_job<S: ReviewSource>(&self, source: &S, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
 		let stored = self.stored()?;
-		Recorder {
+		let recorded = Recorder {
 			store: &stored.store,
 			blobs: &stored.blobs,
 			now: Timestamp::now,
 		}
 		.record(source, target, job)
-		.await
+		.await?;
+		#[cfg(feature = "maps")]
+		if let Some(e) = &recorded.failure
+			&& crate::remedy(e) == crate::Remedy::Human
+		{
+			let why = crate::describe(e).lines().next().expect("a description has a first line").to_owned();
+			let mut halted = self.inner.halted.lock().expect("nothing under this lock panics");
+			let (source, slot) = if e.downcast_ref::<crate::GbpError>().is_some() {
+				("gbp", &mut halted.gbp)
+			} else {
+				("maps", &mut halted.maps)
+			};
+			if slot.replace(why).is_none() {
+				tracing::error!(error = crate::describe(e), source, "halted until a restart: retrying cannot fix this");
+			}
+		}
+		Ok(recorded)
+	}
+
+	/// Why scans of this kind cannot run at `now`: Maps paused after a block, or a source
+	/// halted until a restart. A pause ends at its probe time.
+	#[cfg(feature = "maps")]
+	async fn closed(&self, kind: TargetKind, now: Timestamp) -> eyre::Result<Option<String>> {
+		let halted = self.inner.halted.lock().expect("nothing under this lock panics").clone();
+		Ok(match kind {
+			TargetKind::Gbp => halted.gbp.map(|why| format!("gbp is halted until a restart: {why}")),
+			TargetKind::Maps => match (halted.maps, self.store()?.breaker().await?) {
+				(Some(why), _) => Some(format!("Maps is halted until a restart: {why}")),
+				(None, Some(b)) if now < b.probe_after => Some(format!("Maps is paused after {} until {}; nothing goes to Google before then", b.reason, b.probe_after)),
+				(None, _) => None,
+			},
+		})
 	}
 
 	#[cfg(feature = "maps")]
@@ -444,7 +486,11 @@ impl Archive {
 	/// Queues a scan of a target now, ahead of the scheduled ones. Returns the job id.
 	pub async fn enqueue_scan(&self, id: TargetId) -> eyre::Result<i64> {
 		let store = self.store()?;
-		store.target(id).await?;
+		let target = store.target(id).await?;
+		#[cfg(feature = "maps")]
+		if let Some(why) = self.closed(target.kind, Timestamp::now()).await? {
+			return Err(Rejected::Busy(why).into());
+		}
 		store.enqueue_job(JobKind::Scan, id, None, self.inner.defaults.max_queued_jobs, Timestamp::now()).await
 	}
 
@@ -458,6 +504,10 @@ impl Archive {
 			.as_deref()
 			.or(req.maps_url.as_deref())
 			.ok_or_else(|| Rejected::invalid("name the place: `place` or `maps_url`"))?;
+		#[cfg(feature = "maps")]
+		if let Some(why) = self.closed(TargetKind::Maps, Timestamp::now()).await? {
+			return Err(Rejected::Busy(why).into());
+		}
 		let most = self.inner.defaults.max_reviews_initial;
 		if req.limits.max_reviews.is_some_and(|n| n > most) || req.limits.review_ids.as_ref().is_some_and(|ids| ids.len() > most) {
 			return Err(Rejected::invalid(format!("a capture reads {most} reviews at most")).into());
@@ -501,6 +551,9 @@ impl Archive {
 			match job.kind {
 				JobKind::Scan => self.scan_recorded(&target, Some(job.id)).await,
 				JobKind::Capture => {
+					if let Some(why) = self.closed(TargetKind::Maps, Timestamp::now()).await? {
+						return Err(Rejected::Busy(why).into());
+					}
 					self.inner.browser.claim().await?;
 					let d = &self.inner.defaults;
 					let source = crate::sources::maps::RequestedSource {
@@ -589,6 +642,11 @@ impl Archive {
 	pub async fn due(&self, now: Timestamp) -> eyre::Result<Vec<Target>> {
 		let mut due: Vec<(Target, Option<Timestamp>)> = self.due_times().await?.into_iter().filter(|(_, d)| d.is_none_or(|d| d <= now)).collect();
 		due.sort_by_key(|(t, d)| (*d, t.id));
+		// a paused Maps gets one probe, not every target that waited for it
+		if self.store()?.breaker().await?.is_some() {
+			let mut probe = true;
+			due.retain(|(t, _)| t.kind != TargetKind::Maps || std::mem::take(&mut probe));
+		}
 		Ok(due.into_iter().map(|(t, _)| t).collect())
 	}
 
@@ -604,14 +662,39 @@ impl Archive {
 		Ok(schedule::due_at(target.id, target.interval, last))
 	}
 
+	/// Enabled targets and when each is due: a halted source's are left out, and a paused
+	/// Maps' wait for the probe.
 	async fn due_times(&self) -> eyre::Result<Vec<(Target, Option<Timestamp>)>> {
+		let breaker = self.store()?.breaker().await?;
+		#[cfg(feature = "maps")]
+		let halted = self.inner.halted.lock().expect("nothing under this lock panics").clone();
 		let mut out = Vec::new();
 		for t in self.targets().await?.into_iter().filter(|t| t.enabled) {
-			let due = self.due_at(&t).await?;
+			#[cfg(feature = "maps")]
+			if match t.kind {
+				TargetKind::Maps => halted.maps.is_some(),
+				TargetKind::Gbp => halted.gbp.is_some(),
+			} {
+				continue;
+			}
+			let mut due = self.due_at(&t).await?;
+			if t.kind == TargetKind::Maps
+				&& let Some(b) = &breaker
+			{
+				due = Some(due.map_or(b.probe_after, |d| d.max(b.probe_after)));
+			}
 			out.push((t, due));
 		}
 		Ok(out)
 	}
+}
+
+/// Sources retrying cannot fix, and why.
+#[cfg(all(feature = "store", feature = "maps"))]
+#[derive(Clone, Debug, Default)]
+struct Halted {
+	maps: Option<String>,
+	gbp: Option<String>,
 }
 
 /// A source that could not be set up; scanning it fails with why.
