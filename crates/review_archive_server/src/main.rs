@@ -4,20 +4,24 @@
 mod config;
 mod settings;
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use ev_lib::error_monitoring;
 use eyre::WrapErr;
-use review_archive::{AddTarget, Archive};
-use review_archive_core::{GbpLocation, TargetId, dto::RunStatus, parse_interval, parse_since, schedule};
+use review_archive::{Archive, SCANNER_VERSION, store::export::Destination};
+use review_archive_core::{
+	TargetId,
+	dto::{ExportQuery, NewTarget, RunStatus, StatsQuery, TargetPatch},
+	schedule,
+};
 use review_archive_server::{http, worker};
 use tokio::sync::watch;
 
 use crate::{config::Config, settings::Settings};
 
 #[derive(Parser)]
-#[command(name = "review_archive", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics")]
+#[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics")]
 struct Cli {
 	/// TOML config: data dir, bind address, browser, defaults. Secrets come from the environment only.
 	#[arg(long, global = true)]
@@ -49,10 +53,12 @@ enum Cmd {
 	Stats {
 		#[arg(long)]
 		target: Option<i64>,
+		/// YYYY-MM-DD, inclusive.
 		#[arg(long)]
-		from: Option<jiff::civil::Date>,
+		from: Option<String>,
+		/// YYYY-MM-DD, inclusive.
 		#[arg(long)]
-		to: Option<jiff::civil::Date>,
+		to: Option<String>,
 		#[arg(long)]
 		csv: bool,
 	},
@@ -69,11 +75,11 @@ enum TargetCmd {
 		#[arg(long)]
 		lang: Option<String>,
 		/// e.g. 6h, 12h, 1d; at least 1h.
-		#[arg(long, value_parser = parse_interval)]
-		interval: Option<Duration>,
+		#[arg(long)]
+		interval: Option<String>,
 		/// Read reviews through the Business Profile API: `<account>/<location>`.
 		#[arg(long)]
-		gbp: Option<GbpLocation>,
+		gbp: Option<String>,
 	},
 	List,
 	Disable {
@@ -164,13 +170,12 @@ async fn run(cli: Cli, settings: Settings) -> eyre::Result<()> {
 		Cmd::Scan(args) => scan(&archive, args).await,
 		Cmd::Serve => serve(archive, &config, settings.api_token()?).await,
 		Cmd::Export { target, since, out } => {
-			let since = since.as_deref().map(parse_since).transpose()?;
-			let done = archive.export(TargetId(target), since, &out).await?;
+			let done = archive.export(TargetId(target), &ExportQuery { since }, Destination::Path(out.clone())).await?;
 			println!("{} reviews, {} PNGs → {}", done.reviews, done.pngs, out.display());
 			Ok(())
 		}
 		Cmd::Stats { target, from, to, csv } => {
-			let rows = archive.stats(target.map(TargetId), from, to).await?;
+			let rows = archive.stats(&StatsQuery { target, from, to }).await?;
 			if csv {
 				print!("{}", review_archive_core::dto::stats_csv(&rows)?);
 			} else {
@@ -185,13 +190,13 @@ async fn target_cmd(archive: &Archive, cmd: TargetCmd) -> eyre::Result<()> {
 	match cmd {
 		TargetCmd::Add { place, label, lang, interval, gbp } => {
 			let added = archive
-				.add_target(AddTarget {
-					place,
+				.add_target(&NewTarget {
+					place: Some(place),
 					label,
 					lang,
 					interval,
 					gbp,
-					disabled: false,
+					..Default::default()
 				})
 				.await?;
 			if let Some(r) = &added.resolved {
@@ -207,7 +212,7 @@ async fn target_cmd(archive: &Archive, cmd: TargetCmd) -> eyre::Result<()> {
 		}
 		TargetCmd::List => {
 			for t in archive.targets().await? {
-				let last = archive.store()?.last_run(t.id).await?;
+				let last = archive.last_run(t.id).await?;
 				println!(
 					"#{:<3} {:<4} {:<8} {:<24} {} lang={} every {}h{}{}",
 					t.id,
@@ -232,9 +237,18 @@ async fn target_cmd(archive: &Archive, cmd: TargetCmd) -> eyre::Result<()> {
 			}
 			Ok(())
 		}
-		TargetCmd::Disable { id } => archive.set_enabled(TargetId(id), false).await,
-		TargetCmd::Enable { id } => archive.set_enabled(TargetId(id), true).await,
+		TargetCmd::Disable { id } => set_enabled(archive, id, false).await,
+		TargetCmd::Enable { id } => set_enabled(archive, id, true).await,
 	}
+}
+
+async fn set_enabled(archive: &Archive, id: i64, enabled: bool) -> eyre::Result<()> {
+	let patch = TargetPatch {
+		enabled: Some(enabled),
+		..Default::default()
+	};
+	archive.update_target(TargetId(id), &patch).await?;
+	Ok(())
 }
 
 async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {

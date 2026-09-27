@@ -15,11 +15,16 @@ use tokio::{
 	time::Instant,
 };
 
+use crate::report;
+
 /// The longest sleep between looks at the target list, so a target added or re-enabled
 /// from the CLI is picked up without a restart.
 const MAX_IDLE: Duration = Duration::from_secs(60);
 /// How often the outbox is looked at.
 const DELIVERY_TICK: Duration = Duration::from_secs(5);
+/// Queued jobs run back to back at most before an overdue target gets its scan: a busy
+/// queue delays the schedule, it does not stop it.
+const JOBS_IN_A_ROW: u32 = 3;
 
 /// How the HTTP side and the worker nudge each other.
 #[derive(Debug)]
@@ -40,15 +45,16 @@ impl Default for Signals {
 }
 
 /// The browser's worker, until `shutdown` turns true. One scan at a time: a queued job
-/// goes first, then the most overdue target; between two, a polite pause. A scan in
-/// flight at shutdown is abandoned; its run and job stay unfinished until the next start
-/// fails the job.
+/// goes first (but not more than a few in a row while a target is overdue), then the most
+/// overdue target; between two, a polite pause. A scan in flight at shutdown is
+/// abandoned; the next start fails its run and its job.
 pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Receiver<bool>) -> eyre::Result<()> {
-	let interrupted = archive.recover_jobs().await?;
+	let interrupted = archive.recover().await?;
 	if interrupted > 0 {
 		tracing::warn!(interrupted, "failed the jobs the previous process died running");
 	}
 	let mut last_scan: Option<Instant> = None;
+	let mut jobs_in_a_row = 0;
 	//LOOP: the service's main loop, ends on shutdown
 	loop {
 		if *shutdown.borrow() {
@@ -62,30 +68,27 @@ pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Rece
 			}
 		}
 		let step = tokio::select! {
-			r = step(archive, signals) => r,
+			r = step(archive, signals, &mut jobs_in_a_row) => r,
 			_ = shutdown.changed() => return Ok(()),
 		};
-		match step {
-			Ok(Step::Scanned) => last_scan = Some(Instant::now()),
-			Ok(Step::Idle(wait)) => {
-				last_scan = None;
-				archive.close().await;
-				tokio::select! {
-					() = tokio::time::sleep(wait) => {}
-					() = signals.job_queued.notified() => {}
-					_ = shutdown.changed() => return Ok(()),
-				}
+		let wait = match step {
+			Ok(Step::Scanned) => {
+				last_scan = Some(Instant::now());
+				continue;
 			}
+			Ok(Step::Idle(wait)) => wait,
 			Err(e) => {
 				// the archive itself failed (database); try again later rather than spin
-				ev_lib::error_monitoring::report(&*e);
-				tracing::warn!(error = %format!("{e:#}"), "worker step failed");
-				archive.close().await;
-				tokio::select! {
-					() = tokio::time::sleep(MAX_IDLE) => {}
-					_ = shutdown.changed() => return Ok(()),
-				}
+				report(&e, "worker step failed");
+				MAX_IDLE
 			}
+		};
+		last_scan = None;
+		archive.close().await;
+		tokio::select! {
+			() = tokio::time::sleep(wait) => {}
+			() = signals.job_queued.notified() => {}
+			_ = shutdown.changed() => return Ok(()),
 		}
 	}
 }
@@ -96,30 +99,23 @@ enum Step {
 	Idle(Duration),
 }
 
-async fn step(archive: &Archive, signals: &Signals) -> eyre::Result<Step> {
-	let job = archive.run_next_job().await;
-	if !matches!(job, Ok(None)) {
-		signals.job_finished.send_modify(|n| *n += 1);
-	}
-	if let Some(job) = job? {
-		tracing::info!(job = job.id, kind = %job.kind, status = %job.status, "job finished");
-		if job.status == JobStatus::Failed {
-			report(&format!("job {} ({}) failed: {}", job.id, job.kind, job.error.as_deref().unwrap_or("no reason given")));
-		}
+async fn step(archive: &Archive, signals: &Signals, jobs_in_a_row: &mut u32) -> eyre::Result<Step> {
+	if *jobs_in_a_row < JOBS_IN_A_ROW && run_job(archive, signals).await? {
+		*jobs_in_a_row += 1;
 		return Ok(Step::Scanned);
 	}
-	let now = Timestamp::now();
-	if let Some(target) = archive.due(now).await?.into_iter().next() {
+	*jobs_in_a_row = 0;
+	if let Some(target) = archive.due(Timestamp::now()).await?.into_iter().next() {
 		let summary = archive.scan(&target).await?;
 		tracing::info!("{summary}");
 		if summary.status == RunStatus::Failed {
-			report(&format!(
-				"scan of target {} ({}) failed: {}",
-				summary.target,
-				summary.label,
-				summary.error.as_deref().unwrap_or("no reason given")
-			));
+			let why = summary.error.as_deref().unwrap_or("no reason given");
+			report(&eyre::eyre!("scan of target {} ({}) failed: {why}", summary.target, summary.label), "scan failed");
 		}
+		return Ok(Step::Scanned);
+	}
+	if run_job(archive, signals).await? {
+		*jobs_in_a_row = 1;
 		return Ok(Step::Scanned);
 	}
 	let now = Timestamp::now();
@@ -130,9 +126,19 @@ async fn step(archive: &Archive, signals: &Signals) -> eyre::Result<Step> {
 	}))
 }
 
-fn report(msg: &str) {
-	let e = eyre::eyre!("{msg}");
-	ev_lib::error_monitoring::report(&*e);
+/// Runs the oldest queued job, if any; whether there was one.
+async fn run_job(archive: &Archive, signals: &Signals) -> eyre::Result<bool> {
+	let job = archive.run_next_job().await;
+	if !matches!(job, Ok(None)) {
+		signals.job_finished.send_modify(|n| *n += 1);
+	}
+	let Some(job) = job? else { return Ok(false) };
+	tracing::info!(job = job.id, kind = %job.kind, status = %job.status, "job finished");
+	if job.status == JobStatus::Failed {
+		let why = job.error.as_deref().unwrap_or("no reason given");
+		report(&eyre::eyre!("job {} ({}) failed: {why}", job.id, job.kind), "job failed");
+	}
+	Ok(true)
 }
 
 /// Delivers the webhook outbox every few seconds, until `shutdown`.
@@ -142,10 +148,7 @@ pub async fn deliver(archive: &Archive, mut shutdown: watch::Receiver<bool>) -> 
 		match archive.deliver_webhooks().await {
 			Ok(r) if r.delivered + r.retrying + r.gave_up > 0 => tracing::info!(delivered = r.delivered, retrying = r.retrying, gave_up = r.gave_up, "webhooks"),
 			Ok(_) => {}
-			Err(e) => {
-				ev_lib::error_monitoring::report(&*e);
-				tracing::warn!(error = %format!("{e:#}"), "webhook delivery pass failed");
-			}
+			Err(e) => report(&e, "webhook delivery pass failed"),
 		}
 		tokio::select! {
 			() = tokio::time::sleep(DELIVERY_TICK) => {}

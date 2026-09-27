@@ -20,7 +20,7 @@ thiserror.workspace = true
 axum.workspace = true
 eyre.workspace = true
 jiff.workspace = true
-review_archive = { workspace = true, features = ["maps", "gbp", "store"] }
+review_archive = { workspace = true, features = ["maps", "store"] }
 review_archive_server.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }

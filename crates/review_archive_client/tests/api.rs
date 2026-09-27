@@ -35,12 +35,13 @@ struct Env {
 
 async fn env() -> Env {
 	let dir = tempfile::tempdir().unwrap();
-	let archive = Archive::open(Config {
+	let mut config = Config {
 		data_dir: Some(dir.path().to_owned()),
 		..Config::default()
-	})
-	.await
-	.unwrap();
+	};
+	// the webhooks here point at loopback, which only a listed host may
+	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
+	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
 	let app = router(AppState::new(archive.clone(), TOKEN, signals.clone()));
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -65,6 +66,7 @@ impl ReviewSource for Listed {
 			reviews: self.0.clone(),
 			coverage: Coverage::Complete,
 			warnings: vec![],
+			cut_after: None,
 		})
 	}
 }
@@ -449,10 +451,11 @@ async fn a_capture_is_served_only_once_recorded_and_by_its_exact_name() {
 
 	let png = e.client.capture_png(&url).await.unwrap();
 	assert!(png.starts_with(b"\x89PNG"), "a PNG");
-	assert_eq!(png, std::fs::read(e.archive.blobs().unwrap().path_of(&sha).unwrap()).unwrap());
+	let blobs = review_archive::store::blobs::BlobStore::new(e._dir.path().join("blobs"));
+	assert_eq!(png, std::fs::read(blobs.path_of(&sha).unwrap()).unwrap());
 
 	// a file in the blob dir that no capture row names is not served
-	let stray = e.archive.blobs().unwrap().put(b"not a recorded capture").await.unwrap();
+	let stray = blobs.put(b"not a recorded capture").await.unwrap();
 	assert_eq!(e.client.capture_png(&format!("/captures/{stray}.png")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
 	let never_recorded = format!("/captures/{}.png", "0".repeat(64));
 	assert_eq!(e.client.capture_png(&never_recorded).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));

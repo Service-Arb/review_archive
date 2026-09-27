@@ -35,8 +35,12 @@ pub fn base_delay(interval: Duration, consecutive_failures: u32) -> Duration {
 	if consecutive_failures == 0 {
 		return interval;
 	}
-	let factor = 2u32.saturating_pow(consecutive_failures - 1);
-	BACKOFF_BASE.saturating_mul(factor).min(BACKOFF_CAP)
+	backoff(BACKOFF_BASE, BACKOFF_CAP, consecutive_failures)
+}
+
+/// The wait after the `n`th failure in a row (1-based): `base`, doubling, at most `cap`.
+pub fn backoff(base: Duration, cap: Duration, n: u32) -> Duration {
+	base.saturating_mul(2u32.saturating_pow(n.saturating_sub(1))).min(cap)
 }
 
 /// When the target is next due; `None` for a target never run, which is due now.

@@ -1,7 +1,7 @@
 //! Where reviews come from. [`ReviewSource`] is the port; `maps` and `gbp` are the two
 //! Google adapters, and other platforms plug in by implementing it.
 
-#[cfg(feature = "gbp")]
+#[cfg(feature = "maps")]
 pub mod gbp;
 #[cfg(feature = "maps")]
 pub mod maps;
@@ -26,11 +26,17 @@ use review_archive_core::{Known, Scan, Target};
 ///
 /// impl ReviewSource for Listed {
 ///     async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
-///         Ok(Scan { reviews: self.0.clone(), coverage: Coverage::Complete, warnings: vec![] })
+///         Ok(Scan { reviews: self.0.clone(), coverage: Coverage::Complete, warnings: vec![], cut_after: None })
 ///     }
 /// }
 /// ```
 pub trait ReviewSource: Sync {
 	/// One pass over the target.
 	fn scan(&self, target: &Target, known: &Known) -> impl Future<Output = eyre::Result<Scan>> + Send;
+
+	/// An ad-hoc look (a capture) rather than the target's scan: its run neither moves the
+	/// target's schedule nor counts as the target's first full walk.
+	fn ad_hoc(&self) -> bool {
+		false
+	}
 }

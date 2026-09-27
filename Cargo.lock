@@ -322,6 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "axum-macros",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -365,6 +366,17 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2972,9 +2984,9 @@ dependencies = [
  "crc32fast",
  "eyre",
  "futures",
+ "hmac",
  "jiff",
  "png",
- "rand 0.10.3",
  "reqwest 0.13.5",
  "review_archive_core",
  "serde",
@@ -3033,7 +3045,6 @@ dependencies = [
  "color-eyre",
  "ev_lib",
  "eyre",
- "futures",
  "jiff",
  "rand 0.10.3",
  "review_archive",
@@ -3041,8 +3052,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "utoipa",
@@ -4207,6 +4222,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -4224,6 +4240,7 @@ dependencies = [
  "http 1.5.0",
  "http-body",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

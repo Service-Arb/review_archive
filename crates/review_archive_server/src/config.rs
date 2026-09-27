@@ -7,7 +7,7 @@ use std::{
 };
 
 use eyre::WrapErr;
-use review_archive::config::{BrowserConfig, Defaults};
+use review_archive::config::{BrowserConfig, Defaults, WebhookConfig};
 use review_archive_core::schedule;
 use serde::Deserialize;
 
@@ -20,6 +20,7 @@ pub struct Config {
 	pub bind: SocketAddr,
 	pub browser: BrowserConfig,
 	pub defaults: Defaults,
+	pub webhooks: WebhookConfig,
 }
 
 impl Default for Config {
@@ -29,6 +30,7 @@ impl Default for Config {
 			bind: DEFAULT_BIND.parse().expect("DEFAULT_BIND is a valid socket address"),
 			browser: BrowserConfig::default(),
 			defaults: Defaults::default(),
+			webhooks: WebhookConfig::default(),
 		}
 	}
 }
@@ -54,6 +56,7 @@ impl Config {
 			data_dir: Some(self.data_dir.clone()),
 			browser: self.browser.clone(),
 			defaults: self.defaults.clone(),
+			webhooks: self.webhooks.clone(),
 			secrets,
 		}
 	}
@@ -77,12 +80,16 @@ mod tests {
 			[defaults]
 			lang = "fr"
 			interval = "12h"
+			[webhooks]
+			allowed_hosts = ["concierge"]
 			"#,
 		)
 		.unwrap();
 		assert_eq!(cfg.defaults.interval, Duration::from_secs(12 * 3600));
 		assert_eq!(cfg.defaults.max_reviews_per_scan, 200);
 		assert!(cfg.browser.no_sandbox);
+		assert_eq!(cfg.webhooks.allowed_hosts, ["concierge"]);
+		assert!(toml::from_str::<Config>("[defaults]\nlang = \"fr&q=x\"").is_err(), "a lang goes into a URL");
 
 		let empty: Config = toml::from_str("").unwrap();
 		assert_eq!(empty.bind.to_string(), DEFAULT_BIND);

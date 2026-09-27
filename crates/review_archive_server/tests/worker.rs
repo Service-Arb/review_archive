@@ -5,11 +5,11 @@ use std::{path::PathBuf, time::Duration};
 
 use jiff::Timestamp;
 use review_archive::{
-	AddTarget, Archive,
+	Archive,
 	config::Config,
 	core::{
-		GbpLocation, TargetId,
-		dto::{JobKind, JobStatus},
+		TargetId,
+		dto::{JobKind, JobStatus, NewTarget, TargetPatch},
 	},
 };
 use review_archive_server::worker::{Signals, run};
@@ -35,20 +35,20 @@ impl Drop for TempDir {
 }
 
 async fn gbp_target(archive: &Archive, disabled: bool) -> TargetId {
-	archive
-		.add_target(AddTarget {
-			place: PLACE.into(),
-			gbp: Some(GbpLocation {
-				account: "1".into(),
-				location: "2".into(),
-			}),
-			disabled,
+	let req = NewTarget {
+		place: Some(PLACE.into()),
+		gbp: Some("1/2".into()),
+		..Default::default()
+	};
+	let id = archive.add_target(&req).await.unwrap().target.id;
+	if disabled {
+		let off = TargetPatch {
+			enabled: Some(false),
 			..Default::default()
-		})
-		.await
-		.unwrap()
-		.target
-		.id
+		};
+		archive.update_target(id, &off).await.unwrap();
+	}
+	id
 }
 
 /// On start the worker fails the job a dead process left `running`, then takes the queued
@@ -69,9 +69,9 @@ async fn a_restart_fails_the_interrupted_job_and_queued_jobs_go_before_due_targe
 	let queued_for = gbp_target(&archive, true).await;
 
 	// a previous process took this job and died
-	let interrupted = store.enqueue_job(JobKind::Scan, queued_for, None, Timestamp::now()).await.unwrap();
+	let interrupted = store.enqueue_job(JobKind::Scan, queued_for, None, 20, Timestamp::now()).await.unwrap();
 	assert_eq!(store.claim_job(Timestamp::now()).await.unwrap().unwrap().id, interrupted);
-	let queued = store.enqueue_job(JobKind::Scan, queued_for, None, Timestamp::now()).await.unwrap();
+	let queued = store.enqueue_job(JobKind::Scan, queued_for, None, 20, Timestamp::now()).await.unwrap();
 
 	let signals = Signals::default();
 	let (stop, stopped) = watch::channel(false);

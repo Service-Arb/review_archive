@@ -1,30 +1,38 @@
 //! The archive end to end on a temp SQLite: a scripted source, real storage.
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{cell::Cell, collections::HashMap, sync::Mutex, time::Duration};
 
 use jiff::Timestamp;
 use review_archive::{
-	core::{Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind, dto::RunStatus},
-	record::{Clock, Recorder},
+	core::{
+		Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind,
+		dto::{RunStatus, TargetPatch},
+	},
+	record::Recorder,
 	sources::ReviewSource,
-	store::{NewTarget, Store, blobs::BlobStore},
+	store::{InsertTarget, Store, blobs::BlobStore},
 };
 
-struct FixedClock(Mutex<Timestamp>);
+thread_local! {
+	// `#[tokio::test]` runs each test on a thread of its own
+	static NOW: Cell<Timestamp> = const { Cell::new(Timestamp::UNIX_EPOCH) };
+}
+
+/// The pinned clock the recorder reads.
+fn now() -> Timestamp {
+	NOW.get()
+}
+
+struct FixedClock;
 
 impl FixedClock {
 	fn at(s: &str) -> Self {
-		Self(Mutex::new(s.parse().unwrap()))
+		Self.set(s);
+		Self
 	}
 
 	fn set(&self, s: &str) {
-		*self.0.lock().unwrap() = s.parse().unwrap();
-	}
-}
-
-impl Clock for FixedClock {
-	fn now(&self) -> Timestamp {
-		*self.0.lock().unwrap()
+		NOW.set(s.parse().unwrap());
 	}
 }
 
@@ -73,6 +81,7 @@ fn scan(reviews: Vec<Observed>, coverage: Coverage) -> Result<Scan, String> {
 		reviews,
 		coverage,
 		warnings: vec![],
+		cut_after: None,
 	})
 }
 
@@ -91,15 +100,16 @@ async fn env() -> Env {
 	let clock = FixedClock::at("2026-09-01T10:00:00Z");
 	let id = store
 		.add_target(
-			&NewTarget {
+			&InsertTarget {
 				label: "Café test".into(),
 				kind: TargetKind::Maps,
 				place_id: "ChIJtesttesttesttest".into(),
 				gbp: None,
 				lang: "fr".into(),
 				interval: Duration::from_secs(6 * 3600),
+				enabled: true,
 			},
-			clock.now(),
+			now(),
 		)
 		.await
 		.unwrap();
@@ -114,11 +124,11 @@ async fn env() -> Env {
 }
 
 impl Env {
-	fn archive(&self) -> Recorder<'_, FixedClock> {
+	fn archive(&self) -> Recorder<'_> {
 		Recorder {
 			store: &self.store,
 			blobs: &self.blobs,
-			clock: &self.clock,
+			now,
 		}
 	}
 
@@ -170,7 +180,7 @@ async fn new_changed_gone_reappeared() {
 	assert!(!rows["b"].capture_pending);
 	let versions = e.store.versions(ReviewId(rows["b"].id)).await.unwrap();
 	assert_eq!(
-		versions.iter().map(|v| (v.2, v.3.clone())).collect::<Vec<_>>(),
+		versions.iter().map(|v| (v.rating, v.text.clone())).collect::<Vec<_>>(),
 		[(Some(2), Some("Slow".into())), (Some(4), Some("Slow but kind".into()))],
 		"history keeps the original"
 	);
@@ -211,7 +221,8 @@ async fn new_changed_gone_reappeared() {
 	// stats per day
 	let stats = e.store.stats(Some(e.target.id), None, None).await.unwrap();
 	let days: Vec<(&str, i64, i64, i64)> = stats.iter().map(|d| (d.day.as_str(), d.new, d.changed, d.gone)).collect();
-	assert_eq!(days, [("2026-09-01", 2, 0, 0), ("2026-09-02", 0, 1, 0), ("2026-09-04", 1, 0, 1)]);
+	// a went missing on the 2nd and again on the 4th: both days count it
+	assert_eq!(days, [("2026-09-01", 2, 0, 0), ("2026-09-02", 0, 1, 1), ("2026-09-04", 1, 0, 1)]);
 	assert_eq!(stats[0].histogram, [0, 1, 0, 0, 1]);
 	assert_eq!(stats[0].mean_rating, Some(3.5));
 }
@@ -231,6 +242,7 @@ async fn failures_are_runs_and_back_off() {
 		reviews: vec![review("a", 5, "x", None, false)],
 		coverage: Coverage::DownTo(None),
 		warnings: vec!["screenshot of a failed".into()],
+		cut_after: None,
 	}));
 	let s = e.archive().run(&src, &e.target).await.unwrap();
 	assert_eq!(s.status, RunStatus::Partial);
@@ -241,9 +253,13 @@ async fn failures_are_runs_and_back_off() {
 #[tokio::test]
 async fn targets_enable_disable() {
 	let e = env().await;
-	e.store.set_enabled(e.target.id, false).await.unwrap();
+	let enabled = |on| TargetPatch {
+		enabled: Some(on),
+		..Default::default()
+	};
+	e.store.update_target(e.target.id, &enabled(false)).await.unwrap();
 	assert!(!e.store.target(e.target.id).await.unwrap().enabled);
-	assert!(e.store.set_enabled(TargetId(999), true).await.is_err());
+	assert!(e.store.update_target(TargetId(999), &enabled(true)).await.is_err());
 }
 
 #[tokio::test]

@@ -23,7 +23,7 @@
 //!   <div class="MyEned"><span class="wiI7pd">Lovely</span></div></div>"#;
 //! let now = "2026-09-26T12:00:00Z".parse().unwrap();
 //! let reviews = maps::parse::cards(html).into_iter().map(|c| maps::observed(c, now)).collect();
-//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![] };
+//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![], cut_after: None };
 //! let plan = reconcile::plan(&Known::default(), &scan);
 //! assert_eq!(plan.new.len(), 1);
 //! assert_eq!(plan.new[0].rating, Some(5));
@@ -227,6 +227,9 @@ pub struct Scan {
 	/// Things that went wrong without failing the scan: missed captures, a walk cut short.
 	/// Any makes the run `partial`.
 	pub warnings: Vec<String>,
+	/// A walk stopped short of the archived part of the list (by its limit, or by the page
+	/// failing under it): the last card it read. The next scan reads on past it.
+	pub cut_after: Option<String>,
 }
 
 /// A review the archive already holds, as much of it as reconciling needs.
@@ -242,7 +245,8 @@ pub struct KnownReview {
 	pub gone: bool,
 	/// The estimate made when it was first seen.
 	pub published_est: Option<Timestamp>,
-	/// The date as the source last printed it; says how precise `published_est` is.
+	/// The date as the source printed it when `published_est` was made; says how precise
+	/// that estimate is.
 	pub published_raw: Option<String>,
 	/// What a capture of it on the public page is matched against (`gbp`).
 	pub author: String,
@@ -252,19 +256,28 @@ pub struct KnownReview {
 	pub text: Option<String>,
 }
 
+impl KnownReview {
+	/// The earliest it can have been published; `None` when that is unknowable.
+	pub fn earliest(&self) -> Option<Timestamp> {
+		relative_date::lower_bound(self.published_raw.as_deref()?, self.published_est?)
+	}
+}
+
 /// What the archive already holds for a target, keyed by `source_review_id`.
 #[derive(Clone, Debug, Default)]
 pub struct Known {
 	/// Keyed by the source's id for the review.
 	pub reviews: HashMap<String, KnownReview>,
+	/// No scan of the target has succeeded yet (ad-hoc captures do not count): its walk
+	/// reads the whole list, down to the first scan's limit, whatever is archived already.
+	pub initial: bool,
+	/// Where the last walk was cut short ([`Scan::cut_after`]) with the archive not caught
+	/// up below it since: the next walk must get past this review before a run of archived
+	/// cards may end it.
+	pub cut_after: Option<String>,
 }
 
 impl Known {
-	/// Nothing archived yet: the first scan of a target.
-	pub fn is_empty(&self) -> bool {
-		self.reviews.is_empty()
-	}
-
 	/// Whether the archive holds this review.
 	pub fn contains(&self, source_review_id: &str) -> bool {
 		self.reviews.contains_key(source_review_id)

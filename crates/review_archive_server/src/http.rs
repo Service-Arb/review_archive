@@ -1,31 +1,34 @@
 //! The HTTP API: everything the CLI does, for other services. Everything but `/health`
-//! and `/openapi.json` wants the bearer token. JSON in and out, DTOs from
-//! `review_archive_core::dto`.
+//! and `/openapi.json` wants the bearer token. JSON in and out — errors included, the
+//! ones axum's extractors raise too — with the DTOs of `review_archive_core::dto`. Every
+//! handler only translates: what to do, and what the caller got wrong, is the facade's.
 
-use std::{sync::Arc, time::Duration};
+use std::{io::Seek, sync::Arc, time::Duration};
 
 use axum::{
 	Json, Router,
-	body::Body,
-	extract::{Path, Query, Request, State},
+	extract::{
+		FromRequest, FromRequestParts, Request, State,
+		rejection::{JsonRejection, PathRejection, QueryRejection},
+	},
 	http::{HeaderMap, StatusCode, header},
 	middleware::{self, Next},
 	response::{IntoResponse, Response},
 	routing::{get, post},
 };
-use review_archive::{AddTarget, Archive, Rejected};
+use review_archive::{Archive, Rejected, store::export::Destination};
 use review_archive_core::{
-	GbpLocation, ReviewId, TargetId,
+	ReviewId, TargetId,
 	dto::{
-		CaptureDto, CaptureRequest, Counts, DayStats, ErrorBody, Event, EventPayload, JobAccepted, JobDto, JobKind, JobStatus, NewTarget, NewWebhook, ReviewDetail, ReviewDto, RunDto,
-		RunStatus, TargetDetail, TargetDto, TargetPatch, VersionDto, WebhookDto, stats_csv,
+		CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, JobAccepted, JobDto, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery,
+		TargetDetail, TargetDto, TargetPatch, WaitQuery, WebhookDto, stats_csv,
 	},
-	parse_interval, parse_since,
 };
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use utoipa::{
-	IntoParams, OpenApi,
+	OpenApi,
 	openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 
@@ -33,6 +36,10 @@ use crate::worker::Signals;
 
 /// The longest `POST /captures?wait=` holds a request.
 pub const MAX_WAIT: Duration = Duration::from_secs(120);
+/// Past this a request is answered 408: `MAX_WAIT` and then some, for an export.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// Requests served at once; more wait their turn.
+const MAX_CONCURRENT: usize = 64;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -73,6 +80,8 @@ pub fn router(state: AppState) -> Router {
 		.route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }))
 		.merge(authed)
 		.with_state(state)
+		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
+		.layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT))
 }
 
 async fn auth(State(state): State<AppState>, headers: HeaderMap, req: Request, next: Next) -> Response {
@@ -96,139 +105,117 @@ impl IntoResponse for ApiError {
 }
 
 impl From<eyre::Report> for ApiError {
-	/// The caller's mistakes are 404 / 400 with the reason. Anything else is a 5xx: reported,
-	/// its details kept in the log rather than the response.
+	/// The caller's mistakes are 404 / 400 / 429 with the reason. Anything else is a 5xx:
+	/// reported, its details kept in the log rather than the response.
 	fn from(e: eyre::Report) -> Self {
 		match e.downcast_ref::<Rejected>() {
-			Some(Rejected::NotFound(m)) => return Self(StatusCode::NOT_FOUND, m.clone()),
-			Some(Rejected::Invalid(m)) => return Self(StatusCode::BAD_REQUEST, m.clone()),
-			Some(Rejected::Busy(m)) => return Self(StatusCode::TOO_MANY_REQUESTS, m.clone()),
-			None => {}
+			Some(Rejected::NotFound(m)) => Self(StatusCode::NOT_FOUND, m.clone()),
+			Some(Rejected::Invalid(m)) => Self(StatusCode::BAD_REQUEST, m.clone()),
+			Some(Rejected::Busy(m)) => Self(StatusCode::TOO_MANY_REQUESTS, m.clone()),
+			None => {
+				crate::report(&e, "request failed");
+				Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+			}
 		}
-		ev_lib::error_monitoring::report(&*e);
-		// warn, not error: the tracing layer would send an error as a second Sentry event
-		tracing::warn!(error = %format!("{e:#}"), "request failed");
-		Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 	}
 }
 
-fn bad_request(msg: impl Into<String>) -> ApiError {
-	ApiError(StatusCode::BAD_REQUEST, msg.into())
+/// What axum's extractors refuse is the caller's mistake too, and answered the same way.
+macro_rules! rejections {
+	($($rejection:ty),*) => {$(
+		impl From<$rejection> for ApiError {
+			fn from(r: $rejection) -> Self {
+				Self(r.status(), r.body_text())
+			}
+		}
+	)*};
 }
+rejections!(JsonRejection, QueryRejection, PathRejection);
 
-fn not_found(msg: impl Into<String>) -> ApiError {
-	ApiError(StatusCode::NOT_FOUND, msg.into())
-}
+/// A JSON body, refused as an [`ErrorBody`].
+#[derive(FromRequest)]
+#[from_request(via(axum::Json), rejection(ApiError))]
+struct JsonBody<T>(T);
+
+/// A query string, refused as an [`ErrorBody`].
+#[derive(FromRequestParts)]
+#[from_request(via(axum::extract::Query), rejection(ApiError))]
+struct Query<T>(T);
+
+/// A path parameter, refused as an [`ErrorBody`].
+#[derive(FromRequestParts)]
+#[from_request(via(axum::extract::Path), rejection(ApiError))]
+struct Path<T>(T);
 
 type ApiResult<T> = Result<T, ApiError>;
 
-#[utoipa::path(get, path = "/targets", tag = "targets", security(("bearer" = [])), responses((status = 200, body = [TargetDto])))]
+#[utoipa::path(get, path = "/targets", tag = "targets", responses((status = 200, body = [TargetDto])))]
 async fn targets(State(s): State<AppState>) -> ApiResult<Json<Vec<TargetDto>>> {
 	Ok(Json(s.archive.targets().await?.into_iter().map(TargetDto::from).collect()))
 }
 
 /// Watch a place. Same resolution as `target add`: a place id, or a Maps URL.
-#[utoipa::path(post, path = "/targets", tag = "targets", security(("bearer" = [])), request_body = NewTarget,
-	responses((status = 201, body = TargetDto), (status = 400, body = ErrorBody)))]
-async fn add_target(State(s): State<AppState>, Json(req): Json<NewTarget>) -> ApiResult<(StatusCode, Json<TargetDto>)> {
-	let place = req.place.or(req.maps_url).ok_or_else(|| bad_request("name the place: `place` or `maps_url`"))?;
-	let interval = req.interval.as_deref().map(parse_interval).transpose().map_err(|e| bad_request(format!("interval: {e}")))?;
-	let gbp = req.gbp.as_deref().map(str::parse::<GbpLocation>).transpose().map_err(|e| bad_request(format!("gbp: {e}")))?;
-	let added = s
-		.archive
-		.add_target(AddTarget {
-			place,
-			label: req.label,
-			lang: req.lang,
-			interval,
-			gbp,
-			disabled: false,
-		})
-		.await?;
-	Ok((StatusCode::CREATED, Json(added.target.into())))
+#[utoipa::path(post, path = "/targets", tag = "targets", request_body = NewTarget, responses((status = 201, body = TargetDto), (status = 400, body = ErrorBody)))]
+async fn add_target(State(s): State<AppState>, JsonBody(req): JsonBody<NewTarget>) -> ApiResult<(StatusCode, Json<TargetDto>)> {
+	Ok((StatusCode::CREATED, Json(s.archive.add_target(&req).await?.target.into())))
 }
 
 /// A target with its last run, what is archived, and the next scheduled scan.
-#[utoipa::path(get, path = "/targets/{id}", tag = "targets", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 200, body = TargetDetail), (status = 404, body = ErrorBody)))]
+#[utoipa::path(get, path = "/targets/{id}", tag = "targets", params(("id" = i64, Path)), responses((status = 200, body = TargetDetail), (status = 404, body = ErrorBody)))]
 async fn target(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<TargetDetail>> {
 	Ok(Json(s.archive.target_detail(TargetId(id)).await?))
 }
 
-#[utoipa::path(patch, path = "/targets/{id}", tag = "targets", security(("bearer" = [])), params(("id" = i64, Path)), request_body = TargetPatch,
+#[utoipa::path(patch, path = "/targets/{id}", tag = "targets", params(("id" = i64, Path)), request_body = TargetPatch,
 	responses((status = 200, body = TargetDto), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
-async fn patch_target(State(s): State<AppState>, Path(id): Path<i64>, Json(patch): Json<TargetPatch>) -> ApiResult<Json<TargetDto>> {
+async fn patch_target(State(s): State<AppState>, Path(id): Path<i64>, JsonBody(patch): JsonBody<TargetPatch>) -> ApiResult<Json<TargetDto>> {
 	Ok(Json(s.archive.update_target(TargetId(id), &patch).await?.into()))
 }
 
 /// Disables the target. Nothing archived is deleted.
-#[utoipa::path(delete, path = "/targets/{id}", tag = "targets", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 200, body = TargetDto), (status = 404, body = ErrorBody)))]
+#[utoipa::path(delete, path = "/targets/{id}", tag = "targets", params(("id" = i64, Path)), responses((status = 200, body = TargetDto), (status = 404, body = ErrorBody)))]
 async fn delete_target(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<TargetDto>> {
-	let patch = TargetPatch {
+	let disable = TargetPatch {
 		enabled: Some(false),
 		..Default::default()
 	};
-	Ok(Json(s.archive.update_target(TargetId(id), &patch).await?.into()))
+	Ok(Json(s.archive.update_target(TargetId(id), &disable).await?.into()))
 }
 
-#[derive(Deserialize, IntoParams)]
-struct ReviewsQuery {
-	/// `YYYY-MM-DD` or RFC 3339: first seen at or after.
-	since: Option<String>,
-	/// Only gone (`true`) or only listed (`false`) reviews.
-	gone: Option<bool>,
-}
-
-#[utoipa::path(get, path = "/targets/{id}/reviews", tag = "reviews", security(("bearer" = [])), params(("id" = i64, Path), ReviewsQuery),
-	responses((status = 200, body = [ReviewDto])))]
+#[utoipa::path(get, path = "/targets/{id}/reviews", tag = "reviews", params(("id" = i64, Path), ReviewsQuery),
+	responses((status = 200, body = [ReviewDto]), (status = 404, body = ErrorBody)))]
 async fn reviews(State(s): State<AppState>, Path(id): Path<i64>, Query(q): Query<ReviewsQuery>) -> ApiResult<Json<Vec<ReviewDto>>> {
-	let since = q.since.as_deref().map(parse_since).transpose().map_err(|e| bad_request(format!("since: {e}")))?;
-	Ok(Json(s.archive.reviews(TargetId(id), since, q.gone).await?))
+	Ok(Json(s.archive.reviews(TargetId(id), &q).await?))
 }
 
-#[derive(Deserialize, IntoParams)]
-struct RunsQuery {
-	/// At most this many, newest first (default 20, at most 500).
-	limit: Option<u32>,
-}
-
-#[utoipa::path(get, path = "/targets/{id}/runs", tag = "targets", security(("bearer" = [])), params(("id" = i64, Path), RunsQuery),
-	responses((status = 200, body = [RunDto]), (status = 404, body = ErrorBody)))]
+#[utoipa::path(get, path = "/targets/{id}/runs", tag = "targets", params(("id" = i64, Path), RunsQuery), responses((status = 200, body = [RunDto]), (status = 404, body = ErrorBody)))]
 async fn runs(State(s): State<AppState>, Path(id): Path<i64>, Query(q): Query<RunsQuery>) -> ApiResult<Json<Vec<RunDto>>> {
-	Ok(Json(s.archive.runs(TargetId(id), q.limit.unwrap_or(20).min(500)).await?))
+	Ok(Json(s.archive.runs(TargetId(id), &q).await?))
 }
 
-/// Scan the target now, ahead of the scheduled scans.
-#[utoipa::path(post, path = "/targets/{id}/scan", tag = "jobs", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 202, body = JobAccepted), (status = 404, body = ErrorBody)))]
+/// Scan the target now, ahead of the scheduled scans. The same scan already queued is not
+/// queued twice.
+#[utoipa::path(post, path = "/targets/{id}/scan", tag = "jobs", params(("id" = i64, Path)),
+	responses((status = 202, body = JobAccepted), (status = 404, body = ErrorBody), (status = 429, body = ErrorBody)))]
 async fn scan(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<(StatusCode, Json<JobAccepted>)> {
 	let job_id = s.archive.enqueue_scan(TargetId(id)).await?;
 	s.signals.job_queued.notify_one();
 	Ok((StatusCode::ACCEPTED, Json(JobAccepted { job_id })))
 }
 
-#[derive(Deserialize, IntoParams)]
-struct WaitQuery {
-	/// Hold the request up to this many seconds (at most 120) and answer with the finished
-	/// job if it finishes by then.
-	wait: Option<u64>,
-}
-
 /// Capture a place without registering it. Its results are kept under an implicit,
 /// disabled target (the place's existing one, if any), so nothing is lost.
-#[utoipa::path(post, path = "/captures", tag = "jobs", security(("bearer" = [])), params(WaitQuery), request_body = CaptureRequest,
+#[utoipa::path(post, path = "/captures", tag = "jobs", params(WaitQuery), request_body = CaptureRequest,
 	responses((status = 202, body = JobAccepted, description = "queued, or still running when `wait` ran out"),
-	          (status = 200, body = JobDto, description = "finished within `wait`"), (status = 400, body = ErrorBody)))]
-async fn capture(State(s): State<AppState>, Query(q): Query<WaitQuery>, Json(req): Json<CaptureRequest>) -> ApiResult<Response> {
+	          (status = 200, body = JobDto, description = "finished within `wait`"), (status = 400, body = ErrorBody), (status = 429, body = ErrorBody)))]
+async fn capture(State(s): State<AppState>, Query(q): Query<WaitQuery>, JsonBody(req): JsonBody<CaptureRequest>) -> ApiResult<Response> {
 	// subscribed before queueing, so the job cannot end unseen in between
 	let mut finished = s.signals.job_finished.subscribe();
 	let job_id = s.archive.enqueue_capture(&req).await?;
 	s.signals.job_queued.notify_one();
-	let wait = Duration::from_secs(q.wait.unwrap_or(0)).min(MAX_WAIT);
-	let deadline = tokio::time::Instant::now() + wait;
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.unwrap_or(0)).min(MAX_WAIT);
 	loop {
-		let job = s.archive.job(job_id).await?.ok_or_else(|| not_found(format!("no job {job_id}")))?;
+		let job = s.archive.job(job_id).await?;
 		if job.status.is_finished() {
 			return Ok((StatusCode::OK, Json(job)).into_response());
 		}
@@ -241,126 +228,81 @@ async fn capture(State(s): State<AppState>, Query(q): Query<WaitQuery>, Json(req
 }
 
 /// A job; on `done`, the reviews its run listed with their capture URLs.
-#[utoipa::path(get, path = "/jobs/{id}", tag = "jobs", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 200, body = JobDto), (status = 404, body = ErrorBody)))]
+#[utoipa::path(get, path = "/jobs/{id}", tag = "jobs", params(("id" = i64, Path)), responses((status = 200, body = JobDto), (status = 404, body = ErrorBody)))]
 async fn job(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<JobDto>> {
-	Ok(Json(s.archive.job(id).await?.ok_or_else(|| not_found(format!("no job {id}")))?))
+	Ok(Json(s.archive.job(id).await?))
 }
 
 /// A review with every version and capture.
-#[utoipa::path(get, path = "/reviews/{id}", tag = "reviews", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 200, body = ReviewDetail), (status = 404, body = ErrorBody)))]
+#[utoipa::path(get, path = "/reviews/{id}", tag = "reviews", params(("id" = i64, Path)), responses((status = 200, body = ReviewDetail), (status = 404, body = ErrorBody)))]
 async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<ReviewDetail>> {
-	Ok(Json(s.archive.review(ReviewId(id)).await?.ok_or_else(|| not_found(format!("no review {id}")))?))
+	Ok(Json(s.archive.review(ReviewId(id)).await?))
 }
 
 /// A capture's PNG, provenance in its `tEXt` chunks. Only what the archive recorded.
-#[utoipa::path(get, path = "/captures/{sha256}.png", tag = "reviews", security(("bearer" = [])), params(("sha256" = String, Path)),
+#[utoipa::path(get, path = "/captures/{sha256}.png", tag = "reviews", params(("sha256" = String, Path)),
 	responses((status = 200, content_type = "image/png"), (status = 404, body = ErrorBody)))]
 async fn capture_png(State(s): State<AppState>, Path(file): Path<String>) -> ApiResult<Response> {
-	let sha = file.strip_suffix(".png").ok_or_else(|| not_found("no such capture"))?;
-	let bytes = s.archive.capture_png(sha).await?.ok_or_else(|| not_found("no such capture"))?;
-	Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes).into_response())
-}
-
-#[derive(Deserialize, IntoParams)]
-struct SinceQuery {
-	/// `YYYY-MM-DD` or RFC 3339: reviews first seen at or after.
-	since: Option<String>,
+	let sha = file.strip_suffix(".png").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
+	let png = s.archive.capture_png(sha).await?;
+	// behind the token, so no shared cache may keep it; the name is its hash, so it never changes
+	Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], png).into_response())
 }
 
 /// The same archive as `export`: `manifest.json` and the first capture of each review.
-#[utoipa::path(get, path = "/targets/{id}/export.zip", tag = "reviews", security(("bearer" = [])), params(("id" = i64, Path), SinceQuery),
+#[utoipa::path(get, path = "/targets/{id}/export.zip", tag = "reviews", params(("id" = i64, Path), ExportQuery),
 	responses((status = 200, content_type = "application/zip"), (status = 404, body = ErrorBody)))]
-async fn export_zip(State(s): State<AppState>, Path(id): Path<i64>, Query(q): Query<SinceQuery>) -> ApiResult<Response> {
-	let since = q.since.as_deref().map(parse_since).transpose().map_err(|e| bad_request(format!("since: {e}")))?;
-	s.archive.target(TargetId(id)).await?;
-	// Written to a temp file and streamed from it: an archive of thousands of PNGs does not
-	// belong in memory. The file is unlinked once open; the handle keeps it readable.
-	let path = std::env::temp_dir().join(format!("review_archive-export-{id}-{:016x}.zip", rand::random::<u64>()));
-	let written = s.archive.export(TargetId(id), since, &path).await;
-	let file = match written {
-		Ok(_) => tokio::fs::File::open(&path).await.map_err(eyre::Report::new),
-		Err(e) => Err(e),
-	};
-	if let Err(e) = tokio::fs::remove_file(&path).await
-		&& e.kind() != std::io::ErrorKind::NotFound
-	{
-		tracing::warn!(path = %path.display(), error = %e, "removing an export's temp file");
-	}
-	let file = file?;
-	let stream = futures::stream::unfold(file, |mut f| async move {
-		use tokio::io::AsyncReadExt;
-		let mut buf = vec![0u8; 64 * 1024];
-		match f.read(&mut buf).await {
-			Ok(0) => None,
-			Ok(n) => {
-				buf.truncate(n);
-				Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), f))
-			}
-			Err(e) => Some((Err(e), f)),
-		}
-	});
+async fn export_zip(State(s): State<AppState>, Path(id): Path<i64>, Query(q): Query<ExportQuery>) -> ApiResult<Response> {
+	// An archive of thousands of PNGs does not belong in memory: it is written to a temp file
+	// with no name, which goes away with its last handle whatever happens to the request.
+	let mut file = tempfile::tempfile().map_err(eyre::Report::new)?;
+	s.archive.export(TargetId(id), &q, Destination::Zip(file.try_clone().map_err(eyre::Report::new)?)).await?;
+	file.rewind().map_err(eyre::Report::new)?;
+	let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file)));
 	Ok((
 		[
 			(header::CONTENT_TYPE, "application/zip".to_owned()),
 			(header::CONTENT_DISPOSITION, format!("attachment; filename=\"target-{id}.zip\"")),
 		],
-		Body::from_stream(stream),
+		body,
 	)
 		.into_response())
 }
 
-#[derive(Deserialize, IntoParams)]
-struct StatsQuery {
-	target: Option<i64>,
-	/// `YYYY-MM-DD`, inclusive.
-	#[param(value_type = Option<String>)]
-	from: Option<jiff::civil::Date>,
-	/// `YYYY-MM-DD`, inclusive.
-	#[param(value_type = Option<String>)]
-	to: Option<jiff::civil::Date>,
-}
-
 /// Per target and UTC day: new, changed, gone, mean rating, histogram. `Accept: text/csv`
 /// for CSV.
-#[utoipa::path(get, path = "/stats", tag = "reviews", security(("bearer" = [])), params(StatsQuery), responses((status = 200, body = [DayStats])))]
+#[utoipa::path(get, path = "/stats", tag = "reviews", params(StatsQuery), responses((status = 200, body = [DayStats]), (status = 400, body = ErrorBody)))]
 async fn stats(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<StatsQuery>) -> ApiResult<Response> {
-	let rows = s.archive.stats(q.target.map(TargetId), q.from, q.to).await?;
+	let rows = s.archive.stats(&q).await?;
 	let wants_csv = headers
 		.get(header::ACCEPT)
 		.and_then(|v| v.to_str().ok())
 		.is_some_and(|a| a.split(',').any(|m| m.trim().starts_with("text/csv")));
 	if wants_csv {
-		let csv = stats_csv(&rows)?;
-		return Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response());
+		return Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], stats_csv(&rows)?).into_response());
 	}
 	Ok(Json(rows).into_response())
 }
 
 /// Subscribe to events. Deliveries are POSTed with `X-Signature: sha256=<hex HMAC-SHA256 of
 /// the body under the secret>`, `X-Event` and `X-Delivery-Id`; a non-2xx answer is retried
-/// with backoff for about a day. The body is an `EventPayload`.
-#[utoipa::path(post, path = "/webhooks", tag = "webhooks", security(("bearer" = [])), request_body = NewWebhook,
-	responses((status = 201, body = WebhookDto), (status = 400, body = ErrorBody)))]
-async fn add_webhook(State(s): State<AppState>, Json(hook): Json<NewWebhook>) -> ApiResult<(StatusCode, Json<WebhookDto>)> {
+/// with backoff for about a day. The body is an `EventPayload`. The URL may not point at a
+/// local or private address unless the archive's `webhooks.allowed_hosts` names its host.
+#[utoipa::path(post, path = "/webhooks", tag = "webhooks", request_body = NewWebhook, responses((status = 201, body = WebhookDto), (status = 400, body = ErrorBody)))]
+async fn add_webhook(State(s): State<AppState>, JsonBody(hook): JsonBody<NewWebhook>) -> ApiResult<(StatusCode, Json<WebhookDto>)> {
 	Ok((StatusCode::CREATED, Json(s.archive.add_webhook(&hook).await?)))
 }
 
-#[utoipa::path(get, path = "/webhooks", tag = "webhooks", security(("bearer" = [])), responses((status = 200, body = [WebhookDto])))]
+#[utoipa::path(get, path = "/webhooks", tag = "webhooks", responses((status = 200, body = [WebhookDto])))]
 async fn webhooks(State(s): State<AppState>) -> ApiResult<Json<Vec<WebhookDto>>> {
 	Ok(Json(s.archive.webhooks().await?))
 }
 
 /// Removes the hook and whatever it was still owed.
-#[utoipa::path(delete, path = "/webhooks/{id}", tag = "webhooks", security(("bearer" = [])), params(("id" = i64, Path)),
-	responses((status = 204), (status = 404, body = ErrorBody)))]
+#[utoipa::path(delete, path = "/webhooks/{id}", tag = "webhooks", params(("id" = i64, Path)), responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-	if s.archive.delete_webhook(id).await? {
-		Ok(StatusCode::NO_CONTENT)
-	} else {
-		Err(not_found(format!("no webhook {id}")))
-	}
+	s.archive.delete_webhook(id).await?;
+	Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(OpenApi)]
@@ -370,10 +312,9 @@ async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiRe
 		targets, add_target, target, patch_target, delete_target, reviews, runs, scan, capture, job, review, capture_png, export_zip, stats, add_webhook,
 		webhooks, delete_webhook
 	),
-	components(schemas(
-		TargetDto, TargetDetail, NewTarget, TargetPatch, RunDto, RunStatus, Counts, JobAccepted, JobDto, JobKind, JobStatus, CaptureRequest, ReviewDto,
-		ReviewDetail, VersionDto, CaptureDto, DayStats, NewWebhook, WebhookDto, Event, EventPayload, ErrorBody
-	)),
+	// what no path returns: the body of a webhook delivery
+	components(schemas(EventPayload)),
+	security(("bearer" = [])),
 	modifiers(&BearerAuth)
 )]
 pub struct ApiDoc;

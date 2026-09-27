@@ -53,25 +53,16 @@ impl BlobStore {
 fn write_durably(path: &Path, bytes: &[u8]) -> eyre::Result<()> {
 	let dir = path.parent().expect("blob paths always have a shard dir");
 	std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
-	// unique, so two writers of one blob never share a temp file
-	let tmp = dir.join(format!(".{}.{:016x}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("blob"), rand::random::<u64>()));
+	// A temp file of its own in the same dir (so the rename is atomic), removed on drop if
+	// anything below fails.
 	let written = (|| {
-		let mut f = std::fs::File::create(&tmp)?;
-		f.write_all(bytes)?;
-		f.sync_all()?;
-		std::fs::rename(&tmp, path)?;
+		let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+		tmp.write_all(bytes)?;
+		tmp.as_file().sync_all()?;
+		tmp.persist(path)?;
 		std::fs::File::open(dir)?.sync_all()
 	})();
-	if let Err(e) = written {
-		// best effort: the temp name is never read, a leftover only takes space
-		if let Err(rm) = std::fs::remove_file(&tmp)
-			&& rm.kind() != std::io::ErrorKind::NotFound
-		{
-			tracing::warn!(tmp = %tmp.display(), error = %rm, "removing a failed blob write");
-		}
-		return Err(eyre::Report::new(e).wrap_err(format!("writing {}", path.display())));
-	}
-	Ok(())
+	written.wrap_err_with(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

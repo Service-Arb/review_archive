@@ -14,7 +14,7 @@ use jiff::Timestamp;
 use review_archive_core::{
 	Capture,
 	maps::{
-		Card, SCREEN, WalkEnd, WalkPolicy, Walked, parse,
+		SCREEN, WalkEnd, WalkPolicy, Walked, WalkedCard, parse,
 		selectors::{self as sel, js},
 	},
 };
@@ -49,8 +49,8 @@ pub(crate) struct Session {
 }
 
 impl Session {
-	pub(crate) async fn launch(cfg: &BrowserConfig, profile_dir: &Path) -> eyre::Result<Self> {
-		let profile = ProfileLock::acquire(profile_dir)?;
+	/// Chromium on the profile `profile` holds.
+	pub(crate) async fn launch(cfg: &BrowserConfig, profile_dir: &Path, profile: ProfileLock) -> eyre::Result<Self> {
 		let mut b = CdpConfig::builder()
 			.user_data_dir(profile_dir)
 			.new_headless_mode()
@@ -211,69 +211,78 @@ impl Session {
 		Ok(parse::review_total(&labels))
 	}
 
-	/// Walks the open review list, capturing the cards the policy asks for.
+	/// Walks the open review list, capturing the cards the policy asks for. A page that
+	/// fails once cards were read ends the walk [`WalkEnd::Interrupted`] with what it read
+	/// — unless Google blocked it, which fails the walk.
 	pub(crate) async fn walk(&self, policy: &mut dyn WalkPolicy, max: usize, opened: Opened) -> eyre::Result<Walked> {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
-		let mut cards: Vec<Card> = Vec::new();
-		let mut captures = Vec::new();
+		let mut cards: Vec<WalkedCard> = Vec::new();
 		let mut warnings = Vec::new();
 		let mut idle = 0;
 		let end = loop {
-			self.dismiss_promo().await?;
-			self.eval::<u32>(js::EXPAND_ALL, (sel::CARD, sel::EXPAND)).await?;
-			tokio::time::sleep(Duration::from_millis(300)).await;
+			let step = async {
+				self.dismiss_promo().await?;
+				self.eval::<u32>(js::EXPAND_ALL, (sel::CARD, sel::EXPAND)).await?;
+				tokio::time::sleep(Duration::from_millis(300)).await;
 
-			// Only the tail: cards already read are not re-parsed on every step. A screen of
-			// overlap covers a feed that re-rendered its last few cards.
-			let skip = seen.len().saturating_sub(SCREEN);
-			let html: String = self.eval(js::CARDS_HTML, (sel::CARD, skip)).await?;
-			if let Some(dir) = &self.dump_html {
-				dump(dir, &html).await?;
-			}
-			let mut grew = false;
-			for card in parse::cards(&html) {
-				if cards.len() >= max {
-					break;
+				// Only the tail: cards already read are not re-parsed on every step. A screen of
+				// overlap covers a feed that re-rendered its last few cards.
+				let skip = seen.len().saturating_sub(SCREEN);
+				let html: String = self.eval(js::CARDS_HTML, (sel::CARD, skip)).await?;
+				if let Some(dir) = &self.dump_html {
+					dump(dir, &html).await?;
 				}
-				if !seen.insert(card.id.clone()) {
-					continue;
-				}
-				grew = true;
-				let capture = if policy.wants_capture(&card) {
-					match self.capture(&card.id, page_url).await {
-						Ok(c) => Some(c),
-						Err(e) => {
-							warnings.push(format!("screenshot of {} failed: {e:#}", card.id));
-							None
-						}
+				let mut grew = false;
+				for card in parse::cards(&html) {
+					if cards.len() >= max {
+						break;
 					}
-				} else {
-					None
-				};
-				policy.observe(&card);
-				cards.push(card);
-				captures.push(capture);
+					if !seen.insert(card.id.clone()) {
+						continue;
+					}
+					grew = true;
+					let capture = if policy.wants_capture(&card) {
+						self.capture(&card.id, page_url)
+							.await
+							.map_err(|e| warnings.push(format!("screenshot of {} failed: {e:#}", card.id)))
+							.ok()
+					} else {
+						None
+					};
+					policy.observe(&card);
+					cards.push((card, capture));
+				}
+				if cards.len() >= max {
+					return Ok(Some(WalkEnd::Cap));
+				}
+				if policy.satisfied() {
+					return Ok(Some(WalkEnd::Satisfied));
+				}
+				idle = if grew { 0 } else { idle + 1 };
+				if idle >= END_AFTER_IDLE_STEPS {
+					return Ok(Some(WalkEnd::ReachedEnd));
+				}
+				self.check_not_blocked().await?;
+				// A list short enough to fit the panel has nothing to scroll and nothing more to load.
+				if !self.eval::<bool>(js::SCROLL_FEED, (sel::CARD,)).await? {
+					return Ok(Some(WalkEnd::ReachedEnd));
+				}
+				tokio::time::sleep(STEP_WAIT).await;
+				eyre::Ok(None)
+			};
+			match step.await {
+				Ok(Some(end)) => break end,
+				Ok(None) => {}
+				Err(e) if cards.is_empty() || e.downcast_ref::<Blocked>().is_some() => return Err(e),
+				Err(e) => {
+					warnings.push(format!("the walk stopped after {} reviews: {e:#}", cards.len()));
+					break WalkEnd::Interrupted;
+				}
 			}
-			if cards.len() >= max {
-				break WalkEnd::Cap;
-			}
-			if policy.satisfied() {
-				break WalkEnd::Satisfied;
-			}
-			idle = if grew { 0 } else { idle + 1 };
-			if idle >= END_AFTER_IDLE_STEPS {
-				break WalkEnd::ReachedEnd;
-			}
-			self.check_not_blocked().await?;
-			// A list short enough to fit the panel has nothing to scroll and nothing more to load.
-			if !self.eval::<bool>(js::SCROLL_FEED, (sel::CARD,)).await? {
-				break WalkEnd::ReachedEnd;
-			}
-			tokio::time::sleep(STEP_WAIT).await;
 		};
 		Ok(Walked {
-			cards: cards.into_iter().zip(captures).collect(),
+			cards,
 			end,
 			page_url: opened.page_url,
 			warnings,
@@ -316,7 +325,9 @@ impl Session {
 
 	async fn check_not_blocked(&self) -> eyre::Result<()> {
 		let url = self.page.url().await?.unwrap_or_default();
-		eyre::ensure!(!url.contains(sel::BLOCKED_PATH), "blocked by Google (\"unusual traffic\" page at {url})");
+		if url.contains(sel::BLOCKED_PATH) {
+			return Err(Blocked(url).into());
+		}
 		Ok(())
 	}
 
@@ -357,6 +368,18 @@ impl Session {
 		res.into_value().wrap_err("decoding in-page result")
 	}
 }
+
+/// Google's "unusual traffic" page: the run fails, whatever was read before it.
+#[derive(Debug)]
+struct Blocked(String);
+
+impl std::fmt::Display for Blocked {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "blocked by Google (\"unusual traffic\" page at {})", self.0)
+	}
+}
+
+impl std::error::Error for Blocked {}
 
 async fn dump(dir: &Path, html: &str) -> eyre::Result<()> {
 	tokio::fs::create_dir_all(dir).await?;

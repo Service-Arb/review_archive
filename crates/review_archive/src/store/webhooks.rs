@@ -37,6 +37,11 @@ struct WebhookRow {
 	created_at: String,
 }
 
+/// A hook's events, as stored: a JSON array of their names.
+pub(super) fn parse_events(hook: i64, json: &str) -> eyre::Result<Vec<Event>> {
+	serde_json::from_str(json).wrap_err_with(|| format!("webhook {hook} has unreadable events"))
+}
+
 impl TryFrom<WebhookRow> for WebhookDto {
 	type Error = eyre::Report;
 
@@ -44,7 +49,7 @@ impl TryFrom<WebhookRow> for WebhookDto {
 		Ok(Self {
 			id: r.id,
 			url: r.url,
-			events: serde_json::from_str::<Vec<Event>>(&r.events).wrap_err_with(|| format!("webhook {} has unreadable events", r.id))?,
+			events: parse_events(r.id, &r.events)?,
 			created_at: r.created_at,
 		})
 	}

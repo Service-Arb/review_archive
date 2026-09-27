@@ -12,19 +12,19 @@
 //!   the two Google ones.
 //! - [`store::Store`] (feature `store`) — SQLite plus content-addressed PNGs.
 //!
-//! Features: `maps`, `gbp` (implies `maps`), `store`; all on by default.
+//! Features: `maps` (the browser, and both Google sources), `store`; both on by default.
 //!
 //! Scanning never writes to Google and never disguises itself: a plain headless Chromium
 //! at a polite rate, and a block fails the run.
 //!
 //! ```no_run
 //! # async fn demo() -> eyre::Result<()> {
-//! use review_archive::{AddTarget, Archive, config::Config};
+//! use review_archive::{Archive, config::Config, core::dto::NewTarget};
 //!
 //! let mut config = Config::default();
 //! config.data_dir = Some("/var/lib/review_archive".into());
 //! let archive = Archive::open(config).await?;
-//! let added = archive.add_target(AddTarget { place: "ChIJLU7jZClu5kcR4PcOOO6p3I0".into(), ..Default::default() }).await?;
+//! let added = archive.add_target(&NewTarget { place: Some("ChIJLU7jZClu5kcR4PcOOO6p3I0".into()), ..Default::default() }).await?;
 //! let run = archive.scan_target(added.target.id).await?;
 //! println!("{run}");
 //! archive.close().await;
@@ -41,7 +41,6 @@ pub mod places;
 pub mod png_meta;
 #[cfg(feature = "store")]
 pub mod record;
-
 pub mod sources;
 #[cfg(feature = "store")]
 pub mod store;
@@ -49,7 +48,7 @@ pub mod store;
 pub mod webhooks;
 
 #[cfg(feature = "store")]
-pub use archive::{AddTarget, Added};
+pub use archive::Added;
 pub use archive::{Archive, CaptureRequest, Captured};
 pub use review_archive_core as core;
 pub use review_archive_core::Rejected;

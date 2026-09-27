@@ -1,9 +1,6 @@
 //! A target's reviews and their first screenshots, as a directory or a `.zip`.
 
-use std::{
-	io::Write,
-	path::{Path, PathBuf},
-};
+use std::{fs::File, io::Write, path::PathBuf};
 
 use eyre::WrapErr;
 use jiff::Timestamp;
@@ -45,9 +42,18 @@ pub struct Exported {
 	pub pngs: usize,
 }
 
-/// A target's reviews (first seen at or after `since`) and their first screenshots, as
-/// `manifest.json` + `captures/*.png` in a directory, or in a `.zip` when `out` ends so.
-pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: Option<Timestamp>, out: &Path, now: Timestamp) -> eyre::Result<Exported> {
+/// Where an export is written.
+#[derive(Debug)]
+pub enum Destination {
+	/// A directory, or a `.zip` when the path ends so.
+	Path(PathBuf),
+	/// A zip, into this file (a temp file the caller streams from, say).
+	Zip(File),
+}
+
+/// A target's reviews (first seen at or after `since`) and their first screenshots:
+/// `manifest.json` + `captures/*.png`.
+pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: Option<Timestamp>, out: Destination, now: Timestamp) -> eyre::Result<Exported> {
 	let t = store.target(target).await?;
 	let rows = store.reviews(target, since, None).await?;
 	let mut files: Vec<(String, PathBuf)> = Vec::new();
@@ -79,36 +85,43 @@ pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: O
 		reviews: manifest.reviews.len(),
 		pngs: files.len(),
 	};
-	let out = out.to_owned();
 	// zip and the copies are synchronous file work
-	tokio::task::spawn_blocking(move || write_out(&out, &json, &files)).await??;
+	tokio::task::spawn_blocking(move || write_out(out, &json, &files)).await??;
 	Ok(result)
 }
 
-fn write_out(out: &Path, manifest: &[u8], files: &[(String, PathBuf)]) -> eyre::Result<()> {
+fn write_out(out: Destination, manifest: &[u8], files: &[(String, PathBuf)]) -> eyre::Result<()> {
+	let out = match out {
+		Destination::Zip(file) => return write_zip(file, manifest, files),
+		Destination::Path(out) => out,
+	};
 	if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
 		if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
 			std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
 		}
-		let file = std::fs::File::create(out).wrap_err_with(|| format!("creating {}", out.display()))?;
-		let mut zip = zip::ZipWriter::new(file);
-		let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-		// PNGs are already compressed
-		let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-		zip.start_file("manifest.json", deflated)?;
-		zip.write_all(manifest)?;
-		for (name, src) in files {
-			let bytes = std::fs::read(src).wrap_err_with(|| format!("reading {}", src.display()))?;
-			zip.start_file(name.as_str(), stored)?;
-			zip.write_all(&bytes)?;
-		}
-		zip.finish()?;
-	} else {
-		std::fs::create_dir_all(out.join("captures")).wrap_err_with(|| format!("creating {}", out.display()))?;
-		std::fs::write(out.join("manifest.json"), manifest)?;
-		for (name, src) in files {
-			std::fs::copy(src, out.join(name)).wrap_err_with(|| format!("copying {}", src.display()))?;
-		}
+		let file = File::create(&out).wrap_err_with(|| format!("creating {}", out.display()))?;
+		return write_zip(file, manifest, files);
 	}
+	std::fs::create_dir_all(out.join("captures")).wrap_err_with(|| format!("creating {}", out.display()))?;
+	std::fs::write(out.join("manifest.json"), manifest)?;
+	for (name, src) in files {
+		std::fs::copy(src, out.join(name)).wrap_err_with(|| format!("copying {}", src.display()))?;
+	}
+	Ok(())
+}
+
+fn write_zip(file: File, manifest: &[u8], files: &[(String, PathBuf)]) -> eyre::Result<()> {
+	let mut zip = zip::ZipWriter::new(file);
+	let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+	// PNGs are already compressed
+	let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+	zip.start_file("manifest.json", deflated)?;
+	zip.write_all(manifest)?;
+	for (name, src) in files {
+		let bytes = std::fs::read(src).wrap_err_with(|| format!("reading {}", src.display()))?;
+		zip.start_file(name.as_str(), stored)?;
+		zip.write_all(&bytes)?;
+	}
+	zip.finish()?;
 	Ok(())
 }

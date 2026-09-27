@@ -3,7 +3,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use review_archive_core::{check_lang, parse_interval, schedule};
+use review_archive_core::{Known, check_lang, parse_interval, schedule};
 use serde::Deserialize;
 
 /// Everything [`Archive::open`](crate::Archive::open) needs.
@@ -17,6 +17,8 @@ pub struct Config {
 	pub browser: BrowserConfig,
 	/// Scan limits and what a new target defaults to.
 	pub defaults: Defaults,
+	/// Where webhooks may point.
+	pub webhooks: WebhookConfig,
 	/// API keys and tokens.
 	pub secrets: Secrets,
 }
@@ -67,8 +69,23 @@ pub struct Defaults {
 	pub interval: Duration,
 	/// Cards read on a scan of a target with an archive.
 	pub max_reviews_per_scan: usize,
-	/// Cards read on a target's first scan.
+	/// Cards read on a target's first scan, on a scan that fills a gap a previous one left,
+	/// and by an ad-hoc capture at most.
 	pub max_reviews_initial: usize,
+	/// Jobs (scans now, ad-hoc captures) waiting for the browser at most; more are refused
+	/// until some are done.
+	pub max_queued_jobs: usize,
+}
+
+impl Defaults {
+	/// How many cards a scan against `known` reads at most.
+	pub fn max_for(&self, known: &Known) -> usize {
+		if known.initial || known.cut_after.is_some() {
+			self.max_reviews_initial
+		} else {
+			self.max_reviews_per_scan
+		}
+	}
 }
 
 impl Default for Defaults {
@@ -78,8 +95,19 @@ impl Default for Defaults {
 			interval: schedule::DEFAULT_INTERVAL,
 			max_reviews_per_scan: 200,
 			max_reviews_initial: 2000,
+			max_queued_jobs: 20,
 		}
 	}
+}
+
+/// Where webhooks may be sent.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebhookConfig {
+	/// The only hosts webhooks may point at, private addresses included (a service in the
+	/// same cluster). Empty: any host, as long as every address it has is public — never
+	/// loopback, private, link-local or the like.
+	pub allowed_hosts: Vec<String>,
 }
 
 /// API keys and tokens. Each is needed only by what uses it, and its absence fails only
@@ -91,7 +119,7 @@ pub struct Secrets {
 	pub google_maps_key: Option<String>,
 	/// OAuth credentials for `gbp` targets (`GBP_CLIENT_ID`, `GBP_CLIENT_SECRET`,
 	/// `GBP_REFRESH_TOKEN`).
-	#[cfg(feature = "gbp")]
+	#[cfg(feature = "maps")]
 	pub gbp: Option<crate::sources::gbp::Credentials>,
 }
 
@@ -99,7 +127,7 @@ impl std::fmt::Debug for Secrets {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let mut d = f.debug_struct("Secrets");
 		d.field("google_maps_key", &self.google_maps_key.as_ref().map(|_| "***"));
-		#[cfg(feature = "gbp")]
+		#[cfg(feature = "maps")]
 		d.field("gbp", &self.gbp.as_ref().map(|_| "***"));
 		d.finish()
 	}
