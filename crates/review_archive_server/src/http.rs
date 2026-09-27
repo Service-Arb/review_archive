@@ -36,9 +36,9 @@ use crate::worker::Signals;
 
 /// The longest `POST /captures?wait=` holds a request.
 pub const MAX_WAIT: Duration = Duration::from_secs(120);
-/// Past this a request is answered 408: `MAX_WAIT` and then some, for an export.
+/// Past this a request is answered 408: `MAX_WAIT` and then some. Exports are exempt.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-/// Requests served at once; more wait their turn.
+/// API requests served at once; more wait their turn. `/health` is not counted.
 const MAX_CONCURRENT: usize = 64;
 
 #[derive(Clone)]
@@ -60,13 +60,12 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-	let authed = Router::new()
+	let timed = Router::new()
 		.route("/targets", get(targets).post(add_target))
 		.route("/targets/{id}", get(target).patch(patch_target).delete(delete_target))
 		.route("/targets/{id}/reviews", get(reviews))
 		.route("/targets/{id}/runs", get(runs))
 		.route("/targets/{id}/scan", post(scan))
-		.route("/targets/{id}/export.zip", get(export_zip))
 		.route("/captures", post(capture))
 		.route("/captures/{file}", get(capture_png))
 		.route("/jobs/{id}", get(job))
@@ -74,14 +73,18 @@ pub fn router(state: AppState) -> Router {
 		.route("/stats", get(stats))
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
+		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT));
+	// an export of a large archive takes as long as it takes; it streams from a file
+	let authed = timed
+		.route("/targets/{id}/export.zip", get(export_zip))
+		.layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT))
 		.route_layer(middleware::from_fn_with_state(state.clone(), auth));
+	// the probes answer whatever load the API is under
 	Router::new()
 		.route("/health", get(|| async { "ok" }))
 		.route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }))
 		.merge(authed)
 		.with_state(state)
-		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
-		.layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT))
 }
 
 async fn auth(State(state): State<AppState>, headers: HeaderMap, req: Request, next: Next) -> Response {
