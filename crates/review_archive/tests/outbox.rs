@@ -148,7 +148,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 	for (headers, body) in &got {
 		assert_eq!(headers["x-signature"].to_str().unwrap(), signature(secret, body), "signed over the raw body");
 		let p: EventPayload = serde_json::from_slice(body).unwrap();
-		assert_eq!(headers["x-event"].to_str().unwrap(), p.event.as_str());
+		assert_eq!(headers["x-event"].to_str().unwrap(), p.event.as_ref());
 		assert_eq!(p.target_id, t.id.0);
 		*events.entry(p.event).or_default() += 1;
 		match p.event {

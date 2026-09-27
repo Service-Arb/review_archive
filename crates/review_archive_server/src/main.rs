@@ -211,7 +211,7 @@ async fn target_cmd(archive: &Archive, cmd: TargetCmd) -> eyre::Result<()> {
 				println!(
 					"#{:<3} {:<4} {:<8} {:<24} {} lang={} every {}h{}{}",
 					t.id,
-					t.kind.as_str(),
+					t.kind.as_ref(),
 					if t.enabled { "enabled" } else { "disabled" },
 					t.label,
 					t.place_id,

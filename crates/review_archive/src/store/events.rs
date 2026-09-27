@@ -77,7 +77,7 @@ impl Emitter {
 		for hook in hooks {
 			sqlx::query("INSERT INTO webhook_deliveries (webhook_id, event, payload, created_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)")
 				.bind(hook)
-				.bind(payload.event.as_str())
+				.bind(payload.event.as_ref())
 				.bind(&body)
 				.bind(&now)
 				.bind(&now)

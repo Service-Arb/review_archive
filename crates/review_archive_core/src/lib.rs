@@ -99,37 +99,17 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// Where a target's reviews are read from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+/// Where a target's reviews are read from: `maps` or `gbp`, as stored and as the API
+/// spells it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, strum::AsRefStr, strum::EnumString)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum TargetKind {
 	/// The public Google Maps page, in a browser.
 	Maps,
 	/// A Business Profile we manage, through the official API.
 	Gbp,
-}
-
-impl TargetKind {
-	/// `"maps"` or `"gbp"`, as stored and as the API spells it.
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Maps => "maps",
-			Self::Gbp => "gbp",
-		}
-	}
-}
-
-impl FromStr for TargetKind {
-	type Err = eyre::Report;
-
-	fn from_str(s: &str) -> eyre::Result<Self> {
-		match s {
-			"maps" => Ok(Self::Maps),
-			"gbp" => Ok(Self::Gbp),
-			other => Err(eyre::eyre!("unknown target kind {other:?}, expected maps or gbp")),
-		}
-	}
 }
 
 /// The `accounts/{account}/locations/{location}` pair of a Business Profile.
@@ -354,6 +334,11 @@ pub fn parse_since(s: &str) -> Result<Timestamp, Rejected> {
 		.and_then(|d| d.to_zoned(jiff::tz::TimeZone::UTC).ok())
 		.map(|z| z.timestamp())
 		.ok_or_else(|| Rejected::invalid(format!("since: expected YYYY-MM-DD or an RFC 3339 timestamp, got {s:?}")))
+}
+
+/// A day, `YYYY-MM-DD`.
+pub fn parse_date(s: &str) -> Result<jiff::civil::Date, Rejected> {
+	s.parse().map_err(|_| Rejected::invalid(format!("expected a date as YYYY-MM-DD, got {s:?}")))
 }
 
 /// A Maps UI language: a tag like `fr` or `pt-BR`. It becomes part of the page's URL, so

@@ -271,7 +271,7 @@ impl Store {
 			 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?) RETURNING id",
 		)
 		.bind(&t.label)
-		.bind(t.kind.as_str())
+		.bind(t.kind.as_ref())
 		.bind(&t.place_id)
 		.bind(t.gbp.as_ref().map(|g| g.account.as_str()))
 		.bind(t.gbp.as_ref().map(|g| g.location.as_str()))
@@ -363,7 +363,7 @@ impl Store {
 		let mut tx = self.pool.begin().await?;
 		sqlx::query("UPDATE runs SET finished_at = ?, status = ?, error = ?, n_seen = ?, n_new = ?, n_changed = ?, n_gone = ? WHERE id = ?")
 			.bind(fmt_ts(now))
-			.bind(status.as_str())
+			.bind(status.as_ref())
 			.bind(error)
 			.bind(counts.seen)
 			.bind(counts.new)

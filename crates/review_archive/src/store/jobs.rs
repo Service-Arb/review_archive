@@ -75,7 +75,7 @@ impl Store {
 	pub async fn enqueue_job(&self, kind: JobKind, target: TargetId, params: Option<&JobParams>, now: Timestamp) -> eyre::Result<i64> {
 		let params = params.map(serde_json::to_string).transpose()?;
 		sqlx::query_scalar("INSERT INTO jobs (kind, target_id, params, status, created_at) VALUES (?, ?, ?, 'queued', ?) RETURNING id")
-			.bind(kind.as_str())
+			.bind(kind.as_ref())
 			.bind(target.0)
 			.bind(params)
 			.bind(fmt_ts(now))
@@ -108,7 +108,7 @@ impl Store {
 	pub async fn finish_job(&self, id: i64, status: JobStatus, run: Option<RunId>, error: Option<&str>, reviews: &[ReviewId], now: Timestamp) -> eyre::Result<()> {
 		let ids: Vec<i64> = reviews.iter().map(|r| r.0).collect();
 		sqlx::query("UPDATE jobs SET status = ?, finished_at = ?, run_id = ?, error = ?, review_ids = ? WHERE id = ?")
-			.bind(status.as_str())
+			.bind(status.as_ref())
 			.bind(fmt_ts(now))
 			.bind(run.map(|r| r.0))
 			.bind(error)

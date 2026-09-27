@@ -471,8 +471,8 @@ impl Archive {
 			}
 		};
 		let params = JobParams {
-			max_reviews: req.max_reviews,
-			review_ids: req.review_ids.clone(),
+			max_reviews: req.limits.max_reviews,
+			review_ids: req.limits.review_ids.clone(),
 		};
 		store.enqueue_job(JobKind::Capture, target.id, Some(&params), Timestamp::now()).await
 	}

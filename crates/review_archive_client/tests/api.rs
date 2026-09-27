@@ -191,7 +191,10 @@ async fn scans_and_captures_are_jobs_with_their_reviews() {
 	// an ad-hoc capture of the same place goes under the same target, and ?wait returns it
 	let req = CaptureRequest {
 		place: Some(PLACE.into()),
-		max_reviews: Some(5),
+		limits: review_archive::core::dto::CaptureLimits {
+			max_reviews: Some(5),
+			..Default::default()
+		},
 		..Default::default()
 	};
 	let waiting = {

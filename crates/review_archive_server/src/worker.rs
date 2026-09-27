@@ -102,9 +102,9 @@ async fn step(archive: &Archive, signals: &Signals) -> eyre::Result<Step> {
 		signals.job_finished.send_modify(|n| *n += 1);
 	}
 	if let Some(job) = job? {
-		tracing::info!(job = job.id, kind = job.kind.as_str(), status = job.status.as_str(), "job finished");
+		tracing::info!(job = job.id, kind = %job.kind, status = %job.status, "job finished");
 		if job.status == JobStatus::Failed {
-			report(&format!("job {} ({}) failed: {}", job.id, job.kind.as_str(), job.error.as_deref().unwrap_or("no reason given")));
+			report(&format!("job {} ({}) failed: {}", job.id, job.kind, job.error.as_deref().unwrap_or("no reason given")));
 		}
 		return Ok(Step::Scanned);
 	}
