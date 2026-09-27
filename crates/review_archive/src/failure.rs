@@ -28,7 +28,7 @@ pub fn remedy(e: &eyre::Report) -> Remedy {
 			SessionError::Blocked { .. } | SessionError::LimitedView { .. } => Remedy::Pause,
 			SessionError::MarkupChanged { .. } | SessionError::Consent { .. } => Remedy::Human,
 			SessionError::Launch { .. } => Remedy::Fatal,
-			SessionError::Cdp { .. } | SessionError::Decode { .. } | SessionError::Other(_) => Remedy::Retry,
+			SessionError::PlaceNotFound { .. } | SessionError::Cdp { .. } | SessionError::Decode { .. } | SessionError::Other(_) => Remedy::Retry,
 		};
 	}
 	#[cfg(feature = "maps")]
@@ -64,7 +64,7 @@ pub fn describe(e: &eyre::Report) -> String {
 /// A Maps page that did not go where the walk needed it to. The page it was on is saved
 /// by the walk, which says where around this error.
 #[wrap_err]
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub enum SessionError {
 	#[leaf]
 	#[error("blocked by Google (\"unusual traffic\" page at {url})")]
@@ -84,6 +84,13 @@ pub enum SessionError {
 		help("the Maps markup changed: fix selectors.rs against fixtures refreshed with `scan --dump-html`; Maps stays halted until a restart")
 	)]
 	MarkupChanged { step: &'static str, selectors: Vec<String> },
+	#[leaf]
+	#[error("Google shows no place for {place_id}")]
+	#[diagnostic(
+		code(review_archive::maps::place_not_found),
+		help("the place was removed or merged into another: check the target's place id, or disable it")
+	)]
+	PlaceNotFound { place_id: String },
 	#[leaf]
 	#[error("consent page: {why}")]
 	#[diagnostic(
@@ -109,7 +116,7 @@ pub enum SessionError {
 #[cfg(feature = "maps")]
 /// The Business Profile API failing us.
 #[wrap_err]
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub enum GbpError {
 	/// Google no longer takes the refresh token, or the OAuth client.
 	#[leaf]
@@ -158,7 +165,7 @@ pub enum GbpError {
 
 /// The Places API failing us.
 #[wrap_err]
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub enum PlacesError {
 	/// It refused the search.
 	#[leaf]

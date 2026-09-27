@@ -129,8 +129,12 @@ impl Session {
 			if self.eval::<bool>(js::HAS_TEXT, (sel::LIMITED_VIEW_TEXT,)).await? {
 				return Err(SessionError::new_limited_view());
 			}
+			// no place panel at all: Google does not know the id, whatever its markup is now
+			if !self.eval::<bool>(js::ANY, (sel::PLACE_TITLE,)).await? {
+				return Err(SessionError::new_place_not_found(place_id.to_owned()));
+			}
 			// The place rendered, and has no star average: nobody has reviewed it yet.
-			if self.eval::<bool>(js::ANY, (sel::PLACE_TITLE,)).await? && !self.eval::<bool>(js::ANY, (sel::RATING_SUMMARY,)).await? {
+			if !self.eval::<bool>(js::ANY, (sel::RATING_SUMMARY,)).await? {
 				tracing::info!(place_id, "the place has no reviews");
 				return Ok(None);
 			}
