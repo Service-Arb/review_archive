@@ -136,23 +136,44 @@ impl<'a> NewestFirst<'a> {
 
 	/// The scan the walk amounts to. `max` is the limit it was given: a scheduled scan that
 	/// hits it before reaching archived cards leaves a gap, which is a warning — and
-	/// [`Scan::cut_after`], so that the next scan fills it. A target's first scan stopping
-	/// at its limit leaves no gap: that limit is how deep the archive goes.
+	/// [`Scan::cut_after`], so that the next scan fills it. So does one cut short with
+	/// reviews still without a screenshot below it — once: a gap-filling scan that still
+	/// cannot reach them leaves them pending. A walk that never got past the old cut keeps
+	/// it, even at an idle feed. A target's first scan stopping at its limit leaves no gap:
+	/// that limit is how deep the archive goes.
 	pub fn conclude(&self, walked: Walked, max: usize, now: Timestamp) -> Scan {
 		let end = walked.end;
-		let cut_after = match end {
-			WalkEnd::Cap if self.known.initial || self.caught_up => None,
-			// capped before even getting past the old cut: that gap is still the one to fill
-			WalkEnd::Cap | WalkEnd::Interrupted if !self.past_cut => self.known.cut_after.clone(),
-			WalkEnd::Cap | WalkEnd::Interrupted => walked.last_id(),
-			WalkEnd::ReachedEnd | WalkEnd::Satisfied => None,
-		};
+		let last = walked.last_id();
+		let unreached = self.unreached();
 		let mut scan = scan_of(walked, now);
+		let filling_gap = self.known.cut_after.is_some();
+		let cut_after = if scan.coverage == Coverage::Complete {
+			None
+		} else if !self.past_cut {
+			// not even past the old cut (a limit, a failure, or a feed that stalled): that gap
+			// is still the one to fill
+			self.known.cut_after.clone()
+		} else if !end.cut_short() || (end == WalkEnd::Cap && self.known.initial) {
+			// read to the end, or done; or a first scan at its limit, which is how deep the
+			// archive goes
+			None
+		} else if !self.caught_up {
+			last
+		} else if unreached > 0 && !filling_gap {
+			// caught up, but reviews still without a screenshot lie deeper than this scan may
+			// read: the next one reads deeper, once
+			last
+		} else {
+			if unreached > 0 {
+				scan.warnings
+					.push(format!("{unreached} reviews still without a screenshot lie deeper than a scan reads; they stay pending"));
+			}
+			None
+		};
 		if end == WalkEnd::Cap && (self.known.initial || !self.caught_up) {
 			scan.warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
 		}
-		let unreached = self.unreached();
-		if end.cut_short() && unreached > 0 {
+		if end.cut_short() && unreached > 0 && cut_after.is_some() {
 			scan.warnings.push(format!("{unreached} reviews still without a screenshot were not reached"));
 		}
 		scan.cut_after = cut_after;
@@ -459,9 +480,51 @@ mod tests {
 		assert!(!p.satisfied(), "the pending one (posted 2026-08-18 at the earliest) is further down");
 		let capped = p.conclude(walked(vec![card("k0", "a day ago")], WalkEnd::Cap, true, None), 10, now());
 		assert_eq!(capped.warnings, ["1 reviews still without a screenshot were not reached"]);
-		assert_eq!(capped.cut_after, None, "the archive was reached: no gap");
+		assert_eq!(capped.cut_after.as_deref(), Some("k0"), "the next scan reads deeper, with the larger limit");
 		p.observe(&card("older", "2 months ago").0);
 		assert!(p.satisfied(), "walked past it: it is gone from the list, or its date moved");
+	}
+
+	/// A pending review deeper than even the gap-filling scan reads is not chased forever:
+	/// that scan gives up on it rather than set another cut.
+	#[test]
+	fn a_pending_review_out_of_reach_is_given_up_on() {
+		let mut ids: Vec<String> = (0..SCREEN).map(|i| format!("k{i}")).collect();
+		ids.extend(["pending".into(), "cut".into()]);
+		let mut deep = known(ids, &["pending"]);
+		deep.cut_after = Some("cut".into());
+		let mut p = NewestFirst::new(&deep, now());
+		p.observe(&card("cut", "a day ago").0);
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a day ago").0));
+		let s = p.conclude(walked(vec![card("k9", "a day ago")], WalkEnd::Cap, true, None), 2000, now());
+		assert_eq!(s.cut_after, None);
+		assert_eq!(s.warnings, ["1 reviews still without a screenshot lie deeper than a scan reads; they stay pending"]);
+	}
+
+	/// The end of a feed that may have stalled does not close a gap the walk never got to;
+	/// a walk that got past the cut to the end of the feed does.
+	#[test]
+	fn an_idle_feed_keeps_a_gap_it_did_not_reach() {
+		let mut gap = known((0..3).map(|i| format!("n{i}")), &[]);
+		gap.cut_after = Some("n2".into());
+		let mut p = NewestFirst::new(&gap, now());
+		p.observe(&card("n0", "a week ago").0);
+		let stalled = p.conclude(walked(vec![card("n0", "a week ago")], WalkEnd::ReachedEnd, true, Some(4000)), 2000, now());
+		assert_eq!(stalled.cut_after.as_deref(), Some("n2"));
+
+		p.observe(&card("n2", "a week ago").0);
+		let ended = p.conclude(walked(vec![card("n2", "a week ago")], WalkEnd::ReachedEnd, true, None), 2000, now());
+		assert_eq!(ended.cut_after, None);
+	}
+
+	/// A page that fails after the walk caught up with the archive leaves nothing unread.
+	#[test]
+	fn an_interruption_after_catching_up_leaves_no_gap() {
+		let archived = known((0..SCREEN).map(|i| format!("k{i}")), &[]);
+		let mut p = NewestFirst::new(&archived, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a week ago").0));
+		let s = p.conclude(walked(vec![card("k9", "a week ago")], WalkEnd::Interrupted, true, None), 200, now());
+		assert_eq!(s.cut_after, None);
 	}
 
 	#[test]
