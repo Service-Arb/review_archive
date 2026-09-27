@@ -231,7 +231,8 @@ impl Archive {
 		let lang = req.lang.as_deref().unwrap_or(&self.inner.defaults.lang);
 		check_lang(lang)?;
 		let max = req.limits.max_reviews.unwrap_or(self.inner.defaults.max_reviews_per_scan);
-		let nothing = Known::default();
+		// nothing archived: every card is wanted, and stopping at the limit leaves no gap
+		let nothing = Known { initial: true, ..Known::default() };
 		let mut policy = Requested::new(&nothing, req.limits.review_ids.clone());
 		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, max).await?;
 		let page_url = walked.page_url.clone();
