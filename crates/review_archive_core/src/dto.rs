@@ -122,7 +122,7 @@ pub struct DayStats {
 }
 
 /// How a scan went. Stored as its lowercase name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::EnumString)]
+#[derive(strum::AsRefStr, Clone, Copy, Debug, Deserialize, strum::EnumString, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -269,7 +269,7 @@ pub struct RunDto {
 }
 
 /// What a job does. Stored as its lowercase name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display, strum::EnumString)]
+#[derive(strum::AsRefStr, Clone, Copy, Debug, Deserialize, strum::Display, strum::EnumString, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -281,7 +281,7 @@ pub enum JobKind {
 }
 
 /// Where a job is. Stored as its lowercase name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display, strum::EnumString)]
+#[derive(strum::AsRefStr, Clone, Copy, Debug, Deserialize, strum::Display, strum::EnumString, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -418,7 +418,7 @@ pub struct ReviewDetail {
 }
 
 /// What a webhook can subscribe to. Stored and sent (`X-Event`) under its dotted name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, strum::AsRefStr, strum::EnumString)]
+#[derive(strum::AsRefStr, Clone, Copy, Debug, Deserialize, strum::EnumString, Eq, Hash, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum Event {
 	/// A review archived for the first time.

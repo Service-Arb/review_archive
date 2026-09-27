@@ -101,7 +101,7 @@ impl std::error::Error for Rejected {}
 
 /// Where a target's reviews are read from: `maps` or `gbp`, as stored and as the API
 /// spells it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, strum::AsRefStr, strum::EnumString)]
+#[derive(strum::AsRefStr, Clone, Copy, Debug, serde::Deserialize, strum::EnumString, Eq, PartialEq, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
