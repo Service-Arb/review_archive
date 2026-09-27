@@ -292,3 +292,323 @@ async fn webhooks_and_the_openapi_document() {
 	assert!(doc["components"]["securitySchemes"]["bearer"].is_object());
 	e.server.abort();
 }
+
+/// A 1×1 PNG: the archive only needs a valid signature and IHDR to tag it.
+const PNG_1X1: &[u8] = &[
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
+	0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+	0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+fn captured(id: &str) -> Observed {
+	Observed {
+		capture: Some(review_archive::core::Capture {
+			png: PNG_1X1.to_vec(),
+			captured_at: "2026-09-01T10:00:00Z".parse().unwrap(),
+			page_url: "https://www.google.com/maps/place/x".into(),
+		}),
+		..review(id)
+	}
+}
+
+async fn add_place(e: &Env) -> i64 {
+	e.client
+		.add_target(&NewTarget {
+			place: Some(PLACE.into()),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+		.id
+}
+
+/// Records a scripted scan of the target, as the worker would.
+async fn record(e: &Env, target: i64, reviews: Vec<Observed>) {
+	let t = e.archive.target(review_archive::core::TargetId(target)).await.unwrap();
+	e.archive.record(&Listed(reviews), &t).await.unwrap();
+}
+
+#[tokio::test]
+async fn every_route_but_health_and_openapi_wants_the_token() {
+	let e = env().await;
+	let http = reqwest::Client::new();
+	let routes = [
+		("GET", "/targets"),
+		("POST", "/targets"),
+		("GET", "/targets/1"),
+		("PATCH", "/targets/1"),
+		("DELETE", "/targets/1"),
+		("GET", "/targets/1/reviews"),
+		("GET", "/targets/1/runs"),
+		("POST", "/targets/1/scan"),
+		("GET", "/targets/1/export.zip"),
+		("POST", "/captures"),
+		("GET", &format!("/captures/{}.png", "0".repeat(64))),
+		("GET", "/jobs/1"),
+		("GET", "/reviews/1"),
+		("GET", "/stats"),
+		("GET", "/webhooks"),
+		("POST", "/webhooks"),
+		("DELETE", "/webhooks/1"),
+	];
+	for (method, path) in routes {
+		let resp = http
+			.request(method.parse().unwrap(), format!("{}{path}", e.base))
+			.bearer_auth("wrong-token-0000000000")
+			.json(&serde_json::json!({}))
+			.send()
+			.await
+			.unwrap();
+		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {path}");
+		let resp = http.request(method.parse().unwrap(), format!("{}{path}", e.base)).send().await.unwrap();
+		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {path} without a token");
+	}
+	assert_eq!(reqwest::get(format!("{}/health", e.base)).await.unwrap().status(), StatusCode::OK);
+	assert_eq!(reqwest::get(format!("{}/openapi.json", e.base)).await.unwrap().status(), StatusCode::OK);
+	e.server.abort();
+}
+
+/// Every other `/targets/{id}/…` route says 404 for a target that does not exist.
+#[tokio::test]
+async fn reviews_of_an_unknown_target_are_a_404() {
+	let e = env().await;
+	let err = e.client.reviews(999, None, None).await.unwrap_err();
+	assert_eq!(err.status(), Some(StatusCode::NOT_FOUND), "{err}");
+	e.server.abort();
+}
+
+/// An interval that parses but does not fit the database is the caller's mistake: 400 with
+/// the reason, not a 500 reported to Sentry.
+#[tokio::test]
+async fn an_interval_too_large_to_store_is_a_400() {
+	let e = env().await;
+	let huge = "9223372036854775808"; // seconds; one past i64::MAX
+	let add = e
+		.client
+		.add_target(&NewTarget {
+			place: Some(PLACE.into()),
+			interval: Some(huge.into()),
+			..Default::default()
+		})
+		.await
+		.unwrap_err();
+	assert_eq!(add.status(), Some(StatusCode::BAD_REQUEST), "POST /targets: {add}");
+
+	let id = add_place(&e).await;
+	let patch = e
+		.client
+		.update_target(
+			id,
+			&TargetPatch {
+				interval: Some(huge.into()),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap_err();
+	assert_eq!(patch.status(), Some(StatusCode::BAD_REQUEST), "PATCH /targets/{id}: {patch}");
+	e.server.abort();
+}
+
+/// The API speaks JSON in and out, errors included: a body or a query it cannot read gets
+/// the same `{"error": …}` as every other 4xx.
+#[tokio::test]
+async fn an_unreadable_body_or_query_gets_a_json_error_body() {
+	let e = env().await;
+	let http = reqwest::Client::new();
+	let bad_body = http
+		.post(format!("{}/targets", e.base))
+		.bearer_auth(TOKEN)
+		.header("content-type", "application/json")
+		.body("{not json")
+		.send()
+		.await
+		.unwrap();
+	assert!(bad_body.status().is_client_error(), "{}", bad_body.status());
+	let text = bad_body.text().await.unwrap();
+	assert!(serde_json::from_str::<review_archive::core::dto::ErrorBody>(&text).is_ok(), "not an ErrorBody: {text:?}");
+
+	let bad_query = http.get(format!("{}/targets/1/reviews?gone=maybe", e.base)).bearer_auth(TOKEN).send().await.unwrap();
+	assert!(bad_query.status().is_client_error(), "{}", bad_query.status());
+	let text = bad_query.text().await.unwrap();
+	assert!(serde_json::from_str::<review_archive::core::dto::ErrorBody>(&text).is_ok(), "not an ErrorBody: {text:?}");
+	e.server.abort();
+}
+
+#[tokio::test]
+async fn a_capture_is_served_only_once_recorded_and_by_its_exact_name() {
+	let e = env().await;
+	let t = add_place(&e).await;
+	record(&e, t, vec![captured("a")]).await;
+	let a = e.client.reviews(t, None, None).await.unwrap().remove(0);
+	let url = a.capture_url.clone().expect("a capture was recorded");
+	let sha = a.capture_sha256.clone().unwrap();
+
+	let png = e.client.capture_png(&url).await.unwrap();
+	assert!(png.starts_with(b"\x89PNG"), "a PNG");
+	assert_eq!(png, std::fs::read(e.archive.blobs().unwrap().path_of(&sha).unwrap()).unwrap());
+
+	// a file in the blob dir that no capture row names is not served
+	let stray = e.archive.blobs().unwrap().put(b"not a recorded capture").await.unwrap();
+	assert_eq!(e.client.capture_png(&format!("/captures/{stray}.png")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	let never_recorded = format!("/captures/{}.png", "0".repeat(64));
+	assert_eq!(e.client.capture_png(&never_recorded).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(e.client.capture_png(&format!("/captures/{sha}")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(
+		e.client.capture_png(&format!("/captures/{}.png", sha.to_uppercase())).await.unwrap_err().status(),
+		Some(StatusCode::NOT_FOUND)
+	);
+	e.server.abort();
+}
+
+#[tokio::test]
+async fn export_zip_holds_each_first_capture_under_its_manifest_name() {
+	let e = env().await;
+	let t = add_place(&e).await;
+	record(&e, t, vec![captured("a"), review("b")]).await;
+	let a = e.client.reviews(t, None, None).await.unwrap().into_iter().find(|r| r.source_review_id == "a").unwrap();
+
+	let zip = e.client.export_zip(t, None).await.unwrap();
+	let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+	let mut manifest = String::new();
+	archive.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
+	let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+	let pngs: Vec<(String, Option<String>)> = manifest["reviews"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|r| (r["source_review_id"].as_str().unwrap().to_owned(), r["png"].as_str().map(str::to_owned)))
+		.collect();
+	let a_png = pngs.iter().find(|(id, _)| id == "a").unwrap().1.clone().expect("a has a PNG in the export");
+	assert!(a_png.starts_with("captures/") && a_png.ends_with(".png"), "{a_png}");
+	assert_eq!(pngs.iter().find(|(id, _)| id == "b").unwrap().1, None, "no capture, no file");
+	assert_eq!(archive.len(), 2, "the manifest and a's PNG");
+
+	let mut in_zip = Vec::new();
+	archive.by_name(&a_png).unwrap().read_to_end(&mut in_zip).unwrap();
+	assert_eq!(in_zip, e.client.capture_png(a.capture_url.as_deref().unwrap()).await.unwrap());
+
+	// `since` filters on first sight: nothing was first seen in the future
+	let later = e.client.export_zip(t, Some("2999-01-01")).await.unwrap();
+	let mut later = zip::ZipArchive::new(std::io::Cursor::new(later)).unwrap();
+	let mut manifest = String::new();
+	later.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
+	let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+	assert_eq!(manifest["reviews"].as_array().unwrap().len(), 0);
+	assert_eq!(e.client.export_zip(t, Some("yesterday")).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	e.server.abort();
+}
+
+#[tokio::test]
+async fn patch_changes_only_what_it_names_and_delete_only_disables() {
+	let e = env().await;
+	let t = e
+		.client
+		.add_target(&NewTarget {
+			place: Some(PLACE.into()),
+			label: Some("Eiffel".into()),
+			lang: Some("fr".into()),
+			..Default::default()
+		})
+		.await
+		.unwrap();
+
+	let same = e.client.update_target(t.id, &TargetPatch::default()).await.unwrap();
+	assert_eq!(same, t, "an empty patch changes nothing");
+
+	let gone = e.client.disable_target(t.id).await.unwrap();
+	let gone_again = e.client.disable_target(t.id).await.unwrap();
+	assert_eq!((gone.enabled, gone_again.enabled), (false, false), "DELETE is idempotent");
+	assert_eq!(e.client.targets().await.unwrap().len(), 1, "a deleted target is kept");
+
+	let back = e
+		.client
+		.update_target(
+			t.id,
+			&TargetPatch {
+				enabled: Some(true),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap();
+	assert_eq!((back.enabled, back.label.as_str(), back.lang.as_str()), (true, "Eiffel", "fr"));
+
+	assert_eq!(e.client.update_target(999, &TargetPatch::default()).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(e.client.disable_target(999).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	let bad = e
+		.client
+		.update_target(
+			t.id,
+			&TargetPatch {
+				interval: Some("soon".into()),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap_err();
+	assert_eq!(bad.status(), Some(StatusCode::BAD_REQUEST));
+	e.server.abort();
+}
+
+#[tokio::test]
+async fn stats_come_back_as_json_through_the_client_and_as_csv_on_request() {
+	let e = env().await;
+	let t = add_place(&e).await;
+	record(&e, t, vec![review("a"), review("b")]).await;
+	// the UTC day the archive recorded them on
+	let today = e.client.reviews(t, None, None).await.unwrap()[0].first_seen[..10].to_owned();
+
+	let rows = e.client.stats(Some(t), Some(&today), Some(&today)).await.unwrap();
+	assert_eq!(rows.len(), 1, "{rows:?}");
+	assert_eq!((rows[0].day.as_str(), rows[0].new, rows[0].histogram), (today.as_str(), 2, [0, 0, 0, 0, 2]));
+	assert_eq!(rows[0].mean_rating, Some(5.0));
+	assert!(e.client.stats(Some(t), Some("2999-01-01"), None).await.unwrap().is_empty());
+
+	let csv = reqwest::Client::new()
+		.get(format!("{}/stats?target={t}", e.base))
+		.bearer_auth(TOKEN)
+		.header("accept", "text/csv")
+		.send()
+		.await
+		.unwrap();
+	assert!(csv.headers()["content-type"].to_str().unwrap().starts_with("text/csv"));
+	let csv = csv.text().await.unwrap();
+	assert_eq!(
+		csv.lines().collect::<Vec<_>>(),
+		[
+			"target_id,day,new,changed,gone,mean_rating,stars_1,stars_2,stars_3,stars_4,stars_5",
+			&format!("{t},{today},2,0,0,5.000,0,0,0,0,2"),
+		]
+	);
+	e.server.abort();
+}
+
+/// `?wait=` far beyond the 120 s cap is capped, not added to the clock as is.
+#[tokio::test]
+async fn a_wait_beyond_the_cap_still_answers_when_the_job_ends() {
+	let e = env().await;
+	add_place(&e).await;
+	let req = CaptureRequest {
+		place: Some(PLACE.into()),
+		..Default::default()
+	};
+	let waiting = {
+		let client = e.client.clone();
+		tokio::spawn(async move { client.capture(&req, Some(u64::MAX)).await })
+	};
+	let store = e.archive.store().unwrap();
+	let mut queued = false;
+	for _ in 0..100 {
+		if store.job(1).await.unwrap().is_some() {
+			queued = true;
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+	assert!(queued, "the capture was queued");
+	work_one(&e, vec![review("a")]).await;
+	let got = tokio::time::timeout(Duration::from_secs(10), waiting).await.expect("answered once the job ended").unwrap();
+	assert!(matches!(got, Ok(Captured::Done(ref job)) if job.status == JobStatus::Done), "{got:?}");
+	e.server.abort();
+}

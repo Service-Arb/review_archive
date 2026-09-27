@@ -230,3 +230,52 @@ async fn jobs_are_taken_oldest_first_and_a_crash_fails_the_running_one() {
 	assert!(store.claim_job(now).await.unwrap().is_none());
 	assert!(store.job(12345).await.unwrap().is_none());
 }
+
+/// `review.changed` and `review.reappeared` carry the review as the scan left it: the new
+/// text, and no longer gone.
+#[tokio::test]
+async fn an_edited_review_that_is_back_sends_changed_and_reappeared() {
+	let dir = tempfile::tempdir().unwrap();
+	let store = Store::open(&dir.path().join("db.sqlite")).await.unwrap();
+	let blobs = BlobStore::new(dir.path().join("blobs"));
+	let t = target(&store).await;
+	let (rx, url, server) = receiver().await;
+	store
+		.add_webhook(
+			&NewWebhook {
+				url,
+				events: vec![Event::ReviewChanged, Event::ReviewReappeared],
+				secret: "0123456789abcdef".into(),
+			},
+			Timestamp::now(),
+		)
+		.await
+		.unwrap();
+	let rec = Recorder {
+		store: &store,
+		blobs: &blobs,
+		clock: &SystemClock,
+	};
+	let src = Scripted(Mutex::new(complete(vec![review("a", "x"), review("b", "y")])));
+	rec.run(&src, &t).await.unwrap();
+	*src.0.lock().unwrap() = complete(vec![review("b", "y")]);
+	assert_eq!(rec.run(&src, &t).await.unwrap().counts.gone, 1);
+	*src.0.lock().unwrap() = complete(vec![review("a", "x, edited"), review("b", "y")]);
+	rec.run(&src, &t).await.unwrap();
+
+	let report = deliver_due(&store, &reqwest::Client::new(), Timestamp::now()).await.unwrap();
+	server.abort();
+	assert_eq!(report.delivered, 2);
+	let got: Vec<EventPayload> = rx.got.lock().unwrap().iter().map(|(_, body)| serde_json::from_slice(body).unwrap()).collect();
+	let summary: Vec<(Event, Option<String>, Option<String>)> = got
+		.into_iter()
+		.map(|p| {
+			let r = p.review.unwrap();
+			(p.event, r.text, r.gone_at)
+		})
+		.collect();
+	assert_eq!(
+		summary,
+		[(Event::ReviewChanged, Some("x, edited".into()), None), (Event::ReviewReappeared, Some("x, edited".into()), None),]
+	);
+}

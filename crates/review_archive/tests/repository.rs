@@ -259,3 +259,64 @@ async fn an_empty_complete_scan_is_partial_and_keeps_the_archive() {
 	assert!(s.error.unwrap().contains("no reviews at all"));
 	assert_eq!(e.by_source_id().await["a"].gone_at, None);
 }
+
+/// A review as Maps printed its date on one scan.
+fn dated(id: &str, text: &str, raw: &str, est: &str) -> Observed {
+	Observed {
+		source_review_id: id.into(),
+		author: format!("author of {id}"),
+		rating: Some(4),
+		text: Some(text.into()),
+		published_raw: Some(raw.into()),
+		published_est: Some(est.parse().unwrap()),
+		..Default::default()
+	}
+}
+
+/// First seen as "a year ago" on 2026-09-01, the review was published somewhere in
+/// (2024-09-01, 2025-09-01]. Its author edits it; Maps then prints "Edited a day ago". The
+/// estimate on record is still the first one (2025-09-01), so the text that says how precise
+/// that estimate is must still be the year-wide phrase — otherwise the review is taken to be
+/// no older than 2025-08-31 and a walk that stopped at 2025-08-15 "walked past" it.
+#[tokio::test]
+async fn an_edit_does_not_narrow_how_old_a_review_can_be() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![dated("old", "Nice", "a year ago", "2025-09-01T10:00:00Z")], Coverage::DownTo(None))));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	e.clock.set("2026-09-02T10:00:00Z");
+	src.set(scan(vec![dated("old", "Nice, edited", "Edited a day ago", "2026-09-01T10:00:00Z")], Coverage::DownTo(None)));
+	let s = e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(s.counts.changed, 1);
+
+	// a walk down to a card estimated at 2025-08-15 that did not list it
+	e.clock.set("2026-09-03T10:00:00Z");
+	src.set(scan(
+		vec![dated("other", "Hi", "a day ago", "2026-09-02T10:00:00Z")],
+		Coverage::DownTo(Some("2025-08-15T00:00:00Z".parse().unwrap())),
+	));
+	let s = e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(s.counts.gone, 0, "the review may be as old as 2024-09-01: the walk did not reach it");
+	assert_eq!(e.by_source_id().await["old"].gone_at, None);
+}
+
+/// Stats are history: a day on which a review went missing keeps its `gone` count when the
+/// review is listed again later (the `review.gone` webhook for that day was sent, too).
+#[tokio::test]
+async fn a_gone_day_keeps_its_count_after_the_review_reappears() {
+	let e = env().await;
+	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::Complete)));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	e.clock.set("2026-09-02T10:00:00Z");
+	src.set(scan(vec![review("b", 4, "y", None, false)], Coverage::Complete));
+	assert_eq!(e.archive().run(&src, &e.target).await.unwrap().counts.gone, 1);
+
+	e.clock.set("2026-09-03T10:00:00Z");
+	src.set(scan(vec![review("a", 5, "x", None, false), review("b", 4, "y", None, false)], Coverage::Complete));
+	e.archive().run(&src, &e.target).await.unwrap();
+
+	let stats = e.store.stats(Some(e.target.id), None, None).await.unwrap();
+	let gone_on_the_2nd = stats.iter().find(|d| d.day == "2026-09-02").map(|d| d.gone);
+	assert_eq!(gone_on_the_2nd, Some(1), "{stats:?}");
+}
