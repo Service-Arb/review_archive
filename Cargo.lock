@@ -1164,7 +1164,9 @@ dependencies = [
 
 [[package]]
 name = "ev_lib"
-version = "0.21.0"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df31a6dba304f4c44e35cadb25794c6f9b1dc9e50cec8e9872a64aeef3c4550"
 dependencies = [
  "jiff",
  "js-sys",

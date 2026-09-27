@@ -26,12 +26,12 @@ clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 crc32fast = "1"
 csv = "1"
-ev_lib = { path = "/home/v/s/ev_invest/lib/tmp/wt/feat/alerts/rust", default-features = false }
+ev_lib = { version = "0.22", default-features = false }
 eyre = "0.6"
 futures = "0.3"
 hmac = "0.13"
-miette = "7"
 jiff = { version = "0.2", features = ["serde"] }
+miette = "7"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
 scraper = "0.27"
@@ -45,10 +45,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 toml = "1"
-tracing-error = "0.2"
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
+tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = "5"
