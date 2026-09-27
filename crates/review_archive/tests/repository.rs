@@ -447,3 +447,16 @@ async fn an_interrupted_run_is_failed_on_start() {
 	assert_eq!(run.status, Some(RunStatus::Failed));
 	assert!(run.error.unwrap().contains("interrupted"));
 }
+
+/// A scan the store cannot write is an error for the caller, and a failed run for the
+/// schedule: the target backs off instead of being scanned again at once.
+#[tokio::test]
+async fn a_scan_the_store_refuses_is_a_failed_run() {
+	let e = env().await;
+	// the schema allows 1–5 stars
+	let src = Scripted(Mutex::new(scan(vec![review("a", 9, "x", None, false)], Coverage::DownTo(None))));
+	assert!(e.archive().run(&src, &e.target).await.is_err());
+	let last = e.store.last_run(e.target.id).await.unwrap().expect("the run is finished");
+	assert_eq!(last.consecutive_failures, 1);
+	assert!(e.by_source_id().await.is_empty(), "nothing of it was stored");
+}

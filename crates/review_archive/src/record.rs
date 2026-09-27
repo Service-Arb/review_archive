@@ -96,7 +96,22 @@ impl Recorder<'_> {
 					error: summary.error.as_deref(),
 					job,
 				};
-				let applied = self.store.apply(target.id, write, end, (self.now)()).await?;
+				let applied = match self.store.apply(target.id, write, end, (self.now)()).await {
+					Ok(applied) => applied,
+					Err(e) => {
+						// An open run is invisible to the schedule: the target would stay the most
+						// overdue and be scanned again at once, forever. Failed, it backs off.
+						let failed = RunEnd {
+							status: RunStatus::Failed,
+							error: Some("internal error: the scan could not be stored"),
+							..end
+						};
+						if let Err(also) = self.store.fail_run(failed, (self.now)()).await {
+							tracing::warn!(run = run.0, error = %format!("{also:#}"), "could not fail the run either");
+						}
+						return Err(e);
+					}
+				};
 				summary.counts = applied.counts;
 				applied.seen
 			}
