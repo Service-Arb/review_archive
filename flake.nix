@@ -157,8 +157,8 @@
             repo="$(git rev-parse --show-toplevel)"
             cd "$repo"
             out="$repo/tmp/mfe-dev"
-            nix develop "$repo" --command bash -euc "
-              RUSTFLAGS='${wasmFlags}' cargo build -p review_archive_web --target wasm32-unknown-unknown
+            RUSTFLAGS='${wasmFlags}' nix develop "$repo" --command bash -euc "
+              cargo build -p review_archive_web --target wasm32-unknown-unknown
               bash crates/review_archive_web/package.sh target/wasm32-unknown-unknown/debug/review_archive_web.wasm '$out'
             "
             cp crates/review_archive_web/dev.html "$out/index.html"
