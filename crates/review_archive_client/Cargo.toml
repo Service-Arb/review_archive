@@ -8,19 +8,19 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
-[dependencies]
-
-review_archive_core.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest.workspace = true
 
 # the browser's fetch: no TLS stack of its own
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
+
+[dependencies]
+
+review_archive_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

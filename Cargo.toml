@@ -43,8 +43,8 @@ serde_with = { version = "3", default-features = false, features = ["macros"] }
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 strum = { version = "0.28", features = ["derive"] }
-thiserror = "2"
 tg_types = "0.1"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 toml = "1"
