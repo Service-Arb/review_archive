@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>review_archive dashboard (dev)</title>
+<body style="margin: 0; background: #0b0d10; color: #e6e8eb; font: 13px system-ui">
+	<form id="token" style="display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #262a31">
+		<input id="value" placeholder="access token: review_archive login --auth <playbook url>" style="flex: 1; background: #14171c; color: inherit; border: 1px solid #262a31; padding: 6px" />
+		<button>use</button>
+	</form>
+	<mfe-review-archive-dashboard></mfe-review-archive-dashboard>
+	<script type="module">
+		// the attribute is set after the element mounts, as a host does
+		import "./mfe-review-archive-dashboard.js";
+		const el = document.querySelector("mfe-review-archive-dashboard");
+		const input = document.getElementById("value");
+		input.value = new URLSearchParams(location.search).get("token") ?? localStorage.getItem("review_archive.token") ?? "";
+		const use = () => {
+			localStorage.setItem("review_archive.token", input.value);
+			el.setAttribute("access-token", input.value);
+		};
+		document.getElementById("token").onsubmit = (e) => {
+			e.preventDefault();
+			use();
+		};
+		use();
+	</script>
+</body>

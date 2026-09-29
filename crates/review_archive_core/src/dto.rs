@@ -569,3 +569,134 @@ pub fn stats_csv(rows: &[DayStats]) -> eyre::Result<String> {
 	}
 	Ok(String::from_utf8(w.into_inner()?)?)
 }
+
+/// A managing gmail: the Google manager account a member's places are attached to.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GmailDto {
+	/// Its id.
+	pub id: i64,
+	/// The address.
+	pub gmail: String,
+	/// When the member added it.
+	pub created_at: String,
+}
+
+/// `POST /me/gmails`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NewGmail {
+	/// The manager account's address.
+	pub gmail: String,
+}
+
+/// A tracked place, as the member's overview shows it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LocationSummary {
+	/// The place.
+	pub target: TargetDto,
+	/// Screenshots taken over the last 7 days.
+	pub snapshots_7d: i64,
+	/// Screenshots taken over the last 30 days.
+	pub snapshots_30d: i64,
+	/// Reviews listed now.
+	pub live: i64,
+	/// Gone, with no open appeal from this gmail.
+	pub removed: i64,
+	/// Gone, with an open appeal from this gmail.
+	pub reinstating: i64,
+	/// When its latest finished run ended.
+	pub last_run_at: Option<String>,
+	/// How it went.
+	pub last_run_status: Option<RunStatus>,
+}
+
+/// A gmail and its places, by snapshots over 7 days, most first.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GmailOverview {
+	/// The gmail.
+	#[serde(flatten)]
+	pub gmail: GmailDto,
+	/// What it tracks.
+	pub locations: Vec<LocationSummary>,
+}
+
+/// An appeal of a removed review.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReinstatementDto {
+	/// When it was requested.
+	pub requested_at: String,
+	/// When a scan listed the review again, if one has.
+	pub reinstated_at: Option<String>,
+}
+
+/// A review on a board, with this gmail's latest appeal of it that was not withdrawn.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BoardCard {
+	/// The review.
+	pub review: ReviewDto,
+	/// The appeal.
+	pub reinstatement: Option<ReinstatementDto>,
+}
+
+/// One tracked place's reviews in three columns.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Board {
+	/// Listed now, newest first sighting first; a reinstated one carries its appeal.
+	pub snapshotted: Vec<BoardCard>,
+	/// Gone without an open appeal, most recently gone first.
+	pub removed: Vec<BoardCard>,
+	/// Gone with an open appeal, most recently requested first.
+	pub reinstating: Vec<BoardCard>,
+}
+
+/// `POST /me/gmails/{id}/tracks`: watch a place under this gmail. The place is watched once
+/// however many members track it; one already watched with this language is reused.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(default)]
+pub struct NewTrack {
+	/// A place id or a Google Maps URL.
+	pub place: String,
+	/// The place's name when unset.
+	pub label: Option<String>,
+	/// UI language of the Maps page, e.g. `fr`.
+	pub lang: Option<String>,
+	/// `<account>/<location>`: read reviews through the Business Profile API, which needs
+	/// the archive's Google account among the location's managers.
+	pub gbp: Option<String>,
+}
+
+/// A member's Telegram channel for events.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TgChannelDto {
+	/// Its id.
+	pub id: i64,
+	/// As pasted: `@channel`, `-100…`, or `<group>/<topic>`.
+	pub destination: String,
+	/// Only this gmail's places; every place the member tracks when unset.
+	pub gmail_id: Option<i64>,
+	/// What it gets.
+	pub events: Vec<Event>,
+	/// When it was added.
+	pub created_at: String,
+}
+
+/// `POST /me/tg-channels`. The archive's bot has to be in the chat and allowed to post.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NewTgChannel {
+	/// `@channel`, a `-100…` chat id, or `<group>/<topic>` for a forum topic.
+	pub destination: String,
+	/// Only this gmail's places; every place the member tracks when unset.
+	pub gmail_id: Option<i64>,
+	/// What to send.
+	pub events: Vec<Event>,
+}

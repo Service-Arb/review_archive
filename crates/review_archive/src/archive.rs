@@ -3,6 +3,9 @@
 //! come and answers with [`Rejected`](review_archive_core::Rejected) for the caller's
 //! mistakes, so whatever serves it only translates.
 
+#[cfg(feature = "store")]
+mod members;
+
 use std::sync::Arc;
 #[cfg(all(feature = "store", feature = "maps"))]
 use std::sync::OnceLock;
@@ -191,6 +194,19 @@ impl Archive {
 			}),
 			_ => None,
 		};
+		#[cfg(feature = "store")]
+		let telegram = match (&config.secrets.telegram_bot_token, &store) {
+			(Some(token), Some(stored)) => Some(crate::webhooks::Telegram {
+				api: config
+					.webhooks
+					.telegram_api
+					.parse()
+					.map_err(|e| eyre::eyre!("webhooks.telegram_api {:?}: {e}", config.webhooks.telegram_api))?,
+				token: token.clone(),
+				blobs: stored.blobs.clone(),
+			}),
+			_ => None,
+		};
 		Ok(Self {
 			inner: Arc::new(Inner {
 				defaults: config.defaults,
@@ -201,7 +217,7 @@ impl Archive {
 				#[cfg(feature = "store")]
 				http: reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?,
 				#[cfg(feature = "store")]
-				webhooks: Deliverer::new(&config.webhooks)?,
+				webhooks: Deliverer::new(&config.webhooks, telegram)?,
 				#[cfg(feature = "maps")]
 				browser,
 				#[cfg(all(feature = "store", feature = "maps"))]
@@ -515,7 +531,7 @@ impl Archive {
 		let lang = req.lang.clone().unwrap_or_else(|| self.inner.defaults.lang.clone());
 		check_lang(&lang)?;
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
-		let target = match store.find_target(&place_id, &lang).await? {
+		let target = match store.find_target(&place_id, &lang, None).await? {
 			Some(t) => t,
 			None => {
 				let name = resolved.and_then(|r| r.name).unwrap_or_else(|| place_id.clone());

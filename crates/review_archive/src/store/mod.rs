@@ -10,6 +10,7 @@ pub mod blobs;
 mod events;
 pub mod export;
 mod jobs;
+mod members;
 mod webhooks;
 
 use std::{collections::HashMap, path::Path, time::Duration};
@@ -28,7 +29,7 @@ use sqlx::{
 	FromRow, SqliteConnection, Transaction,
 	sqlite::{Sqlite, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
-pub use webhooks::Delivery;
+pub use webhooks::{Delivery, Recipient};
 
 fn parse_ts(s: &str) -> eyre::Result<Timestamp> {
 	s.parse().wrap_err_with(|| format!("stored timestamp {s:?}"))
@@ -415,13 +416,18 @@ impl Store {
 		Ok(())
 	}
 
-	/// A `maps` target on this place and language, if any: where ad-hoc captures go.
-	pub async fn find_target(&self, place_id: &str, lang: &str) -> eyre::Result<Option<Target>> {
+	/// The target on this place and language, read from this GBP location (`None`: from
+	/// Maps), if any: where ad-hoc captures and members' tracks go.
+	pub async fn find_target(&self, place_id: &str, lang: &str, gbp: Option<&GbpLocation>) -> eyre::Result<Option<Target>> {
 		let row: Option<TargetRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-			"SELECT {TARGET_COLUMNS} FROM targets WHERE kind = 'maps' AND place_id = ? AND lang = ? ORDER BY id LIMIT 1"
+			"SELECT {TARGET_COLUMNS} FROM targets
+			 WHERE place_id = ?1 AND lang = ?2 AND kind = IIF(?3 IS NULL, 'maps', 'gbp') AND gbp_account IS ?3 AND gbp_location IS ?4
+			 ORDER BY id LIMIT 1"
 		)))
 		.bind(place_id)
 		.bind(lang)
+		.bind(gbp.map(|g| g.account.as_str()))
+		.bind(gbp.map(|g| g.location.as_str()))
 		.fetch_optional(&self.pool)
 		.await
 		.wrap_err("looking up a target by place")?;
@@ -587,6 +593,12 @@ impl Store {
 			seen.push((plan.position(&obs.source_review_id), id));
 		}
 		for &id in &plan.reappeared {
+			sqlx::query("UPDATE reinstatements SET reinstated_at = ? WHERE review_id = ? AND withdrawn_at IS NULL AND reinstated_at IS NULL")
+				.bind(&now_s)
+				.bind(id.0)
+				.execute(&mut *tx)
+				.await
+				.wrap_err("closing the appeals of a reappeared review")?;
 			emitter.review(&mut tx, Event::ReviewReappeared, id).await?;
 		}
 		for &id in &plan.gone {
