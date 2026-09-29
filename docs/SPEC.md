@@ -124,8 +124,8 @@ CLI (`clap`):
 - `review_archive serve` — scheduler + HTTP.
 - `review_archive export --target <id> [--since <date>] --out <dir|file.zip>` — PNGs + `manifest.json`.
 
-HTTP (axum), bearer token from `REVIEW_ARCHIVE_TOKEN`, binds `127.0.0.1` unless
-configured:
+HTTP (axum), the operator's bearer `REVIEW_ARCHIVE_TOKEN` or a browser's sign-in cookie
+(see Auth), binds `127.0.0.1` unless configured:
 
 - `GET /health` (no auth)
 - `GET /targets`
@@ -197,8 +197,8 @@ Events:
 Several people track their places here, grouped the way they manage them: by
 **managing gmail**, the Google manager account a small group of GBPs is attached to.
 
-- A **member** is the email playbook's authorization server vouches for (its
-  `members.toml`); there is no member table here.
+- A **member** is a verified email in valeratrades.com's `service-arb` group, as its
+  `va_access` cookie says; there is no member table here.
 - `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
   not a credential. GBP reads keep the service's one grant: a client adds the service's
   Google account as a manager of their GBP.
@@ -219,16 +219,20 @@ Several people track their places here, grouped the way they manage them: by
 
 ### Auth
 
-`review_archive` is a resource server of playbook's authorization server.
+Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
 
-- `REVIEW_ARCHIVE_TOKEN` is the operator: every route but `/me`.
-- Any other bearer is posted to `AUTH_INTROSPECT_URL` (playbook's `{base}/introspect`,
-  RFC 7662, authed by `INTROSPECT_SECRET`); `{active, email, exp}` makes it that member's
-  for `min(exp, 60 s)`. An unreachable playbook is a 503.
-- A member reaches `/me` and `GET /captures/{sha}.png` of the places their gmails track;
-  the operator's routes answer them 403, and `/me` answers the operator 403.
-- `review_archive login --auth <playbook base>` registers a client (RFC 7591), runs PKCE
-  with a loopback redirect, and prints the 1 h access token.
+- `REVIEW_ARCHIVE_TOKEN` as a bearer is the operator: every route but `/me`. Any other
+  bearer is a 401.
+- A browser brings the site's `va_access` cookie (`Domain=.valeratrades.com`): an EdDSA
+  JWT `{sub, email, username, admin, groups, exp}` of 15 minutes, verified here with the
+  site's public key (`SSO_PUBLIC_KEY`; issuer and audience pinned, `va_sso`). `admin`
+  opens the operator's routes; `service-arb` in `groups`, or `admin`, opens `/me` and
+  `GET /captures/{sha}.png` of the places the member's gmails track. Anyone else signed in
+  gets 403.
+- A cookie-authenticated request other than GET/HEAD must carry
+  `Sec-Fetch-Site: same-origin`, or it is a 403: the cookie rides along on requests other
+  sites start.
+- Without `SSO_PUBLIC_KEY` + `SSO_REFRESH_URL` only the operator's token works.
 
 ### Telegram
 
@@ -246,9 +250,10 @@ Several people track their places here, grouped the way they manage them: by
 ### Dashboard
 
 `crates/review_archive_web`: a dioxus microfrontend, `<mfe-review-archive-dashboard
-access-token="…">`, served by the binary under `/mfe/` (`mfe_dir`) with CORS open (bearers
-travel in a header, never a cookie). The host sets `access-token`, and sets it again when
-it refreshes the token. Design: Figma "review_archive / dashboard".
+sign-in="…">`, its bundle served by the binary under `/mfe/` (`mfe_dir`) and its page
+(`index.html`) at `/`, so it calls the API on its own origin with the sign-in cookie. A 401
+sends the top window to `sign-in` (`SSO_REFRESH_URL`, the site's `/auth/refresh`) with
+`return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard".
 
 ## Library
 

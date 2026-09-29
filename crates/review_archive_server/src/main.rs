@@ -2,7 +2,6 @@
 //! library's `Archive`.
 
 mod config;
-mod login;
 mod settings;
 
 use std::path::PathBuf;
@@ -45,13 +44,6 @@ enum Cmd {
 	Gmail(GmailCmd),
 	/// Put a target under a managing gmail, for the member who owns it.
 	Track { gmail: i64, target: i64 },
-	/// Sign in to playbook as a member and print the access token (1 h), for the API and
-	/// the dashboard's dev harness.
-	Login {
-		/// Playbook's OAuth base, e.g. https://valeratrades.com/playbook_mcp.
-		#[arg(long)]
-		auth: String,
-	},
 	/// PNGs + manifest.json of one target, to a directory or a .zip.
 	Export {
 		#[arg(long)]
@@ -202,9 +194,6 @@ fn init_tracing(environment: &str, alerts: Option<alerts::AlertLayer>) -> eyre::
 async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
 	// The image points TMPDIR into the data volume, which starts out empty; Chromium puts its
 	// shared memory there (`--disable-dev-shm-usage`) and dies if the directory is missing.
-	if let Cmd::Login { auth } = &cli.cmd {
-		return login::login(auth).await;
-	}
 	let tmp = std::env::temp_dir();
 	std::fs::create_dir_all(&tmp).wrap_err_with(|| format!("creating the temp dir {}", tmp.display()))?;
 	let archive = Archive::open(config.archive(settings.secrets())).await?;
@@ -212,14 +201,13 @@ async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
 	match cli.cmd {
 		Cmd::Target(cmd) => target_cmd(&archive, cmd).await,
 		Cmd::Scan(args) => scan(&archive, args).await,
-		Cmd::Serve => serve(archive, &config, Auth::new(settings.api_token()?, settings.introspect()?)).await,
+		Cmd::Serve => serve(archive, &config, &settings).await,
 		Cmd::Gmail(GmailCmd::Add { member, gmail }) => {
 			let added = archive.add_gmail(&member.to_lowercase(), &NewGmail { gmail }).await?;
 			println!("added gmail {} ({})", added.id, added.gmail);
 			Ok(())
 		}
 		Cmd::Track { gmail, target } => archive.assign(gmail, TargetId(target)).await,
-		Cmd::Login { .. } => unreachable!("handled before the archive is opened"),
 		Cmd::Export { target, since, out } => {
 			let done = archive.export(TargetId(target), &ExportQuery { since }, Destination::Path(out.clone())).await?;
 			println!("{} reviews, {} PNGs → {}", done.reviews, done.pngs, out.display());
@@ -332,10 +320,12 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 	Ok(())
 }
 
-async fn serve(archive: Archive, config: &Config, auth: Auth) -> eyre::Result<()> {
+async fn serve(archive: Archive, config: &Config, settings: &Settings) -> eyre::Result<()> {
 	let bind = config.bind;
 	let signals = std::sync::Arc::new(worker::Signals::default());
-	let app = http::router(http::AppState::new(archive.clone(), auth, signals.clone()), config.mfe_dir.as_deref());
+	let (verifier, sign_in) = settings.sso()?.unzip();
+	let auth = Auth::new(settings.api_token()?, verifier);
+	let app = http::router(http::AppState::new(archive.clone(), auth, signals.clone()), config.mfe_dir.as_deref(), sign_in.as_deref());
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
 

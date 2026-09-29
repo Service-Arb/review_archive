@@ -79,7 +79,8 @@ pub enum Captured {
 pub struct Client {
 	http: reqwest::Client,
 	base: Url,
-	token: String,
+	/// `None`: whatever the HTTP client carries authenticates (a browser's cookies).
+	token: Option<String>,
 }
 
 impl fmt::Debug for Client {
@@ -97,12 +98,21 @@ impl Client {
 
 	/// The same, on an HTTP client the caller configured (timeouts, proxies of its own).
 	pub fn with_http(http: reqwest::Client, base: &str, token: impl Into<String>) -> Result<Self, Error> {
+		Ok(Self {
+			token: Some(token.into()),
+			..Self::ambient(http, base)?
+		})
+	}
+
+	/// A client without a bearer: in a browser on the archive's own origin, its sign-in
+	/// cookie authenticates.
+	pub fn ambient(http: reqwest::Client, base: &str) -> Result<Self, Error> {
 		let mut base: Url = base.parse().map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
 		if !base.path().ends_with('/') {
 			let path = format!("{}/", base.path());
 			base.set_path(&path);
 		}
-		Ok(Self { http, base, token: token.into() })
+		Ok(Self { http, base, token: None })
 	}
 
 	/// The token goes only to the archive: a path that resolves to another origin (an
@@ -112,7 +122,11 @@ impl Client {
 		if url.origin() != self.base.origin() {
 			return Err(Error::Url(format!("{path:?} is not on {}", self.base)));
 		}
-		Ok(self.http.request(method, url).bearer_auth(&self.token))
+		let req = self.http.request(method, url);
+		Ok(match &self.token {
+			Some(t) => req.bearer_auth(t),
+			None => req,
+		})
 	}
 
 	async fn send(req: RequestBuilder) -> Result<reqwest::Response, Error> {

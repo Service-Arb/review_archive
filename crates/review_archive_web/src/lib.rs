@@ -1,7 +1,6 @@
 //! The dashboard: a member's managing gmails, the places each tracks, and per place a board
 //! of its reviews — snapshotted, removed, reinstating. Served by the archive under `/mfe/`,
-//! so the API is the bundle's own origin; the host hands the member's playbook token in as
-//! the element's `access-token` attribute.
+//! so the API is the bundle's own origin, and the browser's `va_access` cookie signs its calls.
 
 #![cfg(target_arch = "wasm32")]
 #![allow(clippy::useless_format)] // rsx! lowers every "{x}" to a format!
@@ -11,12 +10,10 @@ mod telegram;
 
 use dioxus::prelude::*;
 use ev_lib::{i18n::Messages, mfe::bundle_origin};
-use futures::StreamExt;
 use review_archive_client::{
 	Client,
 	dto::{GmailOverview, LocationSummary, NewTrack, RunStatus},
 };
-use wasm_bindgen::{JsCast, closure::Closure};
 
 ev_lib::mfe! {
 	service: "review-archive", name: "dashboard", kind: page,
@@ -30,10 +27,6 @@ fn catalogue(_: ev_lib::i18n::Locale) -> Messages {
 }
 
 const TAG: &str = "mfe-review-archive-dashboard";
-
-/// The member's token, as the host last set it.
-#[derive(Clone, Copy)]
-struct Token(Signal<Option<String>>);
 
 /// Bumped after a write, so what was read is read again.
 #[derive(Clone, Copy)]
@@ -50,81 +43,58 @@ enum Page {
 	Telegram,
 }
 
-fn api(token: &str) -> Client {
-	Client::new(&bundle_origin(), token).expect("the bundle's origin is a URL")
+fn api() -> Client {
+	Client::ambient(reqwest::Client::new(), &bundle_origin()).expect("the bundle's origin is a URL")
+}
+
+/// A failed call, as shown. A 401 means the sign-in cookie is gone or expired: the whole
+/// page goes to the element's `sign-in` URL, which sends the browser back here signed in.
+fn shown(e: review_archive_client::Error) -> String {
+	if e.status().map(|s| s.as_u16()) == Some(401) {
+		let window = web_sys::window().expect("a browser");
+		let sign_in = window
+			.document()
+			.expect("a page")
+			.query_selector(TAG)
+			.expect("a valid selector")
+			.expect("mounted inside its element")
+			.get_attribute("sign-in")
+			.expect("the host page names where to sign in");
+		let here = window.location().href().expect("a page has a URL");
+		let to = format!("{sign_in}?return_to={}", String::from(js_sys::encode_uri_component(&here)));
+		window.top().expect("a browsing context").expect("a top window").location().set_href(&to).expect("navigating the top window");
+	}
+	e.to_string()
 }
 
 /// Runs a write against the API, then reads everything again; a failure is shown.
 fn act<F: Future<Output = Result<(), review_archive_client::Error>> + 'static>(f: impl FnOnce(Client) -> F + 'static) {
-	let Token(token) = consume_context();
 	let Refresh(mut refresh) = consume_context();
 	let Failure(mut failure) = consume_context();
-	let Some(t) = token() else { return };
 	spawn(async move {
-		match f(api(&t)).await {
+		match f(api()).await {
 			Ok(()) => failure.set(None),
-			Err(e) => failure.set(Some(e.to_string())),
+			Err(e) => failure.set(Some(shown(e))),
 		}
 		refresh += 1;
 	});
 }
 
-/// Follows the element's `access-token` attribute: a host may set it after mounting, and
-/// sets it again when the token is refreshed.
-fn use_access_token() -> Signal<Option<String>> {
-	let mut token = use_signal(|| None);
-	use_future(move || async move {
-		let el = web_sys::window()
-			.expect("a browser")
-			.document()
-			.expect("a page")
-			.query_selector(TAG)
-			.expect("a valid selector")
-			.expect("mounted inside its element");
-		let read = {
-			let el = el.clone();
-			move || el.get_attribute("access-token").filter(|t| !t.is_empty())
-		};
-		token.set(read());
-		let (tx, mut rx) = futures::channel::mpsc::unbounded();
-		let changed = Closure::<dyn FnMut()>::new(move || tx.unbounded_send(()).expect("the receiver lives as long as the app"));
-		let observer = web_sys::MutationObserver::new(changed.as_ref().unchecked_ref()).expect("MutationObserver takes a callback");
-		let init = web_sys::MutationObserverInit::new();
-		init.set_attributes(true);
-		init.set_attribute_filter(&js_sys::Array::of1(&"access-token".into()));
-		observer.observe_with_options(&el, &init).expect("observing an element's attribute");
-		// the app lives as long as the page (see `ev_lib::mfe`), and so does its observer
-		changed.forget();
-		while rx.next().await.is_some() {
-			token.set(read());
-		}
-	});
-	token
-}
-
 #[component]
 fn Dashboard() -> Element {
-	let token = use_access_token();
-	use_context_provider(|| Token(token));
 	let refresh = use_context_provider(|| Refresh(Signal::new(0)));
 	let failure = use_context_provider(|| Failure(Signal::new(None)));
 	let mut page = use_signal(|| Page::Places);
 	let mut gmail = use_signal(|| None::<i64>);
 	let overview = use_resource(move || async move {
 		refresh.0();
-		let t = token()?;
-		Some(api(&t).overview().await.map_err(|e| e.to_string()))
+		api().overview().await.map_err(shown)
 	});
 
 	let shell = "flex min-h-[640px] bg-page text-fg text-[13px] font-sans";
-	if token().is_none() {
-		return rsx! {
-			div { class: "{shell} items-center justify-center text-muted", "Sign in to see your places: the page hosting this dashboard gives it your access token." }
-		};
-	};
 	let gmails: Vec<GmailOverview> = match &*overview.read() {
-		Some(Some(Ok(g))) => g.clone(),
-		Some(Some(Err(e))) => return rsx! { div { class: "{shell} p-6 text-bad", "{e}" } },
+		Some(Ok(g)) => g.clone(),
+		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-bad", "{e}" } },
 		_ => return rsx! { div { class: "{shell} p-6 text-muted", "Loading…" } },
 	};
 	// the first gmail until one is picked; a removed one falls back the same way

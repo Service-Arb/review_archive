@@ -3,22 +3,20 @@
 use dioxus::prelude::*;
 use review_archive_client::dto::{Event, GmailDto, NewTgChannel, TgChannelDto};
 
-use crate::{Refresh, Token, act, api};
+use crate::{Refresh, act, api, shown};
 
 const EVENTS: [Event; 5] = [Event::ReviewNew, Event::ReviewGone, Event::ReviewChanged, Event::ReviewReappeared, Event::RunFailed];
 
 #[component]
 pub fn Channels(gmails: Vec<GmailDto>) -> Element {
-	let Token(token) = use_context();
 	let Refresh(refresh) = use_context();
 	let channels = use_resource(move || async move {
 		refresh();
-		let t = token()?;
-		Some(api(&t).tg_channels().await.map_err(|e| e.to_string()))
+		api().tg_channels().await.map_err(shown)
 	});
 	let channels = match &*channels.read() {
-		Some(Some(Ok(c))) => c.clone(),
-		Some(Some(Err(e))) => return rsx! { div { class: "p-6 text-bad", "{e}" } },
+		Some(Ok(c)) => c.clone(),
+		Some(Err(e)) => return rsx! { div { class: "p-6 text-bad", "{e}" } },
 		_ => return rsx! { div { class: "p-6 text-muted", "Loading…" } },
 	};
 	rsx! {
