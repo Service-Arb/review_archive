@@ -15,15 +15,13 @@ ignored = ["tracing-error"]
 default = ["maps", "store"]
 # Google in a headless Chromium: the `Browser` handle, the `maps` source, and the `gbp`
 # source (Business Profiles through the official API, screenshots from the Maps page).
-maps = ["dep:chromiumoxide", "dep:futures"]
+maps = ["dep:browser_manipulation"]
 # SQLite + content-addressed PNGs under a data dir, runs, stats, export, webhooks.
 store = ["dep:futures", "dep:hmac", "dep:sqlx", "dep:tempfile", "dep:zip"]
 
 [dependencies]
-
-chromiumoxide = { workspace = true, optional = true }
+browser_manipulation = { workspace = true, optional = true }
 crc32fast.workspace = true
-ev_lib = { workspace = true, features = ["alerts"] }
 eyre.workspace = true
 futures = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }

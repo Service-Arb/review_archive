@@ -58,13 +58,12 @@ review_archive export --target 1 --since 2026-01-01 --out cafe.zip
 ```
 
 ```toml
-# config.toml — every key is optional
+# config.toml — every key is optional, but a scan needs `browser.executable`
 data_dir = "./data"
 bind = "127.0.0.1:59110"
 
 [browser]
 executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-no_sandbox = false
 
 [defaults]
 lang = "en"

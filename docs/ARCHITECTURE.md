@@ -19,7 +19,7 @@ crates/review_archive_core/     no I/O: no browser, database, network or clock
     src/dto.rs                    the JSON of the HTTP API (bodies and queries), shared with the client
 crates/review_archive/          the engine (features: maps, store)
   src/archive.rs                the `Archive` facade
-  src/browser/                  the `Browser` handle; the CDP session: consent, sorting, the walk, screenshots
+  src/browser/                  the `Browser` handle over `browser_manipulation`: consent, sorting, the walk, screenshots
   src/sources/                  the `ReviewSource` port; the maps and gbp adapters
   src/store/                    SQLite (runtime sqlx queries, embedded migrations/), PNG blobs, export
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
@@ -50,6 +50,7 @@ use review_archive::{Archive, CaptureRequest, config::Config};
 // No data dir: nothing stored, the reviews and PNGs come back in memory.
 let mut config = Config::default();
 config.browser.profile_dir = Some("/var/lib/my-service/chromium".into());
+config.browser.executable = Some("/usr/bin/chromium".into());
 let archive = Archive::open(config).await?;
 let got = archive.capture_place(&CaptureRequest::new("ChIJLU7jZClu5kcR4PcOOO6p3I0").lang("fr").max_reviews(20)).await?;
 for r in &got.scan.reviews {
@@ -57,6 +58,9 @@ for r in &got.scan.reviews {
 }
 archive.close().await;
 ```
+
+The process needs the Playwright driver `browser_manipulation` names (`PLAYWRIGHT_CLI_JS`,
+`PLAYWRIGHT_NODE_EXE`, `PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD`; this flake's devShell and image set them).
 
 With `store` and `Config::data_dir` set, the same `Archive` also does `add_target`,
 `scan_target`, `stats`, `export`, `reviews`, and gives the schedule (`due`, `next_due`).
@@ -73,8 +77,9 @@ with its own platform implements `sources::ReviewSource` and records through
   fails and the error says which. When it asks a signed-out browser to sign in before
   sorting (such a list also stops at its first few cards), what it shows is read in its own
   order: the run is `partial`, says why, and judges nothing gone. A failed walk saves the
-  page as `<data_dir>/artifacts/<UTC time>-page.{png,html}` (kept 7 days), and its error
-  names them as `[<path>]`s — which is what the server's alerts attach.
+  page as `<data_dir>/artifacts/browser_captures/<UTC time>-<step>.{png,html}` (kept 7 days),
+  and its error names them as `[<path>]`s — which is what the server's alerts attach, from
+  under `<data_dir>/artifacts/` only.
 - **A block pauses Maps, not a target.** Google flags the address, so a `blocked` or
   `limited_view` failure trips `maps_breaker` (SQLite, so a restart keeps it): no Maps walk
   for any target until its probe time (1 h, doubling to 24 h), then one probes; a walk that
@@ -99,9 +104,9 @@ with its own platform implements `sources::ReviewSource` and records through
   alone may be a stalled lazy load. A "complete" scan that lists nothing, against an archive
   with live reviews, is taken as a broken response: nothing is marked gone, the run is
   `partial`.
-- **One process per browser profile.** A lock file in the profile says so; holding it means
-    any Chromium `Singleton*` files there are stale (a crash, a pod with a new hostname) and are
-  removed. The profile is claimed before a run is recorded, so a second `scan` while `serve`
+- **One process per browser profile.** `review_archive.lock` in the profile says so, taken
+  before Chromium starts (`browser_manipulation`'s own lock, which clears stale `Singleton*`
+  files, is only taken at launch). The profile is claimed before a run is recorded, so a second `scan` while `serve`
   holds it fails with that reason and leaves no run behind. A browser that failed under a walk
   is closed; the next walk starts a new one.
 - **Markup knowledge lives in `selectors.rs`.** A Maps change is fixed there, against fixtures

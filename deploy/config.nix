@@ -10,10 +10,5 @@
 {
   data_dir = "/data";
   bind = "0.0.0.0:${toString port}";
-  browser = {
-    executable = chromium;
-    # The image runs as `nobody` without the user namespaces Chromium's sandbox
-    # needs; the container boundary is the sandbox here.
-    no_sandbox = true;
-  };
+  browser.executable = chromium;
 }

@@ -76,7 +76,6 @@ mod tests {
 			bind = "0.0.0.0:59110"
 			[browser]
 			executable = "/bin/chromium"
-			no_sandbox = true
 			[defaults]
 			lang = "fr"
 			interval = "12h"
@@ -87,7 +86,6 @@ mod tests {
 		.unwrap();
 		assert_eq!(cfg.defaults.interval, Duration::from_secs(12 * 3600));
 		assert_eq!(cfg.defaults.max_reviews_per_scan, 200);
-		assert!(cfg.browser.no_sandbox);
 		assert_eq!(cfg.webhooks.allowed_hosts, ["concierge"]);
 		assert!(toml::from_str::<Config>("[defaults]\nlang = \"fr&q=x\"").is_err(), "a lang goes into a URL");
 

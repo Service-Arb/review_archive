@@ -49,10 +49,8 @@ impl Config {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrowserConfig {
-	/// Chrome or Chromium binary; found on PATH when unset.
+	/// Chrome or Chromium binary; a walk fails without one.
 	pub executable: Option<PathBuf>,
-	/// For containers that run as an unprivileged user without user namespaces.
-	pub no_sandbox: bool,
 	/// Shows the window, for watching a scan by hand.
 	pub headful: bool,
 	/// Browser profile; `<data_dir>/chromium-profile` when unset.
@@ -61,9 +59,10 @@ pub struct BrowserConfig {
 	#[serde(skip)]
 	pub dump_html: Option<PathBuf>,
 	/// A walk that fails saves the page here and its error says where, as `[<path>]`s.
-	/// [`Archive::open`](crate::Archive::open) opens [`Config::artifacts_dir`]; `None` saves nothing.
+	/// [`Archive::open`](crate::Archive::open) sets it under [`Config::artifacts_dir`]; `None` saves nothing.
+	#[cfg(feature = "maps")]
 	#[serde(skip)]
-	pub artifacts: Option<ev_lib::alerts::Artifacts>,
+	pub artifacts: Option<browser_manipulation::Artifacts>,
 }
 
 /// Scan limits and what a new target defaults to.

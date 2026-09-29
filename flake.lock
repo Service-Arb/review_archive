@@ -1,5 +1,26 @@
 {
   "nodes": {
+    "browser_manipulation": {
+      "inputs": {
+        "v_flakes": [
+          "v_flakes"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790685156,
+        "narHash": "sha256-TFBzVpaEUgu4smIvdQxFvcmYkhaJ/rtikboSaApHBT0=",
+        "owner": "valeratrades",
+        "repo": "browser_manipulation",
+        "rev": "2d6348782d36fa724f61f941117c9cd1d40cea51",
+        "type": "github"
+      },
+      "original": {
+        "owner": "valeratrades",
+        "ref": "v0.1.0",
+        "repo": "browser_manipulation",
+        "type": "github"
+      }
+    },
     "cachix": {
       "inputs": {
         "devenv": [
@@ -262,6 +283,7 @@
     },
     "root": {
       "inputs": {
+        "browser_manipulation": "browser_manipulation",
         "v_flakes": "v_flakes"
       }
     },

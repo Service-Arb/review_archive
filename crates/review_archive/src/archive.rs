@@ -53,6 +53,7 @@ use crate::{
 /// // no data dir: nothing is stored, the PNGs come back in memory
 /// let mut config = Config::default();
 /// config.browser.profile_dir = Some("/tmp/review-archive-profile".into());
+/// config.browser.executable = Some("/usr/bin/chromium".into());
 /// let archive = Archive::open(config).await?;
 /// let got = archive.capture_place(&CaptureRequest::new("ChIJLU7jZClu5kcR4PcOOO6p3I0").max_reviews(5)).await?;
 /// for review in &got.scan.reviews {
@@ -163,7 +164,11 @@ impl Archive {
 				.profile_dir()
 				.ok_or_else(|| eyre::eyre!("the browser needs a profile dir: set a data dir or browser.profile_dir"))?;
 			let cfg = crate::config::BrowserConfig {
-				artifacts: config.artifacts_dir().map(ev_lib::alerts::Artifacts::open).transpose()?,
+				// inside the alerts' root, which they attach from and whose pruning leaves directories alone
+				artifacts: config.artifacts_dir().map(|dir| browser_manipulation::Artifacts {
+					dir: dir.join("browser_captures"),
+					retention: std::time::Duration::from_secs(7 * 24 * 3600),
+				}),
 				..config.browser.clone()
 			};
 			Browser::new(cfg, profile)

@@ -1,4 +1,4 @@
-//! Driving a plain headless Chromium over CDP. No stealth, no fingerprint masking:
+//! Driving a plain headless Chromium. No stealth, no fingerprint masking:
 //! the scanner is what it looks like, and a block from Google fails the run.
 
 use std::{
@@ -7,10 +7,8 @@ use std::{
 	time::Duration,
 };
 
-use chromiumoxide::{Browser, BrowserConfig as CdpConfig, Page, cdp::browser_protocol::page::CaptureScreenshotFormat, handler::viewport::Viewport};
-use ev_lib::alerts::Artifacts;
+use browser_manipulation::{Browser, ErrorKind, Launch, Robot, Shot, Tab};
 use eyre::WrapErr;
-use futures::StreamExt;
 use jiff::Timestamp;
 use review_archive_core::{
 	Capture,
@@ -20,17 +18,15 @@ use review_archive_core::{
 	},
 };
 use serde::Serialize;
-use tokio::task::JoinHandle;
 
-use super::profile::ProfileLock;
 use crate::{SessionError, config::BrowserConfig};
 
 const STEP_WAIT: Duration = Duration::from_millis(1500);
 /// Consecutive scrolls without a new card before the feed counts as ended.
 const END_AFTER_IDLE_STEPS: u32 = 5;
 const UI_TIMEOUT: Duration = Duration::from_secs(20);
+const NAV_TIMEOUT: Duration = Duration::from_secs(60);
 const SORT_TIMEOUT: Duration = Duration::from_secs(10);
-const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The review list, open and ready to walk.
 #[derive(Debug)]
@@ -50,91 +46,72 @@ enum SortMenu {
 }
 
 pub(crate) struct Session {
-	browser: Browser,
-	handler: JoinHandle<()>,
-	page: Page,
+	browser: Browser<Robot>,
 	/// Where to save the cards' HTML on every walk, for refreshing test fixtures.
 	dump_html: Option<PathBuf>,
-	/// Released with the session, after the browser is closed.
-	_profile: ProfileLock,
+}
+
+/// One walk's tab.
+pub(crate) struct Page<'s> {
+	tab: Tab<'s, Robot>,
+	dump_html: Option<&'s Path>,
 }
 
 impl Session {
-	/// Chromium on the profile `profile` holds.
-	pub(crate) async fn launch(cfg: &BrowserConfig, profile_dir: &Path, profile: ProfileLock) -> Result<Self, SessionError> {
-		let mut b = CdpConfig::builder()
-			.user_data_dir(profile_dir)
-			.new_headless_mode()
+	pub(crate) async fn launch(cfg: &BrowserConfig, profile_dir: &Path) -> Result<Self, SessionError> {
+		let executable = cfg.executable.clone().ok_or_else(|| SessionError::new_launch("`browser.executable` is not set".to_owned()))?;
+		let launch = Launch::Owned {
+			profile: profile_dir.to_owned(),
+			executable,
+			headless: !cfg.headful,
 			// wide enough for the desktop layout, tall enough that a long review fits one screenshot
-			.window_size(1280, 2000)
-			.viewport(Viewport {
-				width: 1280,
-				height: 2000,
-				device_scale_factor: Some(2.0),
-				..Default::default()
-			})
-			// k8s gives /dev/shm 64 MB, which Chromium outgrows on a long feed
-			.arg("--disable-dev-shm-usage")
-			.launch_timeout(Duration::from_secs(60))
-			.request_timeout(Duration::from_secs(60));
-		if cfg.headful {
-			b = b.with_head();
-		}
-		if cfg.no_sandbox {
-			b = b.no_sandbox();
-		}
-		if let Some(exe) = &cfg.executable {
-			b = b.chrome_executable(exe);
-		}
-		let config = b.build().map_err(|e| SessionError::new_launch(format!("browser config: {e}")))?;
-		let (browser, mut handler) = Browser::launch(config).await.map_err(|e| SessionError::new_launch(e.to_string()))?;
-		// The CDP event pump; it must run for any command to complete, and dies with the browser.
-		let handler = tokio::spawn(async move {
-			while let Some(event) = handler.next().await {
-				if let Err(e) = event {
-					tracing::debug!(error = %e, "CDP handler");
-				}
-			}
-		});
-		let page = browser.new_page("about:blank").await?;
+			viewport: Some((1280, 2000)),
+		};
+		let browser = Browser::launch(launch, Robot, cfg.artifacts.clone()).await?;
 		Ok(Self {
 			browser,
-			handler,
-			page,
 			dump_html: cfg.dump_html.clone(),
-			_profile: profile,
 		})
 	}
 
-	pub(crate) async fn close(mut self) {
+	pub(crate) async fn close(self) {
 		if let Err(e) = self.browser.close().await {
 			tracing::warn!(error = %e, "closing Chromium");
 		}
-		// Reaping the child; a failure here only means it is already gone.
-		if let Err(e) = self.browser.wait().await {
-			tracing::debug!(error = %e, "waiting for Chromium to exit");
-		}
-		self.handler.abort();
+	}
+
+	pub(crate) async fn page(&self) -> Result<Page<'_>, SessionError> {
+		Ok(Page {
+			tab: self.browser.tab().await?,
+			dump_html: self.dump_html.as_deref(),
+		})
+	}
+}
+
+impl Page<'_> {
+	pub(crate) async fn close(self) -> Result<(), SessionError> {
+		Ok(self.tab.close().await?)
 	}
 
 	/// Opens the place and its review list sorted newest first. `None`: the place has no
 	/// reviews at all, so there is no list.
-	pub(crate) async fn open_reviews(&self, place_id: &str, lang: &str) -> Result<Option<Opened>, SessionError> {
+	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str) -> Result<Option<Opened>, SessionError> {
 		let url = sel::place_url(place_id, lang);
-		self.page.goto(url.as_str()).await?;
+		self.tab.set_timeout(NAV_TIMEOUT).await;
+		self.tab.goto(&url).await?;
 		self.handle_interstitials().await?;
 
 		// The place panel renders after load; wait for the way into the reviews.
 		if !self.wait_for_any(sel::REVIEWS_TAB).await? {
-			if self.eval::<bool>(js::HAS_TEXT, (sel::LIMITED_VIEW_TEXT,)).await? {
+			if self.eval::<bool>(js::HAS_TEXT, sel::LIMITED_VIEW_TEXT).await? {
 				return Err(SessionError::new_limited_view());
 			}
 			// no place panel at all: Google does not know the id, whatever its markup is now
-			if !self.eval::<bool>(js::ANY, (sel::PLACE_TITLE,)).await? {
+			if !self.eval::<bool>(js::ANY, sel::PLACE_TITLE).await? {
 				return Err(SessionError::new_place_not_found(place_id.to_owned()));
 			}
 			// The place rendered, and has no star average: nobody has reviewed it yet.
-			if !self.eval::<bool>(js::ANY, (sel::RATING_SUMMARY,)).await? {
+			if !self.eval::<bool>(js::ANY, sel::RATING_SUMMARY).await? {
 				tracing::info!(place_id, "the place has no reviews");
 				return Ok(None);
 			}
@@ -169,7 +146,7 @@ impl Session {
 		};
 
 		Ok(Some(Opened {
-			page_url: self.page.url().await?.unwrap_or(url),
+			page_url: self.tab.url(),
 			sorted,
 			total,
 			warnings,
@@ -177,7 +154,7 @@ impl Session {
 	}
 
 	/// Clicks the sort button until the sort menu or Google's sign-in dialog shows.
-	async fn open_sort_menu(&self) -> Result<SortMenu, SessionError> {
+	async fn open_sort_menu(&mut self) -> Result<SortMenu, SessionError> {
 		let either = [sel::SORT_NEWEST, sel::SIGN_IN_GATE].concat();
 		let mut gated = 0;
 		// A click that lands while the list is still hydrating is swallowed; retry a few times.
@@ -189,7 +166,7 @@ impl Session {
 			if !self.wait_for_any_within(&either, Duration::from_secs(5)).await? {
 				continue;
 			}
-			if self.eval::<bool>(js::ANY, (sel::SORT_NEWEST,)).await? {
+			if self.eval::<bool>(js::ANY, sel::SORT_NEWEST).await? {
 				return Ok(SortMenu::Open);
 			}
 			// The same dialog also turns up by itself over a fresh profile's list; only a
@@ -203,7 +180,7 @@ impl Session {
 	}
 
 	/// Picks "newest" in the open sort menu; `false`: the list was not seen to re-sort.
-	async fn pick_newest(&self) -> Result<bool, SessionError> {
+	async fn pick_newest(&mut self) -> Result<bool, SessionError> {
 		let before: String = self.eval(js::FIRST_CARD_ID, (sel::CARD, sel::CARD_ID_ATTR)).await?;
 		if !self.click_first(sel::SORT_NEWEST).await? {
 			return Err(markup_changed("picking 'newest'", sel::SORT_NEWEST));
@@ -231,32 +208,21 @@ impl Session {
 		Ok(sorted)
 	}
 
-	/// The whole page as HTML and a full-page PNG, for seeing what a failed step was
-	/// looking at: `page [<png>] [<html>]`, which the alerts attach.
-	pub(crate) async fn save_page(&self, artifacts: &Artifacts) -> eyre::Result<String> {
-		// A page that failed may also hang; a diagnostic is not worth holding the walk for.
-		let (html, png) = tokio::time::timeout(DIAGNOSTIC_TIMEOUT, async {
-			let html = self.page.content().await?;
-			let png = self.page.screenshot(chromiumoxide::page::ScreenshotParams::builder().full_page(true).build()).await?;
-			eyre::Ok((html, png))
-		})
-		.await
-		.wrap_err("the page did not answer")??;
-		let png = artifacts.save("page", "png", &png)?;
-		let html = artifacts.save("page", "html", html.as_bytes())?;
-		Ok(format!("page [{}] [{}]", png.display(), html.display()))
+	/// The page as it is now, into the artifacts; `None` without them.
+	pub(crate) async fn save(&self, hint: &str) -> Option<Result<browser_manipulation::Capture, String>> {
+		self.tab.capture(hint).await
 	}
 
 	/// The review count the list's histogram adds up to.
-	async fn review_total(&self) -> Result<Option<u64>, SessionError> {
-		let labels: Vec<String> = self.eval(js::LABELS, (sel::HISTOGRAM_ROW,)).await?;
+	async fn review_total(&mut self) -> Result<Option<u64>, SessionError> {
+		let labels: Vec<String> = self.eval(js::LABELS, sel::HISTOGRAM_ROW).await?;
 		Ok(parse::review_total(&labels))
 	}
 
 	/// Walks the open review list, capturing the cards the policy asks for. A page that
 	/// fails once cards were read ends the walk [`WalkEnd::Interrupted`] with what it read
 	/// — unless Google blocked it, which fails the walk.
-	pub(crate) async fn walk(&self, policy: &mut dyn WalkPolicy, max: usize, opened: Opened) -> Result<Walked, SessionError> {
+	pub(crate) async fn walk(&mut self, policy: &mut dyn WalkPolicy, max: usize, opened: Opened) -> Result<Walked, SessionError> {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<WalkedCard> = Vec::new();
@@ -272,7 +238,7 @@ impl Session {
 				// overlap covers a feed that re-rendered its last few cards.
 				let skip = seen.len().saturating_sub(SCREEN);
 				let html: String = self.eval(js::CARDS_HTML, (sel::CARD, skip)).await?;
-				if let Some(dir) = &self.dump_html {
+				if let Some(dir) = self.dump_html {
 					dump(dir, &html).await?;
 				}
 				let mut grew = false;
@@ -305,9 +271,9 @@ impl Session {
 				if idle >= END_AFTER_IDLE_STEPS {
 					return Ok(Some(WalkEnd::ReachedEnd));
 				}
-				self.check_not_blocked().await?;
+				self.check_not_blocked()?;
 				// A list short enough to fit the panel has nothing to scroll and nothing more to load.
-				if !self.eval::<bool>(js::SCROLL_FEED, (sel::CARD,)).await? {
+				if !self.eval::<bool>(js::SCROLL_FEED, sel::CARD).await? {
 					return Ok(Some(WalkEnd::ReachedEnd));
 				}
 				tokio::time::sleep(STEP_WAIT).await;
@@ -333,15 +299,14 @@ impl Session {
 		})
 	}
 
-	async fn capture(&self, id: &str, page_url: &str) -> Result<Capture, SessionError> {
+	async fn capture(&mut self, id: &str, page_url: &str) -> Result<Capture, SessionError> {
 		let marked: bool = self.eval(js::MARK_CARD, (sel::CARD, sel::CARD_ID_ATTR, id)).await?;
 		if !marked {
 			return Err(eyre::eyre!("card is no longer on the page").into());
 		}
 		// let lazy avatars and photo thumbnails paint after the scroll
 		tokio::time::sleep(Duration::from_millis(400)).await;
-		let el = self.page.find_element(js::MARKED_CARD).await?;
-		let png = el.screenshot(CaptureScreenshotFormat::Png).await?;
+		let png = self.tab.screenshot(Shot::Element(js::MARKED_CARD)).await?;
 		Ok(Capture {
 			png,
 			captured_at: Timestamp::now(),
@@ -349,10 +314,9 @@ impl Session {
 		})
 	}
 
-	async fn handle_interstitials(&self) -> Result<(), SessionError> {
-		self.check_not_blocked().await?;
-		let url = self.page.url().await?.unwrap_or_default();
-		if !url.contains(sel::CONSENT_HOST) {
+	async fn handle_interstitials(&mut self) -> Result<(), SessionError> {
+		self.check_not_blocked()?;
+		if !self.tab.url().contains(sel::CONSENT_HOST) {
 			return Ok(());
 		}
 		tracing::info!("consent page: rejecting all");
@@ -364,25 +328,25 @@ impl Session {
 		}
 		// the answer is a cookie in the profile dir, so the next run goes straight through
 		let deadline = tokio::time::Instant::now() + UI_TIMEOUT;
-		while self.page.url().await?.unwrap_or_default().contains(sel::CONSENT_HOST) {
+		while self.tab.url().contains(sel::CONSENT_HOST) {
 			if tokio::time::Instant::now() >= deadline {
 				return Err(SessionError::new_consent("still on the consent page after rejecting"));
 			}
 			tokio::time::sleep(Duration::from_millis(300)).await;
 		}
-		self.check_not_blocked().await
+		self.check_not_blocked()
 	}
 
 	/// Google's "unusual traffic" page: the run fails, whatever was read before it.
-	async fn check_not_blocked(&self) -> Result<(), SessionError> {
-		let url = self.page.url().await?.unwrap_or_default();
+	fn check_not_blocked(&self) -> Result<(), SessionError> {
+		let url = self.tab.url();
 		if url.contains(sel::BLOCKED_PATH) {
 			return Err(SessionError::new_blocked(url));
 		}
 		Ok(())
 	}
 
-	async fn dismiss_promo(&self) -> Result<(), SessionError> {
+	async fn dismiss_promo(&mut self) -> Result<(), SessionError> {
 		if self.click_first(sel::PROMO_DISMISS).await? {
 			tracing::debug!("dismissed the sign-in dialog");
 			tokio::time::sleep(Duration::from_millis(500)).await;
@@ -390,35 +354,32 @@ impl Session {
 		Ok(())
 	}
 
-	async fn click_first(&self, sels: &[&str]) -> Result<bool, SessionError> {
-		self.eval(js::CLICK_FIRST, (sels,)).await
+	async fn click_first(&mut self, sels: &[&str]) -> Result<bool, SessionError> {
+		self.eval(js::CLICK_FIRST, sels).await
 	}
 
 	/// Whether any of `sels` showed up in time.
-	async fn wait_for_any(&self, sels: &[&str]) -> Result<bool, SessionError> {
+	async fn wait_for_any(&mut self, sels: &[&str]) -> Result<bool, SessionError> {
 		self.wait_for_any_within(sels, UI_TIMEOUT).await
 	}
 
-	async fn wait_for_any_within(&self, sels: &[&str], timeout: Duration) -> Result<bool, SessionError> {
-		let deadline = tokio::time::Instant::now() + timeout;
-		loop {
-			if self.eval::<bool>(js::ANY, (sels,)).await? {
-				return Ok(true);
+	async fn wait_for_any_within(&mut self, sels: &[&str], timeout: Duration) -> Result<bool, SessionError> {
+		self.tab.set_timeout(timeout).await;
+		let shown = self.tab.wait_for_any(sels).await;
+		self.tab.set_timeout(UI_TIMEOUT).await;
+		match shown {
+			Ok(_) => Ok(true),
+			// what a timed-out page showed was captured and is dropped here: the caller decides whether not showing up is a failure
+			Err(e) if matches!(*e.kind, ErrorKind::Timeout { .. }) => {
+				self.check_not_blocked()?;
+				Ok(false)
 			}
-			self.check_not_blocked().await?;
-			if tokio::time::Instant::now() >= deadline {
-				return Ok(false);
-			}
-			tokio::time::sleep(Duration::from_millis(300)).await;
+			Err(e) => Err(e.into()),
 		}
 	}
 
-	/// Calls an in-page function with JSON-encoded arguments.
-	async fn eval<T: serde::de::DeserializeOwned>(&self, func: &str, args: impl Serialize) -> Result<T, SessionError> {
-		let args = serde_json::to_value(args)?;
-		let args = args.as_array().map(|a| a.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-		let expr = format!("({func})({args})");
-		Ok(self.page.evaluate_expression(expr).await?.into_value()?)
+	async fn eval<T: serde::de::DeserializeOwned>(&mut self, func: &str, arg: impl Serialize) -> Result<T, SessionError> {
+		Ok(self.tab.eval(func, arg).await?)
 	}
 }
 

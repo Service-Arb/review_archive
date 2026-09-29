@@ -30,8 +30,8 @@ Out — do not build, even as an option:
 
 ### `maps` — any public place (headless browser)
 
-- Chromium over CDP (`chromiumoxide`, tokio). One browser process, targets
-  scanned sequentially.
+- Chromium through `browser_manipulation` (Playwright protocol, patchright driver). One
+  browser process, targets scanned sequentially.
 - URL: `https://www.google.com/maps/place/?q=place_id:<PLACE_ID>&hl=<lang>`.
 - EU consent interstitial (`consent.google.com`): click the reject-all button;
   persist the resulting cookies in the profile dir so it is not shown again.
