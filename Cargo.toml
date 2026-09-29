@@ -54,8 +54,8 @@ tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = "5"
-va_sso = "0.1"
 v_utils = { version = "2.19", default-features = false, features = ["macros"] }
+va_sso = "0.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 insta = { version = "1", features = ["yaml"] }
