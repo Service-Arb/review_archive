@@ -23,7 +23,7 @@ review_archive_server = { path = "crates/review_archive_server", version = "0.1.
 
 axum = "0.8"
 base64 = "0.22"
-browser_manipulation = { git = "https://github.com/valeratrades/browser_manipulation", tag = "v0.1.0" }
+browser_manipulation = { git = "https://github.com/valeratrades/browser_manipulation", tag = "v0.2.1" }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 crc32fast = "1"

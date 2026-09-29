@@ -7,7 +7,7 @@ use std::{
 	time::Duration,
 };
 
-use browser_manipulation::{Browser, ErrorKind, Launch, Robot, Shot, Tab};
+use browser_manipulation::{Browser, ErrorKind, Launch, Robot, Shot, Tab, Viewport};
 use eyre::WrapErr;
 use jiff::Timestamp;
 use review_archive_core::{
@@ -65,7 +65,11 @@ impl Session {
 			executable,
 			headless: !cfg.headful,
 			// wide enough for the desktop layout, tall enough that a long review fits one screenshot
-			viewport: Some((1280, 2000)),
+			viewport: Some(Viewport {
+				width: 1280,
+				height: 2000,
+				device_scale_factor: 2.0, // card PNGs are archived evidence; 1x is too blurry to read
+			}),
 		};
 		let browser = Browser::launch(launch, Robot, cfg.artifacts.clone()).await?;
 		Ok(Self {

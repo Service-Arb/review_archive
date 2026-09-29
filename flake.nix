@@ -7,7 +7,7 @@
   inputs = {
     v_flakes.url = "github:valeratrades/v_flakes?ref=v1.6";
     browser_manipulation = {
-      url = "github:valeratrades/browser_manipulation?ref=v0.1.0";
+      url = "github:valeratrades/browser_manipulation?ref=v0.2.1";
       inputs.v_flakes.follows = "v_flakes";
     };
   };
@@ -85,14 +85,15 @@
           filter = path: _type: baseNameOf path != ".cargo";
         };
 
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes."browser_manipulation-0.2.1" = "sha256-3Je1LiU6dYg0+Vpw2N+rHN/K47oKMfEf12JAncHc5eM=";
+        };
         bin = rustPlatform.buildRustPackage {
           inherit pname;
           version = manifest.version;
           src = pureSrc;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes."browser_manipulation-0.1.0" = "sha256-TFBzVpaEUgu4smIvdQxFvcmYkhaJ/rtikboSaApHBT0=";
-          };
+          inherit cargoLock;
           cargoBuildFlags = [ "-p" "review_archive_server" ];
           nativeBuildInputs = with pkgs; [ pkg-config ];
           # ev_lib's `sentry` turns on reqwest's native-tls, which is OpenSSL on Linux
@@ -130,7 +131,7 @@
           pname = "${pname}-mfe";
           version = manifest.version;
           src = pureSrc;
-          cargoLock.lockFile = ./Cargo.lock;
+          inherit cargoLock;
           nativeBuildInputs = [ wasm-bindgen-cli pkgs.tailwindcss_4 ];
           buildPhase = ''
             runHook preBuild

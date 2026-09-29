@@ -55,7 +55,7 @@ async fn live_scan_of_a_real_place() {
 	assert!(reviews.iter().all(|r| r.rating.is_some() && r.published_est.is_some()));
 	let sha = reviews.iter().find_map(|r| r.capture_sha256.clone()).unwrap();
 	let png = archive.capture_png(&sha).await.unwrap();
-	assert!(review_archive::png_meta::dimensions(&png).unwrap().0 >= 400);
+	assert!(review_archive::png_meta::dimensions(&png).unwrap().0 >= 600);
 }
 
 /// The library without a store: reviews and PNGs in memory.
@@ -71,6 +71,6 @@ async fn live_capture_without_a_store() {
 	archive.close().await;
 	assert_eq!(got.scan.reviews.len(), 5, "{:?}", got.scan.warnings);
 	let png = got.scan.reviews.iter().find_map(|r| r.capture.as_ref()).unwrap();
-	assert!(review_archive::png_meta::dimensions(&png.png).unwrap().0 >= 400);
+	assert!(review_archive::png_meta::dimensions(&png.png).unwrap().0 >= 600);
 	assert!(archive.store().is_err());
 }
