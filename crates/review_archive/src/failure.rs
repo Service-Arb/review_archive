@@ -28,7 +28,11 @@ pub fn remedy(e: &eyre::Report) -> Remedy {
 			SessionError::Blocked { .. } | SessionError::LimitedView { .. } => Remedy::Pause,
 			SessionError::MarkupChanged { .. } | SessionError::Consent { .. } => Remedy::Human,
 			SessionError::Launch { .. } => Remedy::Fatal,
-			SessionError::PlaceNotFound { .. } | SessionError::Cdp { .. } | SessionError::Decode { .. } | SessionError::Other(_) => Remedy::Retry,
+			SessionError::Browser(e) => match *e.kind {
+				browser_manipulation::ErrorKind::Launch(_) | browser_manipulation::ErrorKind::DriverMismatch { .. } | browser_manipulation::ErrorKind::ProfileInUse(_) => Remedy::Fatal,
+				_ => Remedy::Retry,
+			},
+			SessionError::PlaceNotFound { .. } | SessionError::Other(_) => Remedy::Retry,
 		};
 	}
 	#[cfg(feature = "maps")]
@@ -100,15 +104,11 @@ pub enum SessionError {
 	Consent { why: &'static str },
 	#[leaf]
 	#[error("Chromium did not start: {reason}")]
-	#[diagnostic(code(review_archive::browser::launch), help("check `browser.executable`, the sandbox flags and the memory the process has"))]
+	#[diagnostic(code(review_archive::browser::launch), help("check `browser.executable` and the memory the process has"))]
 	Launch { reason: String },
-	#[foreign]
-	#[diagnostic(code(review_archive::browser::cdp))]
-	Cdp(chromiumoxide::error::CdpError),
-	#[foreign]
-	#[error("decoding an in-page result: {source}")]
-	#[diagnostic(code(review_archive::browser::decode))]
-	Decode(serde_json::Error),
+	#[error(transparent)]
+	#[diagnostic(transparent)]
+	Browser(#[from] browser_manipulation::Error),
 	#[error(transparent)]
 	Other(#[from] eyre::Report),
 }

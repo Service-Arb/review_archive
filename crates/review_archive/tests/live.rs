@@ -1,7 +1,7 @@
 //! One real scan of one real place. Needs a browser and the network, so it only runs
 //! by hand: `cargo test --test live -- --ignored`.
 //!
-//! `REVIEW_ARCHIVE_CHROME` points at the browser (else it is looked up on PATH),
+//! `REVIEW_ARCHIVE_CHROME` points at the browser (the devShell sets it),
 //! `REVIEW_ARCHIVE_HEADFUL=1` opens a window, and `REVIEW_ARCHIVE_PROFILE` reuses a browser
 //! profile instead of a fresh one. Google may answer with a "limited view" of Maps that
 //! has no reviews (headless, or a fresh profile); the scan then fails and says so.

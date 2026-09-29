@@ -183,7 +183,7 @@ async fn with_alerts<T>(deliverer: Option<alerts::Deliverer>, work: impl Future<
 fn init_tracing(environment: &str, alerts: Option<alerts::AlertLayer>) -> eyre::Result<Option<ev_lib::otel::Telemetry>> {
 	use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-	let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(option_env!("LOG_DIRECTIVES").unwrap_or("info,chromiumoxide=error")))?;
+	let filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(option_env!("LOG_DIRECTIVES").unwrap_or("info")))?;
 	let (otel_guard, otel_layers) = ev_lib::otel::telemetry(&ev_lib::otel::Config {
 		environment: environment.to_owned(),
 		traces_sample_rate: ev_lib::otel::Config::traces_sample_rate_for(environment),

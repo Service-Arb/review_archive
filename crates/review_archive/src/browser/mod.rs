@@ -8,11 +8,10 @@ mod session;
 
 use std::{path::PathBuf, sync::Arc};
 
-use ev_lib::alerts::Artifacts;
 use review_archive_core::maps::{WalkEnd, WalkPolicy, Walked, selectors};
 
 use self::{profile::ProfileLock, session::Session};
-use crate::config::BrowserConfig;
+use crate::{SessionError, config::BrowserConfig};
 
 /// A handle on one Chromium, launched on first use and shared by every clone.
 ///
@@ -34,9 +33,7 @@ struct Inner {
 /// The profile, held from [`Browser::claim`] or the first walk until [`Browser::close`].
 #[derive(Default)]
 struct State {
-	/// Claimed, Chromium not started yet.
 	lock: Option<ProfileLock>,
-	/// Chromium running; it holds the lock.
 	session: Option<Session>,
 }
 
@@ -63,7 +60,7 @@ impl Browser {
 	/// reason, while another process holds it. Held until [`Self::close`].
 	pub async fn claim(&self) -> eyre::Result<()> {
 		let mut state = self.inner.state.lock().await;
-		if state.lock.is_none() && state.session.is_none() {
+		if state.lock.is_none() {
 			state.lock = Some(ProfileLock::acquire(&self.inner.profile_dir)?);
 		}
 		Ok(())
@@ -73,31 +70,52 @@ impl Browser {
 	/// which cards to screenshot and when to stop; `max` caps the cards read.
 	pub async fn walk(&self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy, max: usize) -> eyre::Result<Walked> {
 		let mut state = self.inner.state.lock().await;
+		if state.lock.is_none() {
+			state.lock = Some(ProfileLock::acquire(&self.inner.profile_dir)?);
+		}
 		if state.session.is_none() {
-			let lock = match state.lock.take() {
-				Some(lock) => lock,
-				None => ProfileLock::acquire(&self.inner.profile_dir)?,
-			};
-			state.session = Some(Session::launch(&self.inner.cfg, &self.inner.profile_dir, lock).await?);
+			state.session = Some(Session::launch(&self.inner.cfg, &self.inner.profile_dir).await?);
 		}
 		let session = state.session.as_ref().expect("launched just above");
-		let walked = match session.open_reviews(place_id, lang).await {
-			Ok(Some(opened)) => session.walk(policy, max, opened).await,
-			Ok(None) => Ok(Walked::empty(selectors::place_url(place_id, lang))),
-			Err(e) => Err(e),
-		};
-		let walked = match (walked, &self.inner.cfg.artifacts) {
-			(Err(e), Some(artifacts)) => Err(eyre::Report::new(e).wrap_err(save_page(session, artifacts).await)),
-			(Err(e), None) => Err(e.into()),
-			(Ok(mut w), Some(artifacts)) if w.end == WalkEnd::Interrupted => {
-				w.warnings.push(save_page(session, artifacts).await);
-				Ok(w)
+		let (walked, broken) = match session.page().await {
+			Ok(mut page) => {
+				let walked = match page.open_reviews(place_id, lang).await {
+					Ok(Some(opened)) => page.walk(policy, max, opened).await,
+					Ok(None) => Ok(Walked::empty(selectors::place_url(place_id, lang))),
+					Err(e) => Err(e),
+				};
+				let walked = match walked {
+					Err(e) => {
+						let saved = match &e {
+							SessionError::Browser(b) => b.capture.as_deref().cloned(),
+							_ => page.save("walk-failed").await,
+						};
+						match saved {
+							Some(saved) => Err(eyre::Report::new(e).wrap_err(page_line(saved))),
+							None => Err(e.into()),
+						}
+					}
+					Ok(mut w) if w.end == WalkEnd::Interrupted => {
+						w.warnings.extend(page.save("walk-interrupted").await.map(page_line));
+						Ok(w)
+					}
+					Ok(w) => Ok(w),
+				};
+				match (page.close().await, walked) {
+					(Ok(()), walked) => (walked, false),
+					(Err(e), Ok(mut w)) => {
+						w.warnings.push(format!("closing the tab after the walk: {e:#}"));
+						(Ok(w), true)
+					}
+					// the walk's own failure says more than the tab that would not close after it
+					(Err(_), Err(e)) => (Err(e), true),
+				}
 			}
-			(Ok(w), _) => Ok(w),
+			Err(e) => (Err(e.into()), true),
 		};
-		// A browser that failed under a walk may be dead (a crashed tab, a lost CDP socket):
+		// A browser that failed under a walk may be dead (a crashed tab, a lost driver):
 		// the next walk starts a fresh one rather than fail on it forever.
-		if matches!(walked, Err(_) | Ok(Walked { end: WalkEnd::Interrupted, .. }))
+		if (broken || matches!(walked, Err(_) | Ok(Walked { end: WalkEnd::Interrupted, .. })))
 			&& let Some(s) = state.session.take()
 		{
 			s.close().await;
@@ -110,17 +128,17 @@ impl Browser {
 	/// idle.
 	pub async fn close(&self) {
 		let mut state = self.inner.state.lock().await;
-		state.lock = None;
 		if let Some(s) = state.session.take() {
 			s.close().await;
 		}
+		state.lock = None;
 	}
 }
 
-/// Saves what the page showed when a walk failed; the line that says where, or why it could not.
-async fn save_page(session: &Session, artifacts: &Artifacts) -> String {
-	match session.save_page(artifacts).await {
-		Ok(saved) => saved,
-		Err(e) => format!("page not saved: {e:#}"),
+/// Where the page a walk ended on was saved, as `[<path>]`s the alerts attach; or why it was not.
+fn page_line(saved: Result<browser_manipulation::Capture, String>) -> String {
+	match saved {
+		Ok(c) => format!("page [{}] [{}]", c.png.display(), c.html.display()),
+		Err(e) => format!("page not saved: {e}"),
 	}
 }

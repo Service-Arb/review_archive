@@ -6,9 +6,13 @@
 
   inputs = {
     v_flakes.url = "github:valeratrades/v_flakes?ref=v1.6";
+    browser_manipulation = {
+      url = "github:valeratrades/browser_manipulation?ref=v0.1.0";
+      inputs.v_flakes.follows = "v_flakes";
+    };
   };
 
-  outputs = { self, v_flakes }:
+  outputs = { self, v_flakes, browser_manipulation }:
     let
       inherit (v_flakes) flake-utils pre-commit-hooks;
       manifest = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package;
@@ -34,6 +38,13 @@
         # nixpkgs builds Chromium for Linux only. On a mac the scanner is pointed
         # at a local Chrome through `browser.executable` in the config instead.
         chromium = lib.optional pkgs.stdenv.isLinux pkgs.chromium;
+
+        # the Playwright driver browser_manipulation speaks to
+        playwrightEnv = {
+          PLAYWRIGHT_CLI_JS = "${browser_manipulation.packages.${system}.patchright}/package/cli.js";
+          PLAYWRIGHT_NODE_EXE = "${pkgs.nodejs}/bin/node";
+          PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD = "1";
+        };
 
         pre-commit-check = pre-commit-hooks.lib.${system}.run (v_flakes.files.preCommit { inherit pkgs; stripClaudeSignature = true; });
         rs = v_flakes.rs {
@@ -78,7 +89,10 @@
           inherit pname;
           version = manifest.version;
           src = pureSrc;
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes."browser_manipulation-0.1.0" = "sha256-TFBzVpaEUgu4smIvdQxFvcmYkhaJ/rtikboSaApHBT0=";
+          };
           cargoBuildFlags = [ "-p" "review_archive_server" ];
           nativeBuildInputs = with pkgs; [ pkg-config ];
           # ev_lib's `sentry` turns on reqwest's native-tls, which is OpenSSL on Linux
@@ -177,8 +191,8 @@
             criticality = "normal";
             entrypoint = [ "${bin}/bin/${pname}" "--config" "${prodConfig}" "serve" ];
             workingDir = "/data";
-            contents = [ pkgs.chromium ];
-            imageEnv = [
+            contents = [ pkgs.chromium pkgs.nodejs ];
+            imageEnv = lib.mapAttrsToList (k: v: "${k}=${v}") playwrightEnv ++ [
               "HOME=/data"
               # the image has no /tmp, and Chromium's shared memory goes to TMPDIR
               # (--disable-dev-shm-usage); the binary creates it on start, as the
@@ -243,8 +257,12 @@
               tailwindcss_4
             ] ++ chromium ++ pre-commit-check.enabledPackages ++ combined.enabledPackages;
 
-            env.RUST_BACKTRACE = 1;
-            env.RUST_LIB_BACKTRACE = 0;
+            env = {
+              RUST_BACKTRACE = 1;
+              RUST_LIB_BACKTRACE = 0;
+            } // playwrightEnv // lib.optionalAttrs pkgs.stdenv.isLinux {
+              REVIEW_ARCHIVE_CHROME = "${pkgs.chromium}/bin/chromium";
+            };
           };
       }
     );

@@ -149,14 +149,14 @@ pub mod js {
 	/// `(sel) => [label]`: the `aria-label` of every element matching `sel`, in order.
 	pub const LABELS: &str = r#"(sel) => Array.from(document.querySelectorAll(sel), el => el.getAttribute("aria-label") || "")"#;
 
-	/// `(cardSel, idAttr) => id`: the id of the first card, "" without one (CDP returns no value for null).
-	pub const FIRST_CARD_ID: &str = r#"(cardSel, idAttr) => {
+	/// `([cardSel, idAttr]) => id`: the id of the first card, "" without one.
+	pub const FIRST_CARD_ID: &str = r#"([cardSel, idAttr]) => {
 		const el = document.querySelector(cardSel);
 		return (el && el.getAttribute(idAttr)) || "";
 	}"#;
 
-	/// `(cardSel, expandSels) => n`: clicks every "More" inside a card; returns how many.
-	pub const EXPAND_ALL: &str = r#"(cardSel, expandSels) => {
+	/// `([cardSel, expandSels]) => n`: clicks every "More" inside a card; returns how many.
+	pub const EXPAND_ALL: &str = r#"([cardSel, expandSels]) => {
 		let n = 0;
 		for (const s of expandSels) {
 			for (const b of document.querySelectorAll(s)) {
@@ -168,9 +168,9 @@ pub mod js {
 		return n;
 	}"#;
 
-	/// `(cardSel, skip) => html`: the outer HTML of the outermost cards from the `skip`th on,
+	/// `([cardSel, skip]) => html`: the outer HTML of the outermost cards from the `skip`th on,
 	/// in order — what the parser reads, and what `--dump-html` saves as a fixture.
-	pub const CARDS_HTML: &str = r#"(cardSel, skip) => {
+	pub const CARDS_HTML: &str = r#"([cardSel, skip]) => {
 		const out = [];
 		for (const el of document.querySelectorAll(cardSel)) {
 			if (el.parentElement && el.parentElement.closest(cardSel)) continue;
@@ -192,8 +192,8 @@ pub mod js {
 		return true;
 	}"#;
 
-	/// `(cardSel, idAttr, id) => bool`: tags the outermost card with this id for a screenshot.
-	pub const MARK_CARD: &str = r#"(cardSel, idAttr, id) => {
+	/// `([cardSel, idAttr, id]) => bool`: tags the outermost card with this id for a screenshot.
+	pub const MARK_CARD: &str = r#"([cardSel, idAttr, id]) => {
 		for (const el of document.querySelectorAll("[data-ra-capture]")) el.removeAttribute("data-ra-capture");
 		for (const el of document.querySelectorAll(cardSel)) {
 			if (el.getAttribute(idAttr) !== id) continue;
