@@ -5,6 +5,7 @@ members = [
     "crates/review_archive_client",
     "crates/review_archive_core",
     "crates/review_archive_server",
+    "crates/review_archive_web",
 ]
 
 [workspace.package]

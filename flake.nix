@@ -90,6 +90,69 @@
           auditable = false; # cargo-auditable doesn't support edition 2024
         };
 
+        # Pinned to the `wasm-bindgen` crate (`=0.2.129`, review_archive_web): a skew
+        # between the two is a hard error at bindgen time.
+        wasm-bindgen-cli =
+          let
+            src = pkgs.fetchCrate {
+              pname = "wasm-bindgen-cli";
+              version = "0.2.129";
+              hash = "sha256-pcecKQd7E8Opw6bkFoE569epUi7gh5qpQF1e5PJY6V8=";
+            };
+          in
+          pkgs.buildWasmBindgenCli {
+            inherit src;
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit src;
+              inherit (src) pname version;
+              hash = "sha256-vmUrWVU7kPJJxO5qIVeAkwQyWDELO1Z4Z5gitz2kco8=";
+            };
+          };
+        wasmFlags = ''--cfg=web_sys_unstable_apis --cfg=getrandom_backend="wasm_js"'';
+
+        # The dashboard bundle the binary serves under /mfe/ (`mfe_dir`). Built with the
+        # dev toolchain, which carries the wasm32 target.
+        mfe = (pkgs.makeRustPlatform { rustc = rust; cargo = rust; inherit stdenv; }).buildRustPackage {
+          pname = "${pname}-mfe";
+          version = manifest.version;
+          src = pureSrc;
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ wasm-bindgen-cli pkgs.tailwindcss_4 ];
+          buildPhase = ''
+            runHook preBuild
+            RUSTFLAGS='${wasmFlags}' cargo build -p review_archive_web --target wasm32-unknown-unknown --release --offline
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            bash crates/review_archive_web/package.sh target/wasm32-unknown-unknown/release/review_archive_web.wasm "$out"
+            runHook postInstall
+          '';
+          doCheck = false;
+          auditable = false;
+        };
+
+        # `nix run .#dev-mfe`: the dashboard built (debug) into tmp/mfe-dev and served by a
+        # local `serve` with the dev harness page, which takes a token from
+        # `review_archive login`. The environment passes through to `serve`.
+        devMfe = pkgs.writeShellApplication {
+          name = "dev-mfe";
+          runtimeInputs = [ pkgs.git ];
+          text = ''
+            repo="$(git rev-parse --show-toplevel)"
+            cd "$repo"
+            out="$repo/tmp/mfe-dev"
+            nix develop "$repo" --command bash -euc "
+              RUSTFLAGS='${wasmFlags}' cargo build -p review_archive_web --target wasm32-unknown-unknown
+              bash crates/review_archive_web/package.sh target/wasm32-unknown-unknown/debug/review_archive_web.wasm '$out'
+            "
+            cp crates/review_archive_web/dev.html "$out/index.html"
+            printf 'mfe_dir = "%s"\n' "$out" >"$out/config.toml"
+            echo "▶ http://127.0.0.1:${toString port}/mfe/index.html"
+            exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve
+          '';
+        };
+
         # A headless Chromium renders review text with whatever fonts fontconfig
         # finds; an image without any turns every screenshot into tofu boxes.
         fontsConf = pkgs.makeFontsConf {
@@ -101,6 +164,7 @@
         prodConfig = (pkgs.formats.toml { }).generate "config.toml" (import ./deploy/config.nix {
           inherit port;
           chromium = "${pkgs.chromium}/bin/chromium";
+          mfe = "${mfe}";
         });
 
         containerStd = v_flakes.container.implement {
@@ -132,6 +196,8 @@
             nix develop                       toolchain, sqlite, cargo-insta (and chromium on Linux)
             nix build                         the review_archive binary
             nix build .#${pname}-container    OCI image with chromium (Linux only)
+            nix build .#mfe                   the dashboard bundle (served under /mfe/)
+            nix run .#dev-mfe                 the dashboard, built and served locally with a token box
             nix run .#help                    this
             cargo test                        parser snapshots, repository, scheduler, gbp stub
             cargo test -- --ignored live      one real scan; needs a browser and the network
@@ -143,11 +209,12 @@
       {
         apps = {
           help = { type = "app"; program = lib.getExe help; };
+          dev-mfe = { type = "app"; program = lib.getExe devMfe; };
         };
 
         packages = {
           default = bin;
-          inherit bin;
+          inherit bin mfe;
         } // lib.optionalAttrs pkgs.stdenv.isLinux containerStd.packages;
 
         # Linux-only: the image carries Chromium, which nixpkgs does not build for Darwin.
@@ -172,6 +239,8 @@
               rust
               sqlite # inspecting the archive
               cargo-insta
+              wasm-bindgen-cli # the dashboard; pinned with the crate
+              tailwindcss_4
             ] ++ chromium ++ pre-commit-check.enabledPackages ++ combined.enabledPackages;
 
             env.RUST_BACKTRACE = 1;
