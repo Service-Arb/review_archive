@@ -21,6 +21,14 @@ ev_lib::settings! {
 		gbp_client_secret: Option<String>,
 		#[secret]
 		gbp_refresh_token: Option<String>,
+		/// Playbook's token introspection (`{base}/introspect`): members' tokens are checked
+		/// there. With its secret; both or neither. Unset: only the operator's token works.
+		auth_introspect_url: Option<String>,
+		#[secret]
+		introspect_secret: Option<String>,
+		/// The bot members' Telegram channels are posted by.
+		#[secret]
+		telegram_bot_token: Option<String>,
 		/// Unset: errors are logged, not reported.
 		#[secret]
 		sentry_dsn: Option<String>,
@@ -47,6 +55,19 @@ impl Settings {
 		Secrets {
 			google_maps_key: self.google_maps_key.clone(),
 			gbp,
+			telegram_bot_token: self.telegram_bot_token.clone(),
+		}
+	}
+
+	/// How members' tokens are checked: `None` takes only the operator's.
+	pub fn introspect(&self) -> eyre::Result<Option<review_archive_server::auth::Introspect>> {
+		match (&self.auth_introspect_url, &self.introspect_secret) {
+			(Some(url), Some(secret)) => Ok(Some(review_archive_server::auth::Introspect::new(
+				url.parse().map_err(|e| eyre::eyre!("AUTH_INTROSPECT_URL is not a URL: {e}"))?,
+				secret.clone(),
+			)?)),
+			(None, None) => Ok(None),
+			_ => eyre::bail!("AUTH_INTROSPECT_URL and INTROSPECT_SECRET go together: set both, or neither"),
 		}
 	}
 
@@ -103,6 +124,9 @@ mod tests {
 				"GBP_CLIENT_ID",
 				"GBP_CLIENT_SECRET",
 				"GBP_REFRESH_TOKEN",
+				"AUTH_INTROSPECT_URL",
+				"INTROSPECT_SECRET",
+				"TELEGRAM_BOT_TOKEN",
 				"SENTRY_DSN",
 				"ALERT_WEBHOOK_ERROR",
 				"ALERT_WEBHOOK_WARN",

@@ -3,6 +3,7 @@
 //!
 //! A library target too so the client's tests can serve the real router in-process.
 
+pub mod auth;
 pub mod http;
 pub mod worker;
 

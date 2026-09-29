@@ -11,17 +11,21 @@ use review_archive::{
 	config::Config,
 	core::{
 		Coverage, Known, Observed, Scan, Target,
-		dto::{CaptureRequest, Event, JobStatus, NewTarget, NewWebhook, TargetPatch},
+		dto::{CaptureRequest, Event, JobStatus, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch},
 	},
 	sources::ReviewSource,
 };
 use review_archive_client::{Captured, Client};
 use review_archive_server::{
+	auth::{Auth, Introspect},
 	http::{AppState, router},
 	worker::Signals,
 };
 
 const TOKEN: &str = "test-token-0123456789";
+/// Playbook's side: the introspection secret, and whose each access token is.
+const INTROSPECT_SECRET: &str = "introspect-secret-0123";
+const MEMBERS: [(&str, &str); 2] = [("alice-token", "Alice@x.com"), ("bob-token", "bob@x.com")];
 const PLACE: &str = "ChIJLU7jZClu5kcR4PcOOO6p3I0";
 
 struct Env {
@@ -43,7 +47,9 @@ async fn env() -> Env {
 	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
 	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
-	let app = router(AppState::new(archive.clone(), TOKEN, signals.clone()));
+	let playbook = introspection().await;
+	let auth = Auth::new(TOKEN, Some(Introspect::new(playbook.parse().unwrap(), INTROSPECT_SECRET.into()).unwrap()));
+	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -55,6 +61,35 @@ async fn env() -> Env {
 		base,
 		client,
 		server,
+	}
+}
+
+/// Playbook's `POST /introspect`, answering for [`MEMBERS`].
+async fn introspection() -> String {
+	async fn introspect(headers: axum::http::HeaderMap, axum::Form(f): axum::Form<std::collections::HashMap<String, String>>) -> axum::response::Response {
+		use axum::response::IntoResponse;
+		if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {INTROSPECT_SECRET}")) {
+			return StatusCode::UNAUTHORIZED.into_response();
+		}
+		let email = MEMBERS.iter().find(|(t, _)| *t == f["token"]).map(|(_, e)| *e);
+		let exp = Timestamp::now().as_second() + 3600;
+		axum::Json(match email {
+			Some(email) => serde_json::json!({ "active": true, "email": email, "exp": exp }),
+			None => serde_json::json!({ "active": false }),
+		})
+		.into_response()
+	}
+	let app = axum::Router::new().route("/introspect", axum::routing::post(introspect));
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("http://{}/introspect", listener.local_addr().unwrap());
+	tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+	url
+}
+
+impl Env {
+	/// The client as a member holding this playbook token.
+	fn member(&self, token: &str) -> Client {
+		Client::new(&self.base, token).unwrap()
 	}
 }
 
@@ -355,6 +390,18 @@ async fn every_route_but_health_and_openapi_wants_the_token() {
 		("GET", "/webhooks"),
 		("POST", "/webhooks"),
 		("DELETE", "/webhooks/1"),
+		("GET", "/me/overview"),
+		("POST", "/me/gmails"),
+		("DELETE", "/me/gmails/1"),
+		("POST", "/me/gmails/1/tracks"),
+		("DELETE", "/me/gmails/1/tracks/1"),
+		("GET", "/me/gmails/1/locations/1/board"),
+		("PUT", "/me/gmails/1/reinstatements/1"),
+		("DELETE", "/me/gmails/1/reinstatements/1"),
+		("GET", "/me/tg-channels"),
+		("POST", "/me/tg-channels"),
+		("DELETE", "/me/tg-channels/1"),
+		("POST", "/me/tg-channels/1/test"),
 	];
 	for (method, path) in routes {
 		let resp = http
@@ -616,5 +663,153 @@ async fn a_wait_beyond_the_cap_still_answers_when_the_job_ends() {
 	work_one(&e, vec![review("a")]).await;
 	let got = tokio::time::timeout(Duration::from_secs(10), waiting).await.expect("answered once the job ended").unwrap();
 	assert!(matches!(got, Ok(Captured::Done(ref job)) if job.status == JobStatus::Done), "{got:?}");
+	e.server.abort();
+}
+
+/// The operator's routes are not a member's, and `/me` is not the operator's.
+#[tokio::test]
+async fn members_and_the_operator_keep_to_their_routes() {
+	let e = env().await;
+	let alice = e.member("alice-token");
+	assert_eq!(alice.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(alice.webhooks().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(e.client.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(e.member("stranger-token").overview().await.unwrap_err().status(), Some(StatusCode::UNAUTHORIZED));
+	assert_eq!(alice.overview().await.unwrap(), vec![]);
+	e.server.abort();
+}
+
+/// Two members on one place share its target and its scans; each sees only their own
+/// gmails, boards and screenshots, and the operator sees every screenshot.
+#[tokio::test]
+async fn members_share_places_but_see_only_their_own() {
+	let e = env().await;
+	let (alice, bob) = (e.member("alice-token"), e.member("bob-token"));
+	let a = alice.add_gmail(" Ops.Paris@gmail.com ").await.unwrap();
+	assert_eq!(a.gmail, "ops.paris@gmail.com");
+	assert_eq!(alice.add_gmail("ops.paris@gmail.com").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST), "twice");
+	assert_eq!(alice.add_gmail("not an address").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	let b = bob.add_gmail("bob@gmail.com").await.unwrap();
+
+	let track = NewTrack {
+		place: PLACE.into(),
+		lang: Some("fr".into()),
+		..Default::default()
+	};
+	let t = alice.track(a.id, &track).await.unwrap();
+	assert_eq!(bob.track(b.id, &track).await.unwrap().id, t.id, "one place, one target");
+	assert_eq!(e.client.targets().await.unwrap().len(), 1);
+	assert_eq!(bob.track(a.id, &track).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND), "alice's gmail is not bob's");
+
+	// the overview counts screenshots by when they were taken: one today, one a fortnight ago
+	let taken = |id: &str, days_ago: i64| {
+		let mut o = captured(id);
+		o.capture.as_mut().unwrap().captured_at = Timestamp::now() - jiff::SignedDuration::from_hours(24 * days_ago);
+		o
+	};
+	record(&e, t.id, vec![taken("r1", 0), taken("r2", 14), review("r3")]).await;
+	let overview = alice.overview().await.unwrap();
+	assert_eq!(overview.len(), 1);
+	let loc = &overview[0].locations[0];
+	assert_eq!(
+		(loc.target.id, loc.snapshots_7d, loc.snapshots_30d, loc.live, loc.removed, loc.reinstating),
+		(t.id, 1, 2, 3, 0, 0)
+	);
+	assert_eq!(loc.last_run_status, Some(review_archive::core::dto::RunStatus::Ok));
+
+	let board = alice.board(a.id, t.id).await.unwrap();
+	let url = board.snapshotted.iter().find_map(|c| c.review.capture_url.clone()).expect("r1 was captured");
+	assert!(alice.capture_png(&url).await.unwrap().starts_with(b"\x89PNG"));
+	assert!(e.client.capture_png(&url).await.is_ok(), "the operator sees everything");
+	assert_eq!(bob.board(a.id, t.id).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+
+	// once bob stops tracking the place, its screenshots are no longer his to see
+	assert!(bob.capture_png(&url).await.is_ok());
+	bob.untrack(b.id, t.id).await.unwrap();
+	assert_eq!(bob.capture_png(&url).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(bob.overview().await.unwrap()[0].locations, vec![]);
+	assert_eq!(alice.overview().await.unwrap()[0].locations.len(), 1, "alice's track stays");
+	e.server.abort();
+}
+
+/// A removed review moves to Reinstating when asked, back when withdrawn — on record
+/// either way — and returns to Snapshotted, with its appeal, once a scan lists it again.
+#[tokio::test]
+async fn a_reinstatement_is_asked_withdrawn_and_answered_by_a_scan() {
+	let e = env().await;
+	let alice = e.member("alice-token");
+	let g = alice.add_gmail("ops@gmail.com").await.unwrap();
+	let t = alice
+		.track(
+			g.id,
+			&NewTrack {
+				place: PLACE.into(),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap();
+	record(&e, t.id, vec![review("kept"), review("removed")]).await;
+	record(&e, t.id, vec![review("kept")]).await;
+
+	let columns = |b: &review_archive::core::dto::Board| {
+		let ids = |cs: &[review_archive::core::dto::BoardCard]| cs.iter().map(|c| c.review.source_review_id.clone()).collect::<Vec<_>>();
+		(ids(&b.snapshotted), ids(&b.removed), ids(&b.reinstating))
+	};
+	let board = alice.board(g.id, t.id).await.unwrap();
+	assert_eq!(columns(&board), (vec!["kept".into()], vec!["removed".into()], vec![]));
+	let (kept, removed) = (board.snapshotted[0].review.id, board.removed[0].review.id);
+
+	assert_eq!(
+		alice.reinstate(g.id, kept).await.unwrap_err().status(),
+		Some(StatusCode::BAD_REQUEST),
+		"a listed review has nothing to appeal"
+	);
+	let asked = alice.reinstate(g.id, removed).await.unwrap();
+	assert_eq!(alice.reinstate(g.id, removed).await.unwrap(), asked, "asking twice is the one appeal");
+	assert_eq!(columns(&alice.board(g.id, t.id).await.unwrap()), (vec!["kept".into()], vec![], vec!["removed".into()]));
+	assert_eq!(alice.overview().await.unwrap()[0].locations[0].reinstating, 1);
+
+	alice.withdraw_reinstatement(g.id, removed).await.unwrap();
+	assert_eq!(alice.withdraw_reinstatement(g.id, removed).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(columns(&alice.board(g.id, t.id).await.unwrap()), (vec!["kept".into()], vec!["removed".into()], vec![]));
+	alice.reinstate(g.id, removed).await.unwrap();
+	assert_eq!(alice.delete_gmail(g.id).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST), "appeals are kept");
+
+	record(&e, t.id, vec![review("kept"), review("removed")]).await;
+	let board = alice.board(g.id, t.id).await.unwrap();
+	assert_eq!(
+		columns(&board),
+		(vec!["removed".into(), "kept".into()], vec![], vec![]),
+		"newest first sighting first, then newest row"
+	);
+	let back = board.snapshotted.iter().find(|c| c.review.id == removed).unwrap();
+	assert!(back.reinstatement.as_ref().unwrap().reinstated_at.is_some(), "the badge: reinstated after its appeal");
+	e.server.abort();
+}
+
+/// A channel's destination has to be one Telegram can take, and one member's channels are
+/// not another's.
+#[tokio::test]
+async fn telegram_channels_are_the_members_own() {
+	let e = env().await;
+	let (alice, bob) = (e.member("alice-token"), e.member("bob-token"));
+	let ch = |destination: &str| NewTgChannel {
+		destination: destination.into(),
+		gmail_id: None,
+		events: vec![Event::ReviewGone],
+	};
+	let added = alice.add_tg_channel(&ch("-1002244305221/7")).await.unwrap();
+	assert_eq!(alice.add_tg_channel(&ch("#nope!")).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	assert_eq!(
+		alice.add_tg_channel(&NewTgChannel { events: vec![], ..ch("@chan") }).await.unwrap_err().status(),
+		Some(StatusCode::BAD_REQUEST)
+	);
+	assert_eq!(bob.tg_channels().await.unwrap(), vec![]);
+	assert_eq!(bob.delete_tg_channel(added.id).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(bob.test_tg_channel(added.id).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(alice.tg_channels().await.unwrap(), vec![added.clone()]);
+	alice.delete_tg_channel(added.id).await.unwrap();
+	assert_eq!(alice.tg_channels().await.unwrap(), vec![]);
 	e.server.abort();
 }

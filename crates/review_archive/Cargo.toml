@@ -17,7 +17,7 @@ default = ["maps", "store"]
 # source (Business Profiles through the official API, screenshots from the Maps page).
 maps = ["dep:chromiumoxide", "dep:futures"]
 # SQLite + content-addressed PNGs under a data dir, runs, stats, export, webhooks.
-store = ["dep:futures", "dep:hmac", "dep:sqlx", "dep:tempfile", "dep:zip"]
+store = ["dep:futures", "dep:hmac", "dep:sqlx", "dep:tempfile", "dep:tg_types", "dep:zip"]
 
 [dependencies]
 
@@ -29,7 +29,7 @@ futures = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 jiff.workspace = true
 miette.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 review_archive_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,6 +37,7 @@ sha2.workspace = true
 sqlx = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+tg_types = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "sync", "time", "rt", "macros", "net"] }
 tracing.workspace = true
 tracing-error.workspace = true

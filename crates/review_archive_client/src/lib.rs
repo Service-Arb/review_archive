@@ -30,8 +30,8 @@ use std::fmt;
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 pub use review_archive_core::dto;
 use review_archive_core::dto::{
-	CaptureRequest, DayStats, ErrorBody, ExportQuery, JobAccepted, JobDto, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail,
-	TargetDto, TargetPatch, WaitQuery, WebhookDto,
+	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, NewGmail, NewTarget, NewTgChannel, NewTrack, NewWebhook, ReinstatementDto,
+	ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
@@ -234,6 +234,71 @@ impl Client {
 	/// `DELETE /webhooks/{id}`.
 	pub async fn delete_webhook(&self, id: i64) -> Result<(), Error> {
 		Self::send(self.request(Method::DELETE, &format!("webhooks/{id}"))?).await?;
+		Ok(())
+	}
+
+	/// `GET /me/overview`: the member's gmails, each with its places.
+	pub async fn overview(&self) -> Result<Vec<GmailOverview>, Error> {
+		Self::json(self.request(Method::GET, "me/overview")?).await
+	}
+
+	/// `POST /me/gmails`.
+	pub async fn add_gmail(&self, gmail: &str) -> Result<GmailDto, Error> {
+		Self::json(self.request(Method::POST, "me/gmails")?.json(&NewGmail { gmail: gmail.to_owned() })).await
+	}
+
+	/// `DELETE /me/gmails/{gmail}`.
+	pub async fn delete_gmail(&self, gmail: i64) -> Result<(), Error> {
+		Self::send(self.request(Method::DELETE, &format!("me/gmails/{gmail}"))?).await?;
+		Ok(())
+	}
+
+	/// `POST /me/gmails/{gmail}/tracks`: the place's target, shared or new.
+	pub async fn track(&self, gmail: i64, req: &NewTrack) -> Result<TargetDto, Error> {
+		Self::json(self.request(Method::POST, &format!("me/gmails/{gmail}/tracks"))?.json(req)).await
+	}
+
+	/// `DELETE /me/gmails/{gmail}/tracks/{target}`.
+	pub async fn untrack(&self, gmail: i64, target: i64) -> Result<(), Error> {
+		Self::send(self.request(Method::DELETE, &format!("me/gmails/{gmail}/tracks/{target}"))?).await?;
+		Ok(())
+	}
+
+	/// `GET /me/gmails/{gmail}/locations/{target}/board`.
+	pub async fn board(&self, gmail: i64, target: i64) -> Result<Board, Error> {
+		Self::json(self.request(Method::GET, &format!("me/gmails/{gmail}/locations/{target}/board"))?).await
+	}
+
+	/// `PUT /me/gmails/{gmail}/reinstatements/{review}`: reinstatement asked of Google, now.
+	pub async fn reinstate(&self, gmail: i64, review: i64) -> Result<ReinstatementDto, Error> {
+		Self::json(self.request(Method::PUT, &format!("me/gmails/{gmail}/reinstatements/{review}"))?).await
+	}
+
+	/// `DELETE /me/gmails/{gmail}/reinstatements/{review}`: withdrawn, kept on record.
+	pub async fn withdraw_reinstatement(&self, gmail: i64, review: i64) -> Result<(), Error> {
+		Self::send(self.request(Method::DELETE, &format!("me/gmails/{gmail}/reinstatements/{review}"))?).await?;
+		Ok(())
+	}
+
+	/// `GET /me/tg-channels`.
+	pub async fn tg_channels(&self) -> Result<Vec<TgChannelDto>, Error> {
+		Self::json(self.request(Method::GET, "me/tg-channels")?).await
+	}
+
+	/// `POST /me/tg-channels`.
+	pub async fn add_tg_channel(&self, ch: &NewTgChannel) -> Result<TgChannelDto, Error> {
+		Self::json(self.request(Method::POST, "me/tg-channels")?.json(ch)).await
+	}
+
+	/// `DELETE /me/tg-channels/{id}`.
+	pub async fn delete_tg_channel(&self, id: i64) -> Result<(), Error> {
+		Self::send(self.request(Method::DELETE, &format!("me/tg-channels/{id}"))?).await?;
+		Ok(())
+	}
+
+	/// `POST /me/tg-channels/{id}/test`: a line posted now; Telegram's refusal as a 400.
+	pub async fn test_tg_channel(&self, id: i64) -> Result<(), Error> {
+		Self::send(self.request(Method::POST, &format!("me/tg-channels/{id}/test"))?).await?;
 		Ok(())
 	}
 }

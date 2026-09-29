@@ -1,18 +1,20 @@
-//! The HTTP API: everything the CLI does, for other services. Everything but `/health`
-//! and `/openapi.json` wants the bearer token. JSON in and out — errors included, the
-//! ones axum's extractors raise too — with the DTOs of `review_archive_core::dto`. Every
-//! handler only translates: what to do, and what the caller got wrong, is the facade's.
+//! The HTTP API: everything the CLI does, for other services, and `/me` for members.
+//! Everything but `/health`, `/openapi.json` and the MFE's files wants a bearer (see
+//! [`crate::auth`]): the operator's routes refuse members, `/me` refuses the operator.
+//! JSON in and out — errors included, the ones axum's extractors raise too — with the
+//! DTOs of `review_archive_core::dto`. Every handler only translates: what to do, and
+//! what the caller got wrong, is the facade's.
 
 use std::{io::Seek, sync::Arc, time::Duration};
 
 use axum::{
 	Json, Router,
 	extract::{
-		FromRequest, FromRequestParts, Request, State,
+		FromRequest, FromRequestParts, State,
 		rejection::{JsonRejection, PathRejection, QueryRejection},
 	},
 	http::{HeaderMap, StatusCode, header},
-	middleware::{self, Next},
+	middleware,
 	response::{IntoResponse, Response},
 	routing::{get, post},
 };
@@ -20,19 +22,21 @@ use review_archive::{Archive, Rejected, store::export::Destination};
 use review_archive_core::{
 	ReviewId, TargetId,
 	dto::{
-		CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, JobAccepted, JobDto, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery,
-		TargetDetail, TargetDto, TargetPatch, WaitQuery, WebhookDto, stats_csv,
+		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, NewGmail, NewTarget, NewTgChannel, NewTrack, NewWebhook,
+		ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto, stats_csv,
 	},
 };
-use sha2::{Digest, Sha256};
 use tower::limit::GlobalConcurrencyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
+use tower_http::{cors::CorsLayer, services::ServeDir, timeout::TimeoutLayer};
 use utoipa::{
 	OpenApi,
 	openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 
-use crate::worker::Signals;
+use crate::{
+	auth::{Auth, Caller, Member, admin_only, authenticate},
+	worker::Signals,
+};
 
 /// The longest `POST /captures?wait=` holds a request.
 pub const MAX_WAIT: Duration = Duration::from_secs(120);
@@ -44,59 +48,72 @@ const MAX_CONCURRENT: usize = 64;
 #[derive(Clone)]
 pub struct AppState {
 	pub archive: Archive,
-	/// SHA-256 of the token: compared as digests, so the comparison time says nothing about it.
-	pub token_digest: Arc<[u8; 32]>,
+	pub auth: Arc<Auth>,
 	pub signals: Arc<Signals>,
 }
 
 impl AppState {
-	pub fn new(archive: Archive, token: &str, signals: Arc<Signals>) -> Self {
+	pub fn new(archive: Archive, auth: Auth, signals: Arc<Signals>) -> Self {
 		Self {
 			archive,
-			token_digest: Arc::new(Sha256::digest(token.as_bytes()).into()),
+			auth: Arc::new(auth),
 			signals,
 		}
 	}
 }
 
-pub fn router(state: AppState) -> Router {
-	let timed = Router::new()
+/// `mfe`: the built dashboard bundle, served under `/mfe/` to whichever page embeds it.
+pub fn router(state: AppState, mfe: Option<&std::path::Path>) -> Router {
+	let admin = Router::new()
 		.route("/targets", get(targets).post(add_target))
 		.route("/targets/{id}", get(target).patch(patch_target).delete(delete_target))
 		.route("/targets/{id}/reviews", get(reviews))
 		.route("/targets/{id}/runs", get(runs))
 		.route("/targets/{id}/scan", post(scan))
 		.route("/captures", post(capture))
-		.route("/captures/{file}", get(capture_png))
 		.route("/jobs/{id}", get(job))
 		.route("/reviews/{id}", get(review))
 		.route("/stats", get(stats))
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
+		.route_layer(middleware::from_fn(admin_only));
+	let me = Router::new()
+		.route("/me/overview", get(overview))
+		.route("/me/gmails", post(add_gmail))
+		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail))
+		.route("/me/gmails/{gmail}/tracks", post(track))
+		.route("/me/gmails/{gmail}/tracks/{target}", axum::routing::delete(untrack))
+		.route("/me/gmails/{gmail}/locations/{target}/board", get(board))
+		.route("/me/gmails/{gmail}/reinstatements/{review}", axum::routing::put(reinstate).delete(withdraw))
+		.route("/me/tg-channels", get(tg_channels).post(add_tg_channel))
+		.route("/me/tg-channels/{id}", axum::routing::delete(delete_tg_channel))
+		.route("/me/tg-channels/{id}/test", post(test_tg_channel));
+	let timed = admin
+		.merge(me)
+		.route("/captures/{file}", get(capture_png))
 		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
-		.route("/targets/{id}/export.zip", get(export_zip))
+		.merge(Router::new().route("/targets/{id}/export.zip", get(export_zip)).route_layer(middleware::from_fn(admin_only)))
 		.layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT))
-		.route_layer(middleware::from_fn_with_state(state.clone(), auth));
+		.route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 	// the probes answer whatever load the API is under
-	Router::new()
+	let mut app = Router::new()
 		.route("/health", get(|| async { "ok" }))
 		.route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }))
-		.merge(authed)
-		.with_state(state)
-}
-
-async fn auth(State(state): State<AppState>, headers: HeaderMap, req: Request, next: Next) -> Response {
-	let given = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
-	let ok = given.is_some_and(|t| {
-		let d: [u8; 32] = Sha256::digest(t.as_bytes()).into();
-		d.iter().zip(state.token_digest.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-	});
-	if !ok {
-		return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], Json(ErrorBody { error: "unauthorized".into() })).into_response();
+		.merge(authed);
+	if let Some(dir) = mfe {
+		app = app.nest_service("/mfe", ServeDir::new(dir));
 	}
-	next.run(req).await
+	// Bearers travel in a header, never a cookie: a page on another origin can only use the
+	// API with a token it was given, so any origin may ask.
+	app.layer(
+		CorsLayer::new()
+			.allow_origin(tower_http::cors::Any)
+			.allow_methods(tower_http::cors::Any)
+			.allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+	)
+	.with_state(state)
 }
 
 pub struct ApiError(StatusCode, String);
@@ -242,12 +259,16 @@ async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Jso
 	Ok(Json(s.archive.review(ReviewId(id)).await?))
 }
 
-/// A capture's PNG, provenance in its `tEXt` chunks. Only what the archive recorded.
+/// A capture's PNG, provenance in its `tEXt` chunks. Only what the archive recorded; for a
+/// member, only what shows a review of a place they track.
 #[utoipa::path(get, path = "/captures/{sha256}.png", tag = "reviews", params(("sha256" = String, Path)),
 	responses((status = 200, content_type = "image/png"), (status = 404, body = ErrorBody)))]
-async fn capture_png(State(s): State<AppState>, Path(file): Path<String>) -> ApiResult<Response> {
+async fn capture_png(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
 	let sha = file.strip_suffix(".png").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
-	let png = s.archive.capture_png(sha).await?;
+	let png = match caller {
+		Caller::Admin => s.archive.capture_png(sha).await?,
+		Caller::Member(m) => s.archive.member_capture_png(&m, sha).await?,
+	};
 	// behind the token, so no shared cache may keep it; the name is its hash, so it never changes
 	Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], png).into_response())
 }
@@ -305,6 +326,92 @@ async fn webhooks(State(s): State<AppState>) -> ApiResult<Json<Vec<WebhookDto>>>
 #[utoipa::path(delete, path = "/webhooks/{id}", tag = "webhooks", params(("id" = i64, Path)), responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
 	s.archive.delete_webhook(id).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// The member's gmails, each with its places, by screenshots over the last 7 days.
+#[utoipa::path(get, path = "/me/overview", tag = "me", responses((status = 200, body = [GmailOverview])))]
+async fn overview(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<GmailOverview>>> {
+	Ok(Json(s.archive.overview(&m).await?))
+}
+
+/// Adds a managing gmail: the Google account a group of the member's places is managed from.
+#[utoipa::path(post, path = "/me/gmails", tag = "me", request_body = NewGmail, responses((status = 201, body = GmailDto), (status = 400, body = ErrorBody)))]
+async fn add_gmail(State(s): State<AppState>, Member(m): Member, JsonBody(req): JsonBody<NewGmail>) -> ApiResult<(StatusCode, Json<GmailDto>)> {
+	Ok((StatusCode::CREATED, Json(s.archive.add_gmail(&m, &req).await?)))
+}
+
+/// Removes a gmail with its tracks and the Telegram channels scoped to it. A gmail with
+/// reinstatement requests on record is kept (400).
+#[utoipa::path(delete, path = "/me/gmails/{gmail}", tag = "me", params(("gmail" = i64, Path)), responses((status = 204), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn delete_gmail(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>) -> ApiResult<StatusCode> {
+	s.archive.delete_gmail(&m, gmail).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tracks a place under the gmail. A place already watched (same place, language and
+/// source) is shared, not scanned twice.
+#[utoipa::path(post, path = "/me/gmails/{gmail}/tracks", tag = "me", params(("gmail" = i64, Path)), request_body = NewTrack,
+	responses((status = 201, body = TargetDto), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn track(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>, JsonBody(req): JsonBody<NewTrack>) -> ApiResult<(StatusCode, Json<TargetDto>)> {
+	Ok((StatusCode::CREATED, Json(s.archive.track(&m, gmail, &req).await?)))
+}
+
+/// Stops tracking; the place and its archive stay.
+#[utoipa::path(delete, path = "/me/gmails/{gmail}/tracks/{target}", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)),
+	responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn untrack(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>) -> ApiResult<StatusCode> {
+	s.archive.untrack(&m, gmail, TargetId(target)).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// A tracked place's reviews in three columns: snapshotted, removed, reinstating.
+#[utoipa::path(get, path = "/me/gmails/{gmail}/locations/{target}/board", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)),
+	responses((status = 200, body = Board), (status = 404, body = ErrorBody)))]
+async fn board(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>) -> ApiResult<Json<Board>> {
+	Ok(Json(s.archive.board(&m, gmail, TargetId(target)).await?))
+}
+
+/// Records that the removed review's reinstatement was asked of Google, now. Asking again
+/// while one is open answers the open one.
+#[utoipa::path(put, path = "/me/gmails/{gmail}/reinstatements/{review}", tag = "me", params(("gmail" = i64, Path), ("review" = i64, Path)),
+	responses((status = 200, body = ReinstatementDto), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn reinstate(State(s): State<AppState>, Member(m): Member, Path((gmail, review)): Path<(i64, i64)>) -> ApiResult<Json<ReinstatementDto>> {
+	Ok(Json(s.archive.reinstate(&m, gmail, ReviewId(review)).await?))
+}
+
+/// Withdraws the open request; it stays on record as withdrawn.
+#[utoipa::path(delete, path = "/me/gmails/{gmail}/reinstatements/{review}", tag = "me", params(("gmail" = i64, Path), ("review" = i64, Path)),
+	responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn withdraw(State(s): State<AppState>, Member(m): Member, Path((gmail, review)): Path<(i64, i64)>) -> ApiResult<StatusCode> {
+	s.archive.withdraw_reinstatement(&m, gmail, ReviewId(review)).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(get, path = "/me/tg-channels", tag = "me", responses((status = 200, body = [TgChannelDto])))]
+async fn tg_channels(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<TgChannelDto>>> {
+	Ok(Json(s.archive.tg_channels(&m).await?))
+}
+
+/// Sends the events of the member's places to a Telegram chat, through the archive's bot —
+/// which has to be in the chat, allowed to post. A removed review comes with its screenshot.
+#[utoipa::path(post, path = "/me/tg-channels", tag = "me", request_body = NewTgChannel, responses((status = 201, body = TgChannelDto), (status = 400, body = ErrorBody)))]
+async fn add_tg_channel(State(s): State<AppState>, Member(m): Member, JsonBody(req): JsonBody<NewTgChannel>) -> ApiResult<(StatusCode, Json<TgChannelDto>)> {
+	Ok((StatusCode::CREATED, Json(s.archive.add_tg_channel(&m, &req).await?)))
+}
+
+/// Removes a channel and what it was still owed.
+#[utoipa::path(delete, path = "/me/tg-channels/{id}", tag = "me", params(("id" = i64, Path)), responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn delete_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+	s.archive.delete_tg_channel(&m, id).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// Posts a line to the channel now. 400 with Telegram's reason when it refuses.
+#[utoipa::path(post, path = "/me/tg-channels/{id}/test", tag = "me", params(("id" = i64, Path)),
+	responses((status = 204), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn test_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+	s.archive.test_tg_channel(&m, id).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 

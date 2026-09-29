@@ -109,14 +109,25 @@ impl Default for Defaults {
 	}
 }
 
-/// Where webhooks may be sent.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Where events may be sent.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WebhookConfig {
 	/// The only hosts webhooks may point at, private addresses included (a service in the
 	/// same cluster). Empty: any host, as long as every address it has is public — never
 	/// loopback, private, link-local or the like.
 	pub allowed_hosts: Vec<String>,
+	/// The Telegram Bot API members' channels are posted through.
+	pub telegram_api: String,
+}
+
+impl Default for WebhookConfig {
+	fn default() -> Self {
+		Self {
+			allowed_hosts: vec![],
+			telegram_api: "https://api.telegram.org/".into(),
+		}
+	}
 }
 
 /// API keys and tokens. Each is needed only by what uses it, and its absence fails only
@@ -130,6 +141,8 @@ pub struct Secrets {
 	/// `GBP_REFRESH_TOKEN`).
 	#[cfg(feature = "maps")]
 	pub gbp: Option<crate::sources::gbp::Credentials>,
+	/// The bot members' Telegram channels are posted by (`TELEGRAM_BOT_TOKEN`).
+	pub telegram_bot_token: Option<String>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -138,6 +151,7 @@ impl std::fmt::Debug for Secrets {
 		d.field("google_maps_key", &self.google_maps_key.as_ref().map(|_| "***"));
 		#[cfg(feature = "maps")]
 		d.field("gbp", &self.gbp.as_ref().map(|_| "***"));
+		d.field("telegram_bot_token", &self.telegram_bot_token.as_ref().map(|_| "***"));
 		d.finish()
 	}
 }

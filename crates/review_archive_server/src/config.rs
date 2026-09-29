@@ -21,6 +21,8 @@ pub struct Config {
 	pub browser: BrowserConfig,
 	pub defaults: Defaults,
 	pub webhooks: WebhookConfig,
+	/// The dashboard's built bundle, served under `/mfe/`; not served when unset.
+	pub mfe_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
 			browser: BrowserConfig::default(),
 			defaults: Defaults::default(),
 			webhooks: WebhookConfig::default(),
+			mfe_dir: None,
 		}
 	}
 }
