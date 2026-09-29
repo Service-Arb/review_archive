@@ -17,15 +17,17 @@ use review_archive::{
 };
 use review_archive_client::{Captured, Client};
 use review_archive_server::{
-	auth::{Auth, Introspect},
+	auth::Auth,
 	http::{AppState, router},
 	worker::Signals,
 };
 
 const TOKEN: &str = "test-token-0123456789";
-/// Playbook's side: the introspection secret, and whose each access token is.
-const INTROSPECT_SECRET: &str = "introspect-secret-0123";
-const MEMBERS: [(&str, &str); 2] = [("alice-token", "Alice@x.com"), ("bob-token", "bob@x.com")];
+/// valeratrades.com's side: the key its `va_access` cookies are signed with.
+const SSO_PRIVATE: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA3bBKSXvm87i5bc706Y1QG1uj5EmbgUZygHJGfO1XYj\n-----END PRIVATE KEY-----\n";
+const SSO_PUBLIC: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAws8sYuYGZt4/OjCm05rzUQYOTAWBxVHPL1Fdg74KyV4=\n-----END PUBLIC KEY-----\n";
+const ALICE: &str = "Alice@x.com";
+const BOB: &str = "bob@x.com";
 const PLACE: &str = "ChIJLU7jZClu5kcR4PcOOO6p3I0";
 
 struct Env {
@@ -47,9 +49,8 @@ async fn env() -> Env {
 	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
 	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
-	let playbook = introspection().await;
-	let auth = Auth::new(TOKEN, Some(Introspect::new(playbook.parse().unwrap(), INTROSPECT_SECRET.into()).unwrap()));
-	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None);
+	let auth = Auth::new(TOKEN, Some(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap()));
+	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None, None);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -64,32 +65,27 @@ async fn env() -> Env {
 	}
 }
 
-/// Playbook's `POST /introspect`, answering for [`MEMBERS`].
-async fn introspection() -> String {
-	async fn introspect(headers: axum::http::HeaderMap, axum::Form(f): axum::Form<std::collections::HashMap<String, String>>) -> axum::response::Response {
-		use axum::response::IntoResponse;
-		if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {INTROSPECT_SECRET}")) {
-			return StatusCode::UNAUTHORIZED.into_response();
-		}
-		let email = MEMBERS.iter().find(|(t, _)| *t == f["token"]).map(|(_, e)| *e);
-		let exp = Timestamp::now().as_second() + 3600;
-		axum::Json(match email {
-			Some(email) => serde_json::json!({ "active": true, "email": email, "exp": exp }),
-			None => serde_json::json!({ "active": false }),
-		})
-		.into_response()
-	}
-	let app = axum::Router::new().route("/introspect", axum::routing::post(introspect));
-	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-	let url = format!("http://{}/introspect", listener.local_addr().unwrap());
-	tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-	url
-}
-
 impl Env {
-	/// The client as a member holding this playbook token.
-	fn member(&self, token: &str) -> Client {
-		Client::new(&self.base, token).unwrap()
+	/// The client as a browser on the archive's pages, signed in as a `service-arb` member.
+	fn member(&self, email: &str) -> Client {
+		self.signed_in(email, false, &["service-arb"], "same-origin")
+	}
+
+	fn signed_in(&self, email: &str, admin: bool, groups: &[&str], fetch_site: &str) -> Client {
+		let claims = va_sso::Claims {
+			sub: email.into(),
+			email: email.into(),
+			username: email.into(),
+			admin,
+			groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+			exp: Timestamp::now().as_second() + 900,
+		};
+		let cookie = format!("{}={}", va_sso::COOKIE, va_sso::mint(SSO_PRIVATE, claims).unwrap());
+		let headers = reqwest::header::HeaderMap::from_iter([
+			(reqwest::header::COOKIE, cookie.parse().unwrap()),
+			("sec-fetch-site".parse().unwrap(), fetch_site.parse().unwrap()),
+		]);
+		Client::ambient(reqwest::Client::builder().default_headers(headers).build().unwrap(), &self.base).unwrap()
 	}
 }
 
@@ -666,16 +662,51 @@ async fn a_wait_beyond_the_cap_still_answers_when_the_job_ends() {
 	e.server.abort();
 }
 
-/// The operator's routes are not a member's, and `/me` is not the operator's.
+/// The operator's routes are not a member's, and `/me` is not the operator token's; a
+/// site admin signed in gets both. Someone signed in outside `service-arb` gets neither.
 #[tokio::test]
 async fn members_and_the_operator_keep_to_their_routes() {
 	let e = env().await;
-	let alice = e.member("alice-token");
+	let alice = e.member(ALICE);
 	assert_eq!(alice.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	assert_eq!(alice.webhooks().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	assert_eq!(e.client.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(e.member("stranger-token").overview().await.unwrap_err().status(), Some(StatusCode::UNAUTHORIZED));
 	assert_eq!(alice.overview().await.unwrap(), vec![]);
+
+	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
+	assert_eq!(admin.targets().await.unwrap(), vec![]);
+	assert_eq!(admin.overview().await.unwrap(), vec![]);
+
+	let stranger = e.signed_in("stranger@x.com", false, &["another-group"], "same-origin");
+	assert_eq!(stranger.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	e.server.abort();
+}
+
+/// A sign-in cookie reads from anywhere it is sent, but writes only from the archive's own
+/// pages; one signed by another key, or expired, is no sign-in.
+#[tokio::test]
+async fn a_cookie_writes_only_from_this_origin_and_only_while_valid() {
+	let e = env().await;
+	let elsewhere = e.signed_in(ALICE, false, &["service-arb"], "cross-site");
+	assert_eq!(elsewhere.overview().await.unwrap(), vec![]);
+	assert_eq!(elsewhere.add_gmail("ops@gmail.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	e.member(ALICE).add_gmail("ops@gmail.com").await.unwrap();
+
+	let http = reqwest::Client::new();
+	let ask = async |cookie: String| http.get(format!("{}/me/overview", e.base)).header("cookie", cookie).send().await.unwrap().status();
+	let claims = |exp: i64| va_sso::Claims {
+		sub: "a".into(),
+		email: ALICE.into(),
+		username: "a".into(),
+		admin: false,
+		groups: vec!["service-arb".into()],
+		exp,
+	};
+	let other_key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHz7B0H6oZ1y3Yb8hB5o2c0X9m1wV6o1b8wXcY0f3s1a\n-----END PRIVATE KEY-----\n";
+	let forged = va_sso::mint(other_key, claims(Timestamp::now().as_second() + 900)).unwrap();
+	assert_eq!(ask(format!("va_access={forged}")).await, StatusCode::UNAUTHORIZED);
+	let expired = va_sso::mint(SSO_PRIVATE, claims(Timestamp::now().as_second() - 3600)).unwrap();
+	assert_eq!(ask(format!("va_access={expired}")).await, StatusCode::UNAUTHORIZED);
 	e.server.abort();
 }
 
@@ -684,7 +715,7 @@ async fn members_and_the_operator_keep_to_their_routes() {
 #[tokio::test]
 async fn members_share_places_but_see_only_their_own() {
 	let e = env().await;
-	let (alice, bob) = (e.member("alice-token"), e.member("bob-token"));
+	let (alice, bob) = (e.member(ALICE), e.member(BOB));
 	let a = alice.add_gmail(" Ops.Paris@gmail.com ").await.unwrap();
 	assert_eq!(a.gmail, "ops.paris@gmail.com");
 	assert_eq!(alice.add_gmail("ops.paris@gmail.com").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST), "twice");
@@ -737,7 +768,7 @@ async fn members_share_places_but_see_only_their_own() {
 #[tokio::test]
 async fn a_reinstatement_is_asked_withdrawn_and_answered_by_a_scan() {
 	let e = env().await;
-	let alice = e.member("alice-token");
+	let alice = e.member(ALICE);
 	let g = alice.add_gmail("ops@gmail.com").await.unwrap();
 	let t = alice
 		.track(
@@ -793,7 +824,7 @@ async fn a_reinstatement_is_asked_withdrawn_and_answered_by_a_scan() {
 #[tokio::test]
 async fn telegram_channels_are_the_members_own() {
 	let e = env().await;
-	let (alice, bob) = (e.member("alice-token"), e.member("bob-token"));
+	let (alice, bob) = (e.member(ALICE), e.member(BOB));
 	let ch = |destination: &str| NewTgChannel {
 		destination: destination.into(),
 		gmail_id: None,

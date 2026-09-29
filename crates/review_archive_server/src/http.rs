@@ -1,6 +1,7 @@
-//! The HTTP API: everything the CLI does, for other services, and `/me` for members.
-//! Everything but `/health`, `/openapi.json` and the MFE's files wants a bearer (see
-//! [`crate::auth`]): the operator's routes refuse members, `/me` refuses the operator.
+//! The HTTP API: everything the CLI does, for other services, and `/me` for members; at `/`,
+//! the dashboard's page. Everything but `/`, `/health`, `/openapi.json` and the MFE's files
+//! wants a caller (see [`crate::auth`]): the operator's routes refuse members, `/me` refuses
+//! the operator's token.
 //! JSON in and out — errors included, the ones axum's extractors raise too — with the
 //! DTOs of `review_archive_core::dto`. Every handler only translates: what to do, and
 //! what the caller got wrong, is the facade's.
@@ -27,7 +28,7 @@ use review_archive_core::{
 	},
 };
 use tower::limit::GlobalConcurrencyLimitLayer;
-use tower_http::{cors::CorsLayer, services::ServeDir, timeout::TimeoutLayer};
+use tower_http::{services::ServeDir, timeout::TimeoutLayer};
 use utoipa::{
 	OpenApi,
 	openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
@@ -62,8 +63,9 @@ impl AppState {
 	}
 }
 
-/// `mfe`: the built dashboard bundle, served under `/mfe/` to whichever page embeds it.
-pub fn router(state: AppState, mfe: Option<&std::path::Path>) -> Router {
+/// `mfe`: the built dashboard bundle, served under `/mfe/`. `sign_in`: where the page sends a
+/// browser without a live `va_access` cookie; with both, `/` is the dashboard's page.
+pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&str>) -> Router {
 	let admin = Router::new()
 		.route("/targets", get(targets).post(add_target))
 		.route("/targets/{id}", get(target).patch(patch_target).delete(delete_target))
@@ -104,16 +106,12 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>) -> Router {
 		.merge(authed);
 	if let Some(dir) = mfe {
 		app = app.nest_service("/mfe", ServeDir::new(dir));
+		if let Some(sign_in) = sign_in {
+			let page = include_str!("../../review_archive_web/index.html").replace("{sign_in}", sign_in);
+			app = app.route("/", get(|| async { axum::response::Html(page) }));
+		}
 	}
-	// Bearers travel in a header, never a cookie: a page on another origin can only use the
-	// API with a token it was given, so any origin may ask.
-	app.layer(
-		CorsLayer::new()
-			.allow_origin(tower_http::cors::Any)
-			.allow_methods(tower_http::cors::Any)
-			.allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
-	)
-	.with_state(state)
+	app.with_state(state)
 }
 
 pub struct ApiError(StatusCode, String);
@@ -265,11 +263,12 @@ async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Jso
 	responses((status = 200, content_type = "image/png"), (status = 404, body = ErrorBody)))]
 async fn capture_png(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
 	let sha = file.strip_suffix(".png").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
-	let png = match caller {
-		Caller::Admin => s.archive.capture_png(sha).await?,
-		Caller::Member(m) => s.archive.member_capture_png(&m, sha).await?,
+	let png = match (caller.admin, caller.email) {
+		(true, _) => s.archive.capture_png(sha).await?,
+		(false, Some(m)) => s.archive.member_capture_png(&m, sha).await?,
+		(false, None) => unreachable!("a caller is an admin or signed in"),
 	};
-	// behind the token, so no shared cache may keep it; the name is its hash, so it never changes
+	// behind auth, so no shared cache may keep it; the name is its hash, so it never changes
 	Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], png).into_response())
 }
 

@@ -21,11 +21,11 @@ ev_lib::settings! {
 		gbp_client_secret: Option<String>,
 		#[secret]
 		gbp_refresh_token: Option<String>,
-		/// Playbook's token introspection (`{base}/introspect`): members' tokens are checked
-		/// there. With its secret; both or neither. Unset: only the operator's token works.
-		auth_introspect_url: Option<String>,
-		#[secret]
-		introspect_secret: Option<String>,
+		/// valeratrades.com's public key (PEM) for the `va_access` sign-in cookie, and its
+		/// `/auth/refresh`, where a browser without a live cookie is sent. Both or neither;
+		/// unset, only the operator's token works.
+		sso_public_key: Option<String>,
+		sso_refresh_url: Option<String>,
 		/// The bot members' Telegram channels are posted by.
 		#[secret]
 		telegram_bot_token: Option<String>,
@@ -59,15 +59,16 @@ impl Settings {
 		}
 	}
 
-	/// How members' tokens are checked: `None` takes only the operator's.
-	pub fn introspect(&self) -> eyre::Result<Option<review_archive_server::auth::Introspect>> {
-		match (&self.auth_introspect_url, &self.introspect_secret) {
-			(Some(url), Some(secret)) => Ok(Some(review_archive_server::auth::Introspect::new(
-				url.parse().map_err(|e| eyre::eyre!("AUTH_INTROSPECT_URL is not a URL: {e}"))?,
-				secret.clone(),
-			)?)),
+	/// The sign-in cookie's verifier and where to sign in: `None` takes only the operator's token.
+	pub fn sso(&self) -> eyre::Result<Option<(va_sso::Verifier, String)>> {
+		match (&self.sso_public_key, &self.sso_refresh_url) {
+			(Some(key), Some(url)) => {
+				let verifier = va_sso::Verifier::try_new(key).map_err(|e| eyre::eyre!("SSO_PUBLIC_KEY is not an Ed25519 public key PEM: {e}"))?;
+				eyre::ensure!(url.starts_with("https://") || url.starts_with("http://"), "SSO_REFRESH_URL is not a URL: {url}");
+				Ok(Some((verifier, url.clone())))
+			}
 			(None, None) => Ok(None),
-			_ => eyre::bail!("AUTH_INTROSPECT_URL and INTROSPECT_SECRET go together: set both, or neither"),
+			_ => eyre::bail!("SSO_PUBLIC_KEY and SSO_REFRESH_URL go together: set both, or neither"),
 		}
 	}
 
@@ -124,8 +125,8 @@ mod tests {
 				"GBP_CLIENT_ID",
 				"GBP_CLIENT_SECRET",
 				"GBP_REFRESH_TOKEN",
-				"AUTH_INTROSPECT_URL",
-				"INTROSPECT_SECRET",
+				"SSO_PUBLIC_KEY",
+				"SSO_REFRESH_URL",
 				"TELEGRAM_BOT_TOKEN",
 				"SENTRY_DSN",
 				"ALERT_WEBHOOK_ERROR",

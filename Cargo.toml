@@ -22,7 +22,6 @@ review_archive_core = { path = "crates/review_archive_core", version = "0.1.0" }
 review_archive_server = { path = "crates/review_archive_server", version = "0.1.0" }
 
 axum = "0.8"
-base64 = "0.22"
 browser_manipulation = { git = "https://github.com/valeratrades/browser_manipulation", tag = "v0.2.1" }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
@@ -55,6 +54,7 @@ tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = "5"
+va_sso = "0.1"
 v_utils = { version = "2.19", default-features = false, features = ["macros"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

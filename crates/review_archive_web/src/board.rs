@@ -5,7 +5,7 @@
 use dioxus::{prelude::*, web::WebEventExt};
 use review_archive_client::dto::{BoardCard, GmailDto, LocationSummary};
 
-use crate::{Badge, Refresh, Token, act, ago, api};
+use crate::{Badge, Refresh, act, ago, api, shown};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Column {
@@ -16,18 +16,16 @@ enum Column {
 
 #[component]
 pub fn Board(gmail: GmailDto, location: LocationSummary, on_back: EventHandler<()>) -> Element {
-	let Token(token) = use_context();
 	let Refresh(refresh) = use_context();
 	let (g, target) = (gmail.id, location.target.id);
 	let board = use_resource(move || async move {
 		refresh();
-		let t = token()?;
-		Some(api(&t).board(g, target).await.map_err(|e| e.to_string()))
+		api().board(g, target).await.map_err(shown)
 	});
 	let dragging = use_signal(|| None::<(i64, Column)>);
 	let board = match &*board.read() {
-		Some(Some(Ok(b))) => b.clone(),
-		Some(Some(Err(e))) => return rsx! { div { class: "p-6 text-bad", "{e}" } },
+		Some(Ok(b)) => b.clone(),
+		Some(Err(e)) => return rsx! { div { class: "p-6 text-bad", "{e}" } },
 		_ => return rsx! { div { class: "p-6 text-muted", "Loading…" } },
 	};
 	rsx! {
@@ -116,7 +114,7 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 			},
 			ondragend: move |_| dragging.set(None),
 			if let Some(url) = r.capture_url.clone() {
-				Shot { url }
+				img { class: "w-full rounded-md bg-shot", src: "{url}" }
 			}
 			div { class: "mt-2 flex items-center gap-2",
 				span { class: "text-warn", "{stars}" }
@@ -140,35 +138,4 @@ fn days_between(from: &str, to: &str) -> i64 {
 		(Ok(a), Ok(b)) => (b.as_second() - a.as_second()) / 86_400,
 		_ => unreachable!("the archive writes timestamps in one shape"),
 	}
-}
-
-/// A capture, fetched with the member's token (an `<img src>` could not send it) and shown
-/// from an object URL.
-#[component]
-fn Shot(url: String) -> Element {
-	let Token(token) = use_context();
-	let src = use_resource(move || {
-		let url = url.clone();
-		async move {
-			let t = token()?;
-			Some(match api(&t).capture_png(&url).await {
-				Ok(png) => Ok(object_url(&png)),
-				Err(e) => Err(e.to_string()),
-			})
-		}
-	});
-	match &*src.read() {
-		Some(Some(Ok(src))) => rsx! { img { class: "w-full rounded-md bg-shot", src: "{src}" } },
-		Some(Some(Err(e))) => rsx! { div { class: "rounded-md bg-shot p-2 text-[11px] text-bad", "{e}" } },
-		_ => rsx! { div { class: "h-28 rounded-md bg-shot" } },
-	}
-}
-
-// ponytail: object URLs are never revoked; the images stay until the page goes, fine for a board's worth
-fn object_url(png: &[u8]) -> String {
-	let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(png));
-	let opts = web_sys::BlobPropertyBag::new();
-	opts.set_type("image/png");
-	let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).expect("a Blob from bytes");
-	web_sys::Url::create_object_url_with_blob(&blob).expect("an object URL for a Blob")
 }

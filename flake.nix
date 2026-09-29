@@ -148,8 +148,10 @@
         };
 
         # `nix run .#dev-mfe`: the dashboard built (debug) into tmp/mfe-dev and served by a
-        # local `serve` with the dev harness page, which takes a token from
-        # `review_archive login`. The environment passes through to `serve`.
+        # local `serve` at `/`. Signing in takes the site running locally (`cookie_domain`
+        # unset shares its cookie with every localhost port) and its public key and refresh
+        # URL in the environment, which passes through to `serve`:
+        # SSO_PUBLIC_KEY, SSO_REFRESH_URL=http://localhost:61156/auth/refresh.
         devMfe = pkgs.writeShellApplication {
           name = "dev-mfe";
           runtimeInputs = [ pkgs.git ];
@@ -161,9 +163,8 @@
               cargo build -p review_archive_web --target wasm32-unknown-unknown
               bash crates/review_archive_web/package.sh target/wasm32-unknown-unknown/debug/review_archive_web.wasm '$out'
             "
-            cp crates/review_archive_web/dev.html "$out/index.html"
             printf 'mfe_dir = "%s"\n' "$out" >"$out/config.toml"
-            echo "▶ http://127.0.0.1:${toString port}/mfe/index.html"
+            echo "▶ http://localhost:${toString port}/"
             exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve
           '';
         };
@@ -213,7 +214,7 @@
             nix build                         the review_archive binary
             nix build .#${pname}-container    OCI image with chromium (Linux only)
             nix build .#mfe                   the dashboard bundle (served under /mfe/)
-            nix run .#dev-mfe                 the dashboard, built and served locally with a token box
+            nix run .#dev-mfe                 the dashboard, built and served locally at /
             nix run .#help                    this
             cargo test                        parser snapshots, repository, scheduler, gbp stub
             cargo test -- --ignored live      one real scan; needs a browser and the network

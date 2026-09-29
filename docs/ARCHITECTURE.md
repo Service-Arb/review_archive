@@ -31,14 +31,13 @@ crates/review_archive/          the engine (features: maps, store)
     src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries, the Telegram bot
   src/places.rs                 Places API search for URLs without an id
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
-  src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`), `/mfe/`
-  src/auth.rs                   who is calling: the operator's token, or a member's (playbook introspection)
-  src/login.rs                  `login`: a member token from playbook (DCR + PKCE, loopback redirect)
+  src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`), `/mfe/`, the page at `/`
+  src/auth.rs                   who is calling: the operator's token, or valeratrades.com's sign-in cookie (`va_sso`)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
   src/config.rs                 the TOML config: data dir, bind, browser, defaults
 crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs; native and wasm
-crates/review_archive_web/      the dashboard MFE (dioxus, wasm), over the client; `package.sh` lays out /mfe/
+crates/review_archive_web/      the dashboard MFE (dioxus, wasm), over the client; `package.sh` lays out /mfe/, `index.html` is `/`
 ```
 
 ## Using the library
@@ -148,8 +147,8 @@ with its own platform implements `sources::ReviewSource` and records through
   sent; with it set, only the hosts it lists (private addresses allowed), nowhere else.
   Redirects are not followed.
 - **Secrets come from the environment only**, through `ev_lib::settings` in the server
-  (`REVIEW_ARCHIVE_TOKEN`, `GOOGLE_MAPS_KEY`, `GBP_*`, `AUTH_INTROSPECT_URL` +
-  `INTROSPECT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`, `ALERT_WEBHOOK_*`); the
+  (`REVIEW_ARCHIVE_TOKEN`, `GOOGLE_MAPS_KEY`, `GBP_*`, `SSO_PUBLIC_KEY` +
+  `SSO_REFRESH_URL`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`, `ALERT_WEBHOOK_*`); the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except
   `REVIEW_ARCHIVE_TOKEN`, required at boot when `APP_ENV=production`

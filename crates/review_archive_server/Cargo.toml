@@ -19,14 +19,12 @@ path = "src/main.rs"
 [dependencies]
 
 axum = { workspace = true, features = ["macros"] }
-base64.workspace = true
 clap.workspace = true
 color-eyre.workspace = true
 ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel", "alerts"] }
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
-reqwest.workspace = true
 review_archive = { workspace = true, features = ["maps", "store"] }
 review_archive_core = { workspace = true, features = ["openapi"] }
 serde.workspace = true
@@ -37,10 +35,11 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 toml.workspace = true
 tower = { workspace = true, features = ["limit"] }
-tower-http = { workspace = true, features = ["cors", "fs", "timeout"] }
+tower-http = { workspace = true, features = ["fs", "timeout"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
+va_sso.workspace = true
 
 [lints]
 workspace = true
