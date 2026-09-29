@@ -5343,6 +5343,8 @@ dependencies = [
 [[package]]
 name = "tg_types"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "591896babc149ba3c2c14f2d9b76cb8433a2df9ff8be2dfcd51e370e6f4a24c7"
 dependencies = [
  "eyre",
  "serde",
