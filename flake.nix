@@ -187,6 +187,7 @@
           containers."" = {
             inherit port;
             mounts = [ "/data" ];
+            sqlite = [ "/data/review_archive.db" ];
             healthPath = "/health";
             # an archive that misses a scan catches up on the next one
             criticality = "normal";
