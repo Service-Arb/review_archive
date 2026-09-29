@@ -4,10 +4,11 @@
 //! `REVIEW_ARCHIVE_CHROME` points at the browser (the devShell sets it),
 //! `REVIEW_ARCHIVE_HEADFUL=1` opens a window, and `REVIEW_ARCHIVE_PROFILE` reuses a browser
 //! profile instead of a fresh one. Google may answer with a "limited view" of Maps that
-//! has no reviews (headless, or a fresh profile); the scan then fails and says so.
+//! has no reviews (headless, or a fresh profile), or ask to sign in before sorting; the
+//! scan then fails, or comes out partial, and says so with the page saved.
 
 use review_archive::{
-	Archive, CaptureRequest,
+	Archive, CaptureRequest, SessionError,
 	config::Config,
 	core::dto::{NewTarget, ReviewsQuery, RunStatus},
 };
@@ -48,9 +49,22 @@ async fn live_scan_of_a_real_place() {
 	archive.close().await;
 	println!("{summary}");
 
-	assert_ne!(summary.status, RunStatus::Failed, "{summary}");
-	assert_eq!(summary.counts.new, 12);
-	assert!(summary.captured >= 10, "{summary}");
+	// What Google serves a fresh signed-out headless browser is its call; each answer must come out as ARCHITECTURE's invariants say.
+	let error = summary.error.as_deref();
+	if summary.status == RunStatus::Failed {
+		let error = error.expect("a failed run says why");
+		assert!(error.contains("code: review_archive::google::"), "{summary}");
+		assert!(error.contains("-walk-failed.png]"), "{summary}");
+		return;
+	}
+	if let Some(error) = error.filter(|e| e.contains("sign in before it sorts")) {
+		assert_eq!(summary.status, RunStatus::Partial);
+		assert!(error.contains("-sign-in-gate.png]"), "{summary}");
+		assert!(summary.counts.new > 0, "{summary}");
+	} else {
+		assert_eq!(summary.counts.new, 12, "{summary}");
+	}
+	assert!(summary.captured >= summary.counts.new * 5 / 6, "{summary}");
 	let reviews = archive.reviews(id, &ReviewsQuery::default()).await.unwrap();
 	assert!(reviews.iter().all(|r| r.rating.is_some() && r.published_est.is_some()));
 	let sha = reviews.iter().find_map(|r| r.capture_sha256.clone()).unwrap();
@@ -67,8 +81,19 @@ async fn live_capture_without_a_store() {
 	config.browser.profile_dir = config.browser.profile_dir.or_else(|| Some(dir.path().join("profile")));
 	config.data_dir = None;
 	let archive = Archive::open(config).await.unwrap();
-	let got = archive.capture_place(&CaptureRequest::new(PLACE_ID).lang("fr").max_reviews(5)).await.unwrap();
+	let got = archive.capture_place(&CaptureRequest::new(PLACE_ID).lang("fr").max_reviews(5)).await;
 	archive.close().await;
+	let got = match got {
+		Ok(got) => got,
+		Err(e) => {
+			assert!(
+				matches!(e.downcast_ref::<SessionError>(), Some(SessionError::LimitedView { .. } | SessionError::Blocked { .. })),
+				"{}",
+				review_archive::describe(&e)
+			);
+			return;
+		}
+	};
 	assert_eq!(got.scan.reviews.len(), 5, "{:?}", got.scan.warnings);
 	let png = got.scan.reviews.iter().find_map(|r| r.capture.as_ref()).unwrap();
 	assert!(review_archive::png_meta::dimensions(&png.png).unwrap().0 >= 600);

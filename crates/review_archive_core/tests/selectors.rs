@@ -36,3 +36,14 @@ fn signed_out_sort_opens_the_sign_in_dialog() {
 	let dismiss = first(&doc, sel::PROMO_DISMISS).expect("the dialog's dismiss button");
 	assert_eq!(text(dismiss), "Dismiss");
 }
+
+#[test]
+fn limited_view_has_a_place_but_no_reviews_tab() {
+	let doc = fixture("maps_fr_limited_view.html");
+
+	assert!(first(&doc, sel::REVIEWS_TAB).is_none(), "the limited view has no reviews tab");
+	assert_eq!(first(&doc, sel::PLACE_TITLE).map(text).as_deref(), Some("Tour Eiffel"));
+	// as `js::HAS_TEXT` reads it: the page text, non-breaking spaces as spaces
+	let body = doc.root_element().text().collect::<String>().replace('\u{a0}', " ");
+	assert!(sel::LIMITED_VIEW_TEXT.iter().any(|t| body.contains(t)), "the limited view's notice");
+}

@@ -140,11 +140,13 @@ impl Page<'_> {
 		let sorted = match self.open_sort_menu().await? {
 			SortMenu::Open => self.pick_newest().await?,
 			SortMenu::SignInRequired => {
+				let saved = self.save("sign-in-gate").await;
 				self.dismiss_promo().await?;
 				tracing::info!(place_id, "Google asks to sign in before sorting; reading the list in its own order");
 				warnings.push(
 					"Google asks this signed-out browser to sign in before it sorts the reviews or shows more than the first few; the ones shown were read in its own order".to_owned(),
 				);
+				warnings.extend(saved.map(super::page_line));
 				false
 			}
 		};
