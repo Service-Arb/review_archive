@@ -1,6 +1,7 @@
-//! Delivering the outbox: each due delivery is POSTed, signed, and retried with backoff
-//! until it is acknowledged or its tries run out. The outbox is in the database, so a
-//! restart picks up where the last process stopped.
+//! Delivering the outbox: each due delivery is POSTed, signed, to its hook — or sent to a
+//! member's Telegram channel by the archive's bot — and retried with backoff until it is
+//! acknowledged or its tries run out. The outbox is in the database, so a restart picks up
+//! where the last process stopped.
 //!
 //! A webhook URL comes from whoever holds the API token, and the archive POSTs to it from
 //! inside its network: it may not point at loopback, private or link-local addresses —
@@ -21,12 +22,17 @@ use reqwest::{
 	StatusCode, Url,
 	dns::{Addrs, Name, Resolve, Resolving},
 };
-use review_archive_core::{Rejected, hex, schedule};
+use review_archive_core::{
+	Rejected, TargetId,
+	dto::{Event, EventPayload},
+	hex, schedule,
+};
 use sha2::Sha256;
+use tg_types::TelegramDestination;
 
 use crate::{
 	config::WebhookConfig,
-	store::{Delivery, Store},
+	store::{Delivery, Recipient, Store, blobs::BlobStore},
 };
 
 /// Tries before a delivery is given up on. With the backoff below that is about a day.
@@ -76,18 +82,39 @@ impl std::ops::AddAssign for DeliveryReport {
 	}
 }
 
-/// Sends webhooks where they are allowed to go, and nowhere else.
+/// The archive's Telegram bot, which posts to members' channels.
+#[derive(Clone)]
+pub struct Telegram {
+	/// The Bot API's root, `https://api.telegram.org` but for tests.
+	pub api: Url,
+	/// `TELEGRAM_BOT_TOKEN`.
+	pub token: String,
+	/// Where a removed review's screenshot is read from.
+	pub blobs: BlobStore,
+}
+
+impl std::fmt::Debug for Telegram {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Telegram").field("api", &self.api.as_str()).finish_non_exhaustive()
+	}
+}
+
+/// Sends webhooks where they are allowed to go, and nowhere else; and Telegram messages
+/// through the bot, when there is one.
 #[derive(Clone, Debug)]
 pub struct Deliverer {
 	http: reqwest::Client,
 	/// Lowercase; empty means any host with only public addresses.
 	allowed: Arc<[String]>,
+	/// The Bot API is the operator's to name, so it goes through a client of its own,
+	/// without the resolver that keeps hooks off private addresses.
+	telegram: Option<(reqwest::Client, Telegram)>,
 }
 
 impl Deliverer {
 	/// A deliverer with its own HTTP client: short timeouts, no redirects, no proxy, and a
 	/// resolver that refuses addresses webhooks may not reach.
-	pub fn new(cfg: &WebhookConfig) -> eyre::Result<Self> {
+	pub fn new(cfg: &WebhookConfig, telegram: Option<Telegram>) -> eyre::Result<Self> {
 		let allowed: Arc<[String]> = cfg.allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
 		let http = reqwest::Client::builder()
 			.redirect(reqwest::redirect::Policy::none())
@@ -96,7 +123,10 @@ impl Deliverer {
 			.no_proxy()
 			.dns_resolver(Arc::new(PublicOnly { allowed: allowed.clone() }))
 			.build()?;
-		Ok(Self { http, allowed })
+		let telegram = telegram
+			.map(|t| eyre::Ok((reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(30)).build()?, t)))
+			.transpose()?;
+		Ok(Self { http, allowed, telegram })
 	}
 
 	/// Whether a webhook may be sent to `url`: `http` or `https`, to a host `allowed_hosts`
@@ -127,12 +157,16 @@ impl Deliverer {
 	/// Sends every delivery due at `now` once. `Err` is the store failing; a receiver
 	/// failing is a retry.
 	pub async fn deliver_due(&self, store: &Store, now: Timestamp) -> eyre::Result<DeliveryReport> {
-		let mut by_hook: BTreeMap<i64, Vec<Delivery>> = BTreeMap::new();
+		let mut by_recipient: BTreeMap<(bool, i64), Vec<Delivery>> = BTreeMap::new();
 		for d in store.due_deliveries(now, BATCH).await? {
-			by_hook.entry(d.webhook_id).or_default().push(d);
+			let key = match &d.to {
+				Recipient::Webhook { id, .. } => (false, *id),
+				Recipient::Telegram { id, .. } => (true, *id),
+			};
+			by_recipient.entry(key).or_default().push(d);
 		}
-		futures::stream::iter(by_hook.into_values())
-			.map(|deliveries| self.deliver_to_hook(store, deliveries, now))
+		futures::stream::iter(by_recipient.into_values())
+			.map(|deliveries| self.deliver_to(store, deliveries, now))
 			.buffer_unordered(PARALLEL_HOOKS)
 			.try_fold(DeliveryReport::default(), |mut sum, r| async move {
 				sum += r;
@@ -141,15 +175,18 @@ impl Deliverer {
 			.await
 	}
 
-	/// One hook's deliveries, oldest first. A receiver that cannot be reached at all gets
-	/// the rest on a later pass, rather than a timeout per delivery on this one.
-	async fn deliver_to_hook(&self, store: &Store, deliveries: Vec<Delivery>, now: Timestamp) -> eyre::Result<DeliveryReport> {
+	/// One recipient's deliveries, oldest first. A receiver that cannot be reached at all
+	/// gets the rest on a later pass, rather than a timeout per delivery on this one.
+	async fn deliver_to(&self, store: &Store, deliveries: Vec<Delivery>, now: Timestamp) -> eyre::Result<DeliveryReport> {
 		let mut report = DeliveryReport::default();
 		for d in deliveries {
-			let sent = self.send(&d).await;
+			let sent = match &d.to {
+				Recipient::Webhook { url, secret, .. } => self.post(&d, url, secret).await,
+				Recipient::Telegram { destination, .. } => self.telegram(store, &d, destination).await,
+			};
 			let error = match &sent {
-				Ok(status) if status.is_success() => None,
-				Ok(status) => Some(format!("{} answered {status}", d.url)),
+				Ok(Ok(())) => None,
+				Ok(Err(refused)) => Some(refused.clone()),
 				Err(e) => Some(format!("{e:#}")),
 			};
 			let Some(error) = error else {
@@ -162,7 +199,7 @@ impl Deliverer {
 				now.checked_add(SignedDuration::try_from(retry_delay(tries)).unwrap_or(SignedDuration::MAX))
 					.unwrap_or(Timestamp::MAX)
 			});
-			tracing::warn!(delivery = d.id, webhook = d.webhook_id, tries, error, "webhook delivery failed");
+			tracing::warn!(delivery = d.id, to = ?d.to, tries, error, "delivery failed");
 			store.delivery_failed(d.id, &error, retry_at, Timestamp::now()).await?;
 			if retry_at.is_some() {
 				report.retrying += 1;
@@ -176,21 +213,121 @@ impl Deliverer {
 		Ok(report)
 	}
 
-	/// The receiver's status, or why there is none.
-	async fn send(&self, d: &Delivery) -> eyre::Result<StatusCode> {
-		let url = self.check_url(&d.url)?;
+	/// `Ok(Err)`: the hook answered, refusing; `Err`: it could not be reached.
+	async fn post(&self, d: &Delivery, url: &str, secret: &str) -> eyre::Result<Result<(), String>> {
 		let resp = self
 			.http
-			.post(url)
+			.post(self.check_url(url)?)
 			.header(reqwest::header::CONTENT_TYPE, "application/json")
-			.header("X-Signature", signature(&d.secret, d.payload.as_bytes()))
+			.header("X-Signature", signature(secret, d.payload.as_bytes()))
 			.header("X-Event", &d.event)
 			.header("X-Delivery-Id", d.id.to_string())
 			.body(d.payload.clone())
 			.send()
 			.await?;
-		Ok(resp.status())
+		let status: StatusCode = resp.status();
+		Ok(if status.is_success() { Ok(()) } else { Err(format!("{url} answered {status}")) })
 	}
+
+	/// The event as a message; a removed review's with the screenshot of it as it first
+	/// appeared, when there is one.
+	async fn telegram(&self, store: &Store, d: &Delivery, destination: &str) -> eyre::Result<Result<(), String>> {
+		let (_, tg) = self.bot()?;
+		let payload: EventPayload = serde_json::from_str(&d.payload).map_err(|e| eyre::eyre!("delivery {} has an unreadable payload: {e}", d.id))?;
+		let label = store.target(TargetId(payload.target_id)).await?.label;
+		let text = message(&payload, &label);
+		let photo = match payload.review.as_ref().and_then(|r| r.capture_sha256.as_deref()).filter(|_| payload.event == Event::ReviewGone) {
+			Some(sha) => {
+				let path = tg.blobs.path_of(sha).ok_or_else(|| eyre::eyre!("capture {sha:?} is not a blob name"))?;
+				Some(tokio::fs::read(&path).await.map_err(|e| eyre::eyre!("reading {}: {e}", path.display()))?)
+			}
+			None => None,
+		};
+		self.send_telegram(destination, text, photo).await
+	}
+
+	/// Sends a line to a channel now, so a member sees the bot can post there. `Err` is
+	/// what Telegram said, or that it could not be reached.
+	pub async fn test_telegram(&self, destination: &str, text: String) -> Result<(), Rejected> {
+		match self.send_telegram(destination, text, None).await {
+			Ok(Ok(())) => Ok(()),
+			Ok(Err(refused)) => Err(Rejected::invalid(refused)),
+			Err(e) => Err(Rejected::Busy(format!("{e:#}"))),
+		}
+	}
+
+	fn bot(&self) -> eyre::Result<&(reqwest::Client, Telegram)> {
+		self.telegram.as_ref().ok_or_else(|| eyre::eyre!("TELEGRAM_BOT_TOKEN is not set (needed for Telegram channels)"))
+	}
+
+	async fn send_telegram(&self, destination: &str, text: String, photo: Option<Vec<u8>>) -> eyre::Result<Result<(), String>> {
+		let (http, tg) = self.bot()?;
+		let dest: TelegramDestination = destination.parse().map_err(|e| eyre::eyre!("stored destination {destination:?}: {e}"))?;
+		let method = if photo.is_some() { "sendPhoto" } else { "sendMessage" };
+		// `./`: a token has a colon, which would make `bot<token>` read as a URL scheme
+		let url = tg.api.join(&format!("./bot{}/{method}", tg.token))?;
+		let req = http.post(url);
+		let req = match photo {
+			Some(png) => {
+				let mut form = reqwest::multipart::Form::new().text("caption", truncate(&text, CAPTION_MAX));
+				for (k, v) in dest.destination_params() {
+					form = form.text(k.to_owned(), v);
+				}
+				req.multipart(form.part("photo", reqwest::multipart::Part::bytes(png).file_name("review.png").mime_str("image/png")?))
+			}
+			None => {
+				let mut form: Vec<(&str, String)> = dest.destination_params();
+				form.push(("text", truncate(&text, MESSAGE_MAX)));
+				req.form(&form)
+			}
+		};
+		// the URL carries the token: reqwest's error would print it
+		let resp = req.send().await.map_err(|e| eyre::eyre!("the Telegram Bot API could not be reached: {}", e.without_url()))?;
+		if resp.status().is_success() {
+			return Ok(Ok(()));
+		}
+		let status = resp.status();
+		#[derive(serde::Deserialize)]
+		struct Answer {
+			description: Option<String>,
+		}
+		let why = resp.json::<Answer>().await.ok().and_then(|a| a.description).unwrap_or_default(); // an unreadable refusal is still a refusal, told by its status
+		Ok(Err(format!("Telegram answered {status}: {why}")))
+	}
+}
+
+/// Telegram's limits, in characters.
+const MESSAGE_MAX: usize = 4096;
+const CAPTION_MAX: usize = 1024;
+
+fn truncate(s: &str, max: usize) -> String {
+	match s.char_indices().nth(max - 1) {
+		Some((i, _)) => format!("{}…", &s[..i]),
+		None => s.to_owned(),
+	}
+}
+
+/// What a member reads: what happened, where, and the review as it is now.
+fn message(p: &EventPayload, label: &str) -> String {
+	let what = match p.event {
+		Event::ReviewNew => "New review",
+		Event::ReviewChanged => "Review edited",
+		Event::ReviewGone => "Review removed",
+		Event::ReviewReappeared => "Review back",
+		Event::RunFailed => "Scan failed",
+	};
+	let mut out = format!("{what} · {label}");
+	if let Some(r) = &p.review {
+		let stars = r.rating.map(|n| "★".repeat(n.clamp(0, 5) as usize)).unwrap_or_default();
+		out.push_str(&format!("\n{stars} {}", r.author));
+		if let Some(t) = &r.text {
+			out.push_str(&format!("\n{t}"));
+		}
+	}
+	if let Some(e) = p.run.as_ref().and_then(|r| r.error.as_deref()) {
+		out.push_str(&format!("\n{e}"));
+	}
+	out
 }
 
 /// Resolves names, keeping only the addresses webhooks may reach: every one for a host
@@ -283,7 +420,7 @@ mod tests {
 
 	#[test]
 	fn hooks_go_only_where_they_may() {
-		let open = Deliverer::new(&WebhookConfig::default()).unwrap();
+		let open = Deliverer::new(&WebhookConfig::default(), None).unwrap();
 		for public in [
 			"https://hooks.example.com/x",
 			"http://8.8.8.8/x",
@@ -313,9 +450,13 @@ mod tests {
 		] {
 			assert!(open.check_url(local).is_err(), "{local}");
 		}
-		let listed = Deliverer::new(&WebhookConfig {
-			allowed_hosts: vec!["Concierge".into()],
-		})
+		let listed = Deliverer::new(
+			&WebhookConfig {
+				allowed_hosts: vec!["Concierge".into()],
+				..WebhookConfig::default()
+			},
+			None,
+		)
 		.unwrap();
 		assert!(listed.check_url("http://concierge:8080/hook").is_ok());
 		assert!(listed.check_url("https://hooks.example.com/x").is_err(), "only the listed hosts");

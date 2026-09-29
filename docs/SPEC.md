@@ -192,6 +192,64 @@ Events:
   cluster, say). Redirects are not followed; a delivery gets 3 s to connect and 10 s in
   all, and a receiver that cannot be reached is not held against the other hooks.
 
+## Members
+
+Several people track their places here, grouped the way they manage them: by
+**managing gmail**, the Google manager account a small group of GBPs is attached to.
+
+- A **member** is the email playbook's authorization server vouches for (its
+  `members.toml`); there is no member table here.
+- `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
+  not a credential. GBP reads keep the service's one grant: a client adds the service's
+  Google account as a manager of their GBP.
+- `tracks(managing_gmail_id, target_id, created_at)`. Tracking a place finds the target on
+  that place, language and source, or makes one (enabling a disabled one): targets,
+  reviews, captures and blobs stay shared, so two members on one place cost one scan and
+  one PNG. Scheduling stays per target. The operator assigns existing targets with
+  `gmail add <member> <gmail>` and `track <gmail-id> <target-id>`.
+- `reinstatements(managing_gmail_id, review_id, requested_at, withdrawn_at, reinstated_at)`
+  record that a member asked Google to reinstate a removed review (the archive asks
+  nothing of Google). Withdrawing sets `withdrawn_at`; nothing is deleted. A scan that lists
+  the review again sets `reinstated_at` in its transaction, and it returns to the
+  Snapshotted column with a "reinstated after N d" badge. A gmail with appeals on record
+  cannot be removed.
+- A member's board of a tracked place has three columns, each by its own time:
+  Snapshotted (listed, by first sighting), Removed (gone, no open appeal, by `gone_at`),
+  Reinstating (gone, open appeal, by `requested_at`).
+
+### Auth
+
+`review_archive` is a resource server of playbook's authorization server.
+
+- `REVIEW_ARCHIVE_TOKEN` is the operator: every route but `/me`.
+- Any other bearer is posted to `AUTH_INTROSPECT_URL` (playbook's `{base}/introspect`,
+  RFC 7662, authed by `INTROSPECT_SECRET`); `{active, email, exp}` makes it that member's
+  for `min(exp, 60 s)`. An unreachable playbook is a 503.
+- A member reaches `/me` and `GET /captures/{sha}.png` of the places their gmails track;
+  the operator's routes answer them 403, and `/me` answers the operator 403.
+- `review_archive login --auth <playbook base>` registers a client (RFC 7591), runs PKCE
+  with a loopback redirect, and prints the 1 h access token.
+
+### Telegram
+
+- `tg_channels(member_email, managing_gmail_id NULL = all, destination, events)`;
+  `destination` is what the member pasted (`@channel`, `-100…`, `<group>/<topic>`),
+  parsed as `tg_types::TelegramDestination`.
+- Events go through the outbox (`webhook_deliveries`, a row names exactly one hook or
+  channel), fanned out in the scan's transaction to the channels whose member tracks the
+  target (under the channel's gmail, if it names one). Same retries as hooks.
+- One service bot (`TELEGRAM_BOT_TOKEN`) sends through the Bot API (`webhooks.telegram_api`):
+  `review.gone` as `sendPhoto` with the review's first capture, the rest as text. The
+  member adds the bot to the chat; `POST /me/tg-channels/{id}/test` answers with
+  Telegram's refusal, if any. Ops alerts stay on Discord.
+
+### Dashboard
+
+`crates/review_archive_web`: a dioxus microfrontend, `<mfe-review-archive-dashboard
+access-token="…">`, served by the binary under `/mfe/` (`mfe_dir`) with CORS open (bearers
+travel in a header, never a cookie). The host sets `access-token`, and sets it again when
+it refreshes the token. Design: Figma "review_archive / dashboard".
+
 ## Library
 
 The crate is usable without the server, inside other systems, at the low level:
@@ -210,7 +268,8 @@ The crate is usable without the server, inside other systems, at the low level:
 - `review_archive_server` — binary: CLI, scheduler, HTTP, webhooks. Thin over
   the facade; no logic that the library does not also expose.
 - `review_archive_client` — typed async HTTP client over the same DTOs, for
-  services that call a running archive instead of embedding it.
+  services that call a running archive instead of embedding it; builds for wasm too.
+- `review_archive_web` — the dashboard, over the client.
 
 ## Repo conventions
 

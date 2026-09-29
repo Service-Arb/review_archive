@@ -2,7 +2,7 @@
 
 What the service does and why is in [SPEC.md](SPEC.md). This is where things live.
 
-A cargo workspace of four crates; dependencies point inwards only.
+A cargo workspace of five crates; dependencies point inwards only.
 
 ```text
 crates/review_archive_core/     no I/O: no browser, database, network or clock
@@ -19,21 +19,26 @@ crates/review_archive_core/     no I/O: no browser, database, network or clock
     src/dto.rs                    the JSON of the HTTP API (bodies and queries), shared with the client
 crates/review_archive/          the engine (features: maps, store)
   src/archive.rs                the `Archive` facade
+  src/archive/members.rs        what a member does, scoped to them
   src/browser/                  the `Browser` handle over `browser_manipulation`: consent, sorting, the walk, screenshots
   src/sources/                  the `ReviewSource` port; the maps and gbp adapters
   src/store/                    SQLite (runtime sqlx queries, embedded migrations/), PNG blobs, export
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
-  src/store/events.rs           webhook events into the outbox, in the scan's own transaction
+  src/store/events.rs           events into the outbox (hooks, members' Telegram channels), in the scan's own transaction
+  src/store/members.rs          per-member state: gmails, tracks, reinstatements, Telegram channels
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
   src/failure.rs                the typed errors (miette codes and help), `describe`, and who a failure waits for
-    src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries
+    src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries, the Telegram bot
   src/places.rs                 Places API search for URLs without an id
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
-  src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`)
+  src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`), `/mfe/`
+  src/auth.rs                   who is calling: the operator's token, or a member's (playbook introspection)
+  src/login.rs                  `login`: a member token from playbook (DCR + PKCE, loopback redirect)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
   src/config.rs                 the TOML config: data dir, bind, browser, defaults
-crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs
+crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs; native and wasm
+crates/review_archive_web/      the dashboard MFE (dioxus, wasm), over the client; `package.sh` lays out /mfe/
 ```
 
 ## Using the library
@@ -128,15 +133,23 @@ with its own platform implements `sources::ReviewSource` and records through
   hand-run `scan` still going then included, until it records how it really ended. An ad-hoc capture is stored under the place's `maps` target for its
   language, or a new disabled one: nothing captured is lost, nothing extra gets scheduled, and
   its run does not count for the target's schedule.
+- **Public facts are shared; per-member state only annotates.** Targets, reviews, versions,
+  captures and blobs belong to no one: a place tracked by several members is one target,
+  scanned once. What is a member's — gmails, tracks, reinstatements, Telegram channels —
+  points at those facts and never alters them (tracking may put a disabled target back on
+  the schedule); every member query is scoped by the member's email in SQL.
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
-  to `webhook_deliveries` in the same transaction as what they report, and delivered from
-    there: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`), retried with backoff
-  (30 s doubling, cap 6 h, 12 tries), hooks in parallel. Delivery is at least once;
-  `X-Delivery-Id` lets a receiver drop repeats. Where a hook may go: with `webhooks.allowed_hosts` empty, public
+  to `webhook_deliveries` in the same transaction as what they report — a row per hook, and
+  per Telegram channel of a member tracking the target — and delivered from there, retried
+  with backoff (30 s doubling, cap 6 h, 12 tries), recipients in parallel, at least once. To
+  hooks: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`); `X-Delivery-Id` lets a
+  receiver drop repeats. Where a hook may go: with `webhooks.allowed_hosts` empty, public
   addresses only — its URL is checked when added and every address its host resolves to when
   sent; with it set, only the hosts it lists (private addresses allowed), nowhere else.
   Redirects are not followed.
-- **Secrets come from the environment only**, through `ev_lib::settings` in the server; the
+- **Secrets come from the environment only**, through `ev_lib::settings` in the server
+  (`REVIEW_ARCHIVE_TOKEN`, `GOOGLE_MAPS_KEY`, `GBP_*`, `AUTH_INTROSPECT_URL` +
+  `INTROSPECT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`, `ALERT_WEBHOOK_*`); the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except
   `REVIEW_ARCHIVE_TOKEN`, required at boot when `APP_ENV=production`

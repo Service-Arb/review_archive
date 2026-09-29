@@ -19,19 +19,23 @@ use review_archive::{
 	config::WebhookConfig,
 	core::{
 		Coverage, Known, Observed, ReviewId, Scan, Target, TargetKind,
-		dto::{Event, EventPayload, JobKind, JobStatus, NewWebhook, RunStatus},
+		dto::{Event, EventPayload, JobKind, JobStatus, NewTgChannel, NewWebhook, RunStatus},
 	},
 	record::Recorder,
 	sources::ReviewSource,
-	store::{InsertTarget, Store, blobs::BlobStore},
-	webhooks::{Deliverer, MAX_ATTEMPTS, signature},
+	store::{InsertTarget, Recipient, Store, blobs::BlobStore},
+	webhooks::{Deliverer, MAX_ATTEMPTS, Telegram, signature},
 };
 
 /// The receivers here listen on loopback, which only a listed host may reach.
 fn deliverer() -> Deliverer {
-	Deliverer::new(&WebhookConfig {
-		allowed_hosts: vec!["127.0.0.1".into()],
-	})
+	Deliverer::new(
+		&WebhookConfig {
+			allowed_hosts: vec!["127.0.0.1".into()],
+			..WebhookConfig::default()
+		},
+		None,
+	)
 	.unwrap()
 }
 
@@ -290,4 +294,124 @@ async fn an_edited_review_that_is_back_sends_changed_and_reappeared() {
 		summary,
 		[(Event::ReviewChanged, Some("x, edited".into()), None), (Event::ReviewReappeared, Some("x, edited".into()), None),]
 	);
+}
+
+/// A Telegram Bot API stand-in: records `(method, content type, body)`; a chat named
+/// `@nochat` is refused the way Telegram refuses it.
+#[derive(Clone, Default)]
+struct Bot {
+	got: Arc<Mutex<Vec<(String, String, Bytes)>>>,
+}
+
+async fn bot_call(State(b): State<Bot>, axum::extract::Path((token, method)): axum::extract::Path<(String, String)>, headers: HeaderMap, body: Bytes) -> (StatusCode, String) {
+	assert_eq!(token, "bot123:abc");
+	if String::from_utf8_lossy(&body).contains("nochat") {
+		return (StatusCode::BAD_REQUEST, r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#.into());
+	}
+	let ct = headers[axum::http::header::CONTENT_TYPE].to_str().unwrap().to_owned();
+	b.got.lock().unwrap().push((method, ct, body));
+	(StatusCode::OK, r#"{"ok":true,"result":{}}"#.into())
+}
+
+fn png() -> Vec<u8> {
+	let mut out = Vec::new();
+	let mut enc = png::Encoder::new(&mut out, 4, 3);
+	enc.set_color(png::ColorType::Rgb);
+	enc.write_header().unwrap().write_image_data(&[90; 36]).unwrap();
+	out
+}
+
+/// A member's channel hears about the places the member tracks, and only those; a removed
+/// review arrives as its screenshot; what Telegram refuses is retried, with its reason.
+#[tokio::test]
+async fn telegram_channels_get_their_members_places_only() {
+	let dir = tempfile::tempdir().unwrap();
+	let store = Store::open(&dir.path().join("db.sqlite")).await.unwrap();
+	let blobs = BlobStore::new(dir.path().join("blobs"));
+	let now = Timestamp::now();
+	let watched = target(&store).await;
+	let other = store
+		.add_target(
+			&InsertTarget {
+				label: "elsewhere".into(),
+				kind: TargetKind::Maps,
+				place_id: "ChIJelsewhereelsewhere".into(),
+				gbp: None,
+				lang: "en".into(),
+				interval: Duration::from_secs(6 * 3600),
+				enabled: true,
+			},
+			now,
+		)
+		.await
+		.unwrap();
+	let events = vec![Event::ReviewNew, Event::ReviewGone];
+	let channel = |dest: &str, gmail: Option<i64>| NewTgChannel {
+		destination: dest.into(),
+		gmail_id: gmail,
+		events: events.clone(),
+	};
+	let alice = store.add_gmail("alice@x.com", "ops@gmail.com", now).await.unwrap();
+	store.track(Some("alice@x.com"), alice.id, watched.id, now).await.unwrap();
+	store.add_tg_channel("alice@x.com", &channel("@alice_chan", None), now).await.unwrap();
+	let bob = store.add_gmail("bob@x.com", "bob@gmail.com", now).await.unwrap();
+	store.track(Some("bob@x.com"), bob.id, other, now).await.unwrap();
+	store.add_tg_channel("bob@x.com", &channel("@bob_chan", None), now).await.unwrap();
+	// carol tracks the same place, but her channel's gmail tracks nothing
+	let carol = store.add_gmail("carol@x.com", "c1@gmail.com", now).await.unwrap();
+	let carol_empty = store.add_gmail("carol@x.com", "c2@gmail.com", now).await.unwrap();
+	store.track(Some("carol@x.com"), carol.id, watched.id, now).await.unwrap();
+	store.add_tg_channel("carol@x.com", &channel("@carol_chan", Some(carol_empty.id)), now).await.unwrap();
+	// dave's chat does not have the bot
+	let dave = store.add_gmail("dave@x.com", "d@gmail.com", now).await.unwrap();
+	store.track(Some("dave@x.com"), dave.id, watched.id, now).await.unwrap();
+	store.add_tg_channel("dave@x.com", &channel("@nochat", None), now).await.unwrap();
+
+	let rec = Recorder {
+		store: &store,
+		blobs: &blobs,
+		now: Timestamp::now,
+	};
+	let mut shot = review("b", "rude");
+	shot.capture = Some(review_archive::core::Capture {
+		png: png(),
+		captured_at: now,
+		page_url: "https://maps.example/b".into(),
+	});
+	let src = Scripted(Mutex::new(complete(vec![review("a", "fine"), shot])));
+	rec.run(&src, &watched).await.unwrap();
+	*src.0.lock().unwrap() = complete(vec![review("a", "fine")]);
+	assert_eq!(rec.run(&src, &watched).await.unwrap().counts.gone, 1);
+
+	let b = Bot::default();
+	let app = Router::new().route("/{token}/{method}", post(bot_call)).with_state(b.clone());
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let api = format!("http://{}/", listener.local_addr().unwrap());
+	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+	let d = Deliverer::new(
+		&WebhookConfig::default(),
+		Some(Telegram {
+			api: api.parse().unwrap(),
+			token: "123:abc".into(),
+			blobs: blobs.clone(),
+		}),
+	)
+	.unwrap();
+	let report = d.deliver_due(&store, Timestamp::now()).await.unwrap();
+	let tested = d.test_telegram("@nochat", "hello".into()).await.unwrap_err();
+	server.abort();
+	assert_eq!(tested.to_string(), "Telegram answered 400 Bad Request: Bad Request: chat not found");
+
+	assert_eq!((report.delivered, report.retrying), (3, 3), "alice's three; dave's three refused");
+	let got = b.got.lock().unwrap().clone();
+	let calls: Vec<(&str, bool)> = got.iter().map(|(m, _, body)| (m.as_str(), String::from_utf8_lossy(body).contains("alice_chan"))).collect();
+	assert_eq!(calls, [("sendMessage", true), ("sendMessage", true), ("sendPhoto", true)]);
+	let (_, ct, photo) = &got[2];
+	assert!(ct.starts_with("multipart/form-data"));
+	let photo = String::from_utf8_lossy(photo);
+	assert!(photo.contains("Review removed · t\n★★★★ A\nrude"), "the caption: {photo}");
+	assert!(photo.contains("filename=\"review.png\"") && photo.contains("PNG"), "the screenshot");
+	let refused = store.due_deliveries(Timestamp::MAX, 50).await.unwrap();
+	assert_eq!(refused.len(), 3);
+	assert!(refused.iter().all(|r| matches!(&r.to, Recipient::Telegram { destination, .. } if destination == "@nochat")));
 }

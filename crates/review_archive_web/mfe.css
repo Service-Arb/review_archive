@@ -1,0 +1,44 @@
+/* Utilities only, in a layer of their own: the bundle mounts into the host's light DOM,
+ * and the host's styles must win where they meet (see real_estate_allocation's mfe.css). */
+@import "tailwindcss/theme.css" layer(ramfe);
+@import "tailwindcss/utilities.css" layer(ramfe);
+
+@source "./src/**/*.rs";
+
+/* Figma "review_archive / dashboard" */
+@theme {
+	--color-page: #0b0d10;
+	--color-panel: #14171c;
+	--color-raised: #1b1f26;
+	--color-line: #262a31;
+	--color-fg: #e6e8eb;
+	--color-muted: #8b929c;
+	--color-faint: #5c636e;
+	--color-accent: #f38020;
+	--color-on-accent: #1a0d00;
+	--color-ok: #3fb950;
+	--color-bad: #f85149;
+	--color-warn: #d29922;
+	--color-info: #58a6ff;
+	--color-shot: #23272e;
+}
+
+/* No preflight is shipped, but the controls must not look like the browser's wherever the
+ * host has none either. `:where` keeps this below every utility. */
+@layer ramfe {
+	mfe-review-archive-dashboard {
+		display: block;
+	}
+	mfe-review-archive-dashboard :where(button, input, select, p) {
+		margin: 0;
+		padding: 0;
+		border: 0 solid;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		text-align: inherit;
+	}
+	mfe-review-archive-dashboard :where(*) {
+		box-sizing: border-box;
+	}
+}
