@@ -49,8 +49,8 @@ review_archive target list
 review_archive scan 1          # one pass now, prints a summary
 review_archive scan --all
 
-# Scheduler + HTTP on 127.0.0.1:59110. The API wants `Authorization: Bearer
-# $REVIEW_ARCHIVE_TOKEN`, or a browser's valeratrades.com sign-in (docs/SPEC.md, Auth).
+# Scheduler + HTTP on 127.0.0.1:59110. Every route but /health wants
+# `Authorization: Bearer $REVIEW_ARCHIVE_TOKEN`.
 review_archive serve
 
 # PNGs + manifest.json, to a directory or a .zip
@@ -58,12 +58,13 @@ review_archive export --target 1 --since 2026-01-01 --out cafe.zip
 ```
 
 ```toml
-# config.toml — every key is optional, but a scan needs `browser.executable`
+# config.toml — every key is optional
 data_dir = "./data"
 bind = "127.0.0.1:59110"
 
 [browser]
 executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+no_sandbox = false
 
 [defaults]
 lang = "en"
