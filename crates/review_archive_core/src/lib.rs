@@ -275,6 +275,9 @@ pub struct Known {
 	/// up below it since: the next walk must get past this review before a run of archived
 	/// cards may end it.
 	pub cut_after: Option<String>,
+	/// How many reviews the source said the place has on the last scan (ad-hoc captures do
+	/// not count).
+	pub listed: Option<u64>,
 }
 
 impl Known {

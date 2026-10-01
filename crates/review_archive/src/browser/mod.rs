@@ -8,7 +8,7 @@ mod session;
 
 use std::{path::PathBuf, sync::Arc};
 
-use review_archive_core::maps::{WalkEnd, WalkPolicy, Walked, selectors};
+use review_archive_core::maps::{WalkEnd, WalkPolicy, Walked};
 
 use self::{profile::ProfileLock, session::Session};
 use crate::{SessionError, config::BrowserConfig};
@@ -79,9 +79,9 @@ impl Browser {
 		let session = state.session.as_ref().expect("launched just above");
 		let (walked, broken) = match session.page().await {
 			Ok(mut page) => {
-				let walked = match page.open_reviews(place_id, lang).await {
-					Ok(Some(opened)) => page.walk(policy, max, opened).await,
-					Ok(None) => Ok(Walked::empty(selectors::place_url(place_id, lang))),
+				let walked = match page.open_reviews(place_id, lang, &mut *policy).await {
+					Ok(Ok(opened)) => page.walk(policy, max, opened).await,
+					Ok(Err(over)) => Ok(over),
 					Err(e) => Err(e),
 				};
 				let walked = match walked {

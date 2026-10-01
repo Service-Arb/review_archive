@@ -38,8 +38,10 @@ Out — do not build, even as an option:
 - The browser profile is signed in to a Google account: signed out, Maps shows a place's
   first few reviews only and will not sort them, so the walk fails (`signed_out`) and Maps
   halts until a restart.
-- Open the Reviews tab, sort by *Newest*, scroll the
-  feed. Stop when a full screen of
+- Open the Reviews tab. When the place's review count is the one the last scan read
+  (`targets.listed`; ad-hoc captures do not set it), and no gap or pending screenshot is
+  owed, stop there: the run lists nothing and judges nothing. Otherwise sort by *Newest*,
+  scroll the feed. Stop when a full screen of
   cards is already known (cards still without a screenshot do not count, and the walk
   goes on until it has read or passed every one of those), or at `max_reviews_per_scan`
   (default 200).

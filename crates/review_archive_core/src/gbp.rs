@@ -165,6 +165,10 @@ impl FindCards {
 }
 
 impl WalkPolicy for FindCards {
+	fn wants_list(&self, _: Option<u64>) -> bool {
+		true
+	}
+
 	fn wants_capture(&self, card: &Card) -> bool {
 		self.remaining.contains_key(&MatchKey::of_card(card))
 	}

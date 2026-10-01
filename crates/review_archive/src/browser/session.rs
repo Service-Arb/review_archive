@@ -80,9 +80,9 @@ impl Page<'_> {
 		Ok(self.tab.close().await?)
 	}
 
-	/// Opens the place and its review list sorted newest first. `None`: the place has no
-	/// reviews at all, so there is no list.
-	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str) -> Result<Option<Opened>, SessionError> {
+	/// Opens the place and its review list sorted newest first. `Err`: the walk is already
+	/// over — the place has no reviews, or `policy` does not want them read.
+	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy) -> Result<Result<Opened, Walked>, SessionError> {
 		let url = sel::place_url(place_id, lang);
 		self.tab.set_timeout(self.cfg.nav_timeout.duration()).await;
 		self.tab.goto(&url).await?;
@@ -104,7 +104,7 @@ impl Page<'_> {
 			// The place rendered, and has no star average: nobody has reviewed it yet.
 			if !self.eval::<bool>(js::ANY, sel::RATING_SUMMARY).await? {
 				tracing::info!(place_id, "the place has no reviews");
-				return Ok(None);
+				return Ok(Err(Walked::empty(url)));
 			}
 			return Err(markup_changed("waiting for the reviews tab", sel::REVIEWS_TAB));
 		}
@@ -114,11 +114,15 @@ impl Page<'_> {
 		if !self.wait_for_any(&[sel::CARD]).await? {
 			if self.review_total().await? == Some(0) {
 				tracing::info!(place_id, "the review list is empty");
-				return Ok(None);
+				return Ok(Err(Walked::empty(url)));
 			}
 			return Err(markup_changed("waiting for the review list", &[sel::CARD]));
 		}
 		let total = self.review_total().await?;
+		if !policy.wants_list(total) {
+			tracing::info!(place_id, ?total, "the review count is the last scan's; the list is not read");
+			return Ok(Err(Walked::unchanged(self.tab.url(), total)));
+		}
 
 		if !self.wait_for_any(sel::SORT_BUTTON).await? {
 			return Err(markup_changed("waiting for the sort button", sel::SORT_BUTTON));
@@ -128,7 +132,7 @@ impl Page<'_> {
 			SortMenu::SignInRequired => return Err(SessionError::new_signed_out()),
 		};
 
-		Ok(Some(Opened {
+		Ok(Ok(Opened {
 			page_url: self.tab.url(),
 			sorted,
 			total,

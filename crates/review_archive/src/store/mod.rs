@@ -441,8 +441,8 @@ impl Store {
 
 	/// What the archive holds for a target, for reconciling and for where to walk.
 	pub async fn known(&self, target: TargetId) -> eyre::Result<Known> {
-		let (cut_after, initial): (Option<String>, bool) = sqlx::query_as(
-			"SELECT cut_after, NOT EXISTS (SELECT 1 FROM runs WHERE target_id = ?1 AND ad_hoc = 0 AND status IN ('ok', 'partial'))
+		let (cut_after, listed, initial): (Option<String>, Option<i64>, bool) = sqlx::query_as(
+			"SELECT cut_after, listed, NOT EXISTS (SELECT 1 FROM runs WHERE target_id = ?1 AND ad_hoc = 0 AND status IN ('ok', 'partial'))
 			 FROM targets WHERE id = ?1",
 		)
 		.bind(target.0)
@@ -473,7 +473,12 @@ impl Store {
 			};
 			reviews.insert(r.source_review_id, review);
 		}
-		Ok(Known { reviews, initial, cut_after })
+		Ok(Known {
+			reviews,
+			initial,
+			cut_after,
+			listed: listed.map(|n| u64::try_from(n).expect("written from a u64")),
+		})
 	}
 
 	/// Records that a run began. An ad-hoc run (a capture) does not count for the schedule.
@@ -623,7 +628,8 @@ impl Store {
 			.execute(&mut *tx)
 			.await
 			.wrap_err("recording where the walk stopped")?;
-		if let Some(listed) = scan.listed {
+		// what the next scan compares its count against, so only a scan's own
+		if let Some(listed) = scan.listed.filter(|_| !scan.ad_hoc) {
 			sqlx::query("UPDATE targets SET listed = ? WHERE id = ?")
 				.bind(i64::try_from(listed).expect("Google lists fewer than 2^63 reviews"))
 				.bind(target.0)

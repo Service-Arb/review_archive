@@ -21,6 +21,8 @@ pub const SCREEN: usize = 10;
 
 /// What a walk needs to know about each card, and when it has seen enough.
 pub trait WalkPolicy: Send {
+	/// Whether to read the list at all, given how many reviews the page says it holds.
+	fn wants_list(&self, total: Option<u64>) -> bool;
 	/// Whether to screenshot this card.
 	fn wants_capture(&self, card: &Card) -> bool;
 	/// Each card the walk reads, once, in list order.
@@ -42,6 +44,8 @@ pub enum WalkEnd {
 	/// The page failed under the walk after it had read cards; what it read stands, and a
 	/// warning says why it stopped.
 	Interrupted,
+	/// The policy did not want the list read ([`WalkPolicy::wants_list`]).
+	Unread,
 }
 
 impl WalkEnd {
@@ -81,6 +85,18 @@ impl Walked {
 			warnings: Vec::new(),
 			sorted: true,
 			total: Some(0),
+		}
+	}
+
+	/// The walk of a list the policy did not want read: nothing read, nothing judged.
+	pub fn unchanged(page_url: String, total: Option<u64>) -> Self {
+		Self {
+			cards: Vec::new(),
+			end: WalkEnd::Unread,
+			page_url,
+			warnings: Vec::new(),
+			sorted: false,
+			total,
 		}
 	}
 
@@ -182,6 +198,12 @@ impl<'a> NewestFirst<'a> {
 }
 
 impl WalkPolicy for NewestFirst<'_> {
+	/// Not when the count is the last scan's and nothing is owed below the top of the list.
+	fn wants_list(&self, total: Option<u64>) -> bool {
+		let owed = self.known.initial || self.known.cut_after.is_some() || self.known.reviews.values().any(|k| k.capture_pending && !k.gone);
+		owed || total.is_none() || total != self.known.listed
+	}
+
 	fn wants_capture(&self, card: &Card) -> bool {
 		self.known.wants_capture(&card.id)
 	}
@@ -237,6 +259,10 @@ impl<'a> Requested<'a> {
 }
 
 impl WalkPolicy for Requested<'_> {
+	fn wants_list(&self, _: Option<u64>) -> bool {
+		true
+	}
+
 	fn wants_capture(&self, card: &Card) -> bool {
 		self.known.wants_capture(&card.id) && self.wanted.as_ref().is_none_or(|w| w.contains(&card.id))
 	}
@@ -526,6 +552,38 @@ mod tests {
 		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a week ago").0));
 		let s = p.conclude(walked(vec![card("k9", "a week ago")], WalkEnd::Interrupted, true, None), 200, now());
 		assert_eq!(s.cut_after, None);
+	}
+
+	/// The same count as the last scan, with nothing owed below it, is not read: nothing is
+	/// judged from it either. A pending capture, a gap, or a first scan reads regardless.
+	#[test]
+	fn an_unchanged_count_is_not_read() {
+		let settled = Known {
+			listed: Some(1),
+			..known(["a".to_owned()], &[])
+		};
+		let p = NewestFirst::new(&settled, now());
+		assert!(!p.wants_list(Some(1)));
+		assert!(p.wants_list(Some(2)) && p.wants_list(Some(0)) && p.wants_list(None));
+		let s = p.conclude(Walked::unchanged(String::new(), Some(1)), 200, now());
+		assert_eq!((s.reviews.len(), s.coverage, s.cut_after, s.listed), (0, Coverage::DownTo(None), None, Some(1)));
+		assert!(s.warnings.is_empty());
+
+		let owed = [
+			Known {
+				listed: Some(1),
+				..known(["a".to_owned()], &["a"])
+			},
+			Known {
+				cut_after: Some("a".into()),
+				..settled.clone()
+			},
+			Known { initial: true, ..settled.clone() },
+		];
+		for k in &owed {
+			assert!(NewestFirst::new(k, now()).wants_list(Some(1)), "{k:?}");
+		}
+		assert!(Requested::new(&settled, None::<Vec<String>>).wants_list(Some(1)));
 	}
 
 	#[test]

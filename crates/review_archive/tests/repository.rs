@@ -384,6 +384,30 @@ async fn an_ad_hoc_capture_is_not_the_targets_scan() {
 	assert!(e.store.last_run(e.target.id).await.unwrap().is_some());
 }
 
+/// The count a scan compares its own against is the last scan's: a capture that read a
+/// newer one has not archived what that newer count holds.
+#[tokio::test]
+async fn the_count_to_compare_is_the_last_scans() {
+	let e = env().await;
+	let listed = || async { e.store.known(e.target.id).await.unwrap().listed };
+	let counted = |n| {
+		Ok(Scan {
+			listed: Some(n),
+			..cut(vec![], None).unwrap()
+		})
+	};
+	let src = Scripted(Mutex::new(counted(3)));
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(listed().await, Some(3));
+
+	src.set(counted(4));
+	e.archive().run(&AdHoc(&src), &e.target).await.unwrap();
+	assert_eq!(listed().await, Some(3));
+
+	e.archive().run(&src, &e.target).await.unwrap();
+	assert_eq!(listed().await, Some(4));
+}
+
 /// Where a walk was cut short is kept until a scan gets past it; a capture may leave a
 /// gap of its own but never covers up one.
 #[tokio::test]
