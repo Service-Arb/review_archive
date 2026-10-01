@@ -26,7 +26,7 @@ pub fn remedy(e: &eyre::Report) -> Remedy {
 	if let Some(e) = e.downcast_ref::<SessionError>() {
 		return match e {
 			SessionError::Blocked { .. } | SessionError::LimitedView { .. } => Remedy::Pause,
-			SessionError::MarkupChanged { .. } | SessionError::Consent { .. } => Remedy::Human,
+			SessionError::MarkupChanged { .. } | SessionError::Consent { .. } | SessionError::SignedOut { .. } => Remedy::Human,
 			SessionError::Launch { .. } => Remedy::Fatal,
 			SessionError::Browser(e) => match *e.kind {
 				browser_manipulation::ErrorKind::Launch(_) | browser_manipulation::ErrorKind::DriverMismatch { .. } | browser_manipulation::ErrorKind::ProfileInUse(_) => Remedy::Fatal,
@@ -81,6 +81,13 @@ pub enum SessionError {
 		help("this browser session is not trusted with the full page: every Maps walk pauses, and one probes later")
 	)]
 	LimitedView,
+	#[leaf]
+	#[error("the scanner's browser is signed out of Google, which then shows a place's first few reviews only, unsorted")]
+	#[diagnostic(
+		code(review_archive::google::signed_out),
+		help("sign the browser profile (`browser.profile_dir`, else `<data_dir>/chromium-profile`) in to a Google account, in a window; Maps stays halted until a restart")
+	)]
+	SignedOut,
 	#[leaf]
 	#[error("{step}: none of {selectors:?} on the page")]
 	#[diagnostic(

@@ -79,9 +79,9 @@ with its own platform implements `sources::ReviewSource` and records through
 - **Nothing is ever written to Google.** Sources read. There is no stealth, no fingerprint
   masking, no proxy or account rotation, no CAPTCHA solving. When Google does not serve the
   full page — the "unusual traffic" page, or its "limited view" without reviews — the run
-  fails and the error says which. When it asks a signed-out browser to sign in before
-  sorting (such a list also stops at its first few cards), what it shows is read in its own
-  order: the run is `partial`, says why, and judges nothing gone. A failed walk saves the
+  fails and the error says which. A browser signed out of Google fails every walk
+  (`signed_out`): Maps shows it a place's first few reviews only, unsorted, which is no
+  archive; Maps halts until a restart, its profile signed in. A failed walk saves the
   page as `<data_dir>/artifacts/browser_captures/<UTC time>-<step>.{png,html}` (kept 7 days),
   and its error names them as `[<path>]`s — which is what the server's alerts attach, from
   under `<data_dir>/artifacts/` only.

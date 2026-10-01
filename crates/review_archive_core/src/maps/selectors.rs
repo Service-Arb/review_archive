@@ -88,8 +88,13 @@ pub const SORT_NEWEST: &[&str] = &[r#"[role="menuitemradio"][data-index="1"]"#, 
 /// "Sign in" on the dialog Google opens instead of the sort menu for a signed-out browser
 /// (seen 2026-09, windowed and headless alike, on every click and on Enter). Such a list
 /// also stops at its first five cards, with a "See more reviews" button that opens the same
-/// dialog. What is shown is read in Google's own order; nothing here signs in.
+/// dialog. A walk that meets it fails: nothing here signs in.
 pub const SIGN_IN_GATE: &[&str] = &[r#"[role="dialog"] button[jsaction*=".signIn"]"#];
+
+/// The account corner's "Sign in" link: the browser is signed out of Google, and Maps
+/// will show it no more than the first few reviews, unsorted. The link, not its label,
+/// which is translated.
+pub const SIGNED_OUT: &[&str] = &[r#"a[href^="https://accounts.google.com/ServiceLogin"]"#];
 
 /// A review card. Inner buttons carry the same attribute, so only the outermost element
 /// with it counts (the parser and the in-page scripts both apply that rule).

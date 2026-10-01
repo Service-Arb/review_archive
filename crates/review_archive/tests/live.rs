@@ -4,8 +4,8 @@
 //! `REVIEW_ARCHIVE_CHROME` points at the browser (the devShell sets it),
 //! `REVIEW_ARCHIVE_HEADFUL=1` opens a window, and `REVIEW_ARCHIVE_PROFILE` reuses a browser
 //! profile instead of a fresh one. Google may answer with a "limited view" of Maps that
-//! has no reviews (headless, or a fresh profile), or ask to sign in before sorting; the
-//! scan then fails, or comes out partial, and says so with the page saved.
+//! has no reviews (headless, or a fresh profile), and a profile signed out of Google fails;
+//! the scan then says so with the page saved.
 
 use review_archive::{
 	Archive, CaptureRequest, SessionError,
@@ -49,7 +49,7 @@ async fn live_scan_of_a_real_place() {
 	archive.close().await;
 	println!("{summary}");
 
-	// What Google serves a fresh signed-out headless browser is its call; each answer must come out as ARCHITECTURE's invariants say.
+	// What Google serves the browser is its call; each answer must come out as ARCHITECTURE's invariants say.
 	let error = summary.error.as_deref();
 	if summary.status == RunStatus::Failed {
 		let error = error.expect("a failed run says why");
@@ -57,13 +57,8 @@ async fn live_scan_of_a_real_place() {
 		assert!(error.contains("-walk-failed.png]"), "{summary}");
 		return;
 	}
-	if let Some(error) = error.filter(|e| e.contains("sign in before it sorts")) {
-		assert_eq!(summary.status, RunStatus::Partial);
-		assert!(error.contains("-sign-in-gate.png]"), "{summary}");
-		assert!(summary.counts.new > 0, "{summary}");
-	} else {
-		assert_eq!(summary.counts.new, 12, "{summary}");
-	}
+	assert_eq!(error, None, "{summary}");
+	assert_eq!(summary.counts.new, 12, "{summary}");
 	assert!(summary.captured >= summary.counts.new * 5 / 6, "{summary}");
 	let reviews = archive.reviews(id, &ReviewsQuery::default()).await.unwrap();
 	assert!(reviews.iter().all(|r| r.rating.is_some() && r.published_est.is_some()));
@@ -87,7 +82,10 @@ async fn live_capture_without_a_store() {
 		Ok(got) => got,
 		Err(e) => {
 			assert!(
-				matches!(e.downcast_ref::<SessionError>(), Some(SessionError::LimitedView { .. } | SessionError::Blocked { .. })),
+				matches!(
+					e.downcast_ref::<SessionError>(),
+					Some(SessionError::LimitedView { .. } | SessionError::Blocked { .. } | SessionError::SignedOut { .. })
+				),
 				"{}",
 				review_archive::describe(&e)
 			);

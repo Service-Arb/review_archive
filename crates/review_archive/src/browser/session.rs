@@ -34,8 +34,6 @@ pub(crate) struct Opened {
 	pub page_url: String,
 	pub sorted: bool,
 	pub total: Option<u64>,
-	/// What went wrong on the way without failing it; the walk's warnings start with these.
-	pub warnings: Vec<String>,
 }
 
 /// What the sort button opened.
@@ -106,7 +104,11 @@ impl Page<'_> {
 		self.handle_interstitials().await?;
 
 		// The place panel renders after load; wait for the way into the reviews.
-		if !self.wait_for_any(sel::REVIEWS_TAB).await? {
+		let has_reviews_tab = self.wait_for_any(sel::REVIEWS_TAB).await?;
+		if self.eval::<bool>(js::ANY, sel::SIGNED_OUT).await? {
+			return Err(SessionError::new_signed_out());
+		}
+		if !has_reviews_tab {
 			if self.eval::<bool>(js::HAS_TEXT, sel::LIMITED_VIEW_TEXT).await? {
 				return Err(SessionError::new_limited_view());
 			}
@@ -136,26 +138,15 @@ impl Page<'_> {
 		if !self.wait_for_any(sel::SORT_BUTTON).await? {
 			return Err(markup_changed("waiting for the sort button", sel::SORT_BUTTON));
 		}
-		let mut warnings = Vec::new();
 		let sorted = match self.open_sort_menu().await? {
 			SortMenu::Open => self.pick_newest().await?,
-			SortMenu::SignInRequired => {
-				let saved = self.save("sign-in-gate").await;
-				self.dismiss_promo().await?;
-				tracing::info!(place_id, "Google asks to sign in before sorting; reading the list in its own order");
-				warnings.push(
-					"Google asks this signed-out browser to sign in before it sorts the reviews or shows more than the first few; the ones shown were read in its own order".to_owned(),
-				);
-				warnings.extend(saved.map(super::page_line));
-				false
-			}
+			SortMenu::SignInRequired => return Err(SessionError::new_signed_out()),
 		};
 
 		Ok(Some(Opened {
 			page_url: self.tab.url(),
 			sorted,
 			total,
-			warnings,
 		}))
 	}
 
@@ -232,7 +223,7 @@ impl Page<'_> {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<WalkedCard> = Vec::new();
-		let mut warnings = opened.warnings;
+		let mut warnings = Vec::new();
 		let mut idle = 0;
 		let end = loop {
 			let step = async {

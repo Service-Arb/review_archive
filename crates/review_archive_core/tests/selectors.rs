@@ -38,6 +38,13 @@ fn signed_out_sort_opens_the_sign_in_dialog() {
 }
 
 #[test]
+fn a_signed_out_page_says_so_in_its_account_corner() {
+	let doc = fixture("maps_en_signed_out_header.html");
+	assert_eq!(first(&doc, sel::SIGNED_OUT).and_then(|a| a.value().attr("aria-label")), Some("Sign in"));
+	assert!(first(&fixture("maps_en_replies.html"), sel::SIGNED_OUT).is_none(), "a review list alone is no sign of either");
+}
+
+#[test]
 fn limited_view_has_a_place_but_no_reviews_tab() {
 	let doc = fixture("maps_fr_limited_view.html");
 
