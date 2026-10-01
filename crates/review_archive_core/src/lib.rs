@@ -23,7 +23,7 @@
 //!   <div class="MyEned"><span class="wiI7pd">Lovely</span></div></div>"#;
 //! let now = "2026-09-26T12:00:00Z".parse().unwrap();
 //! let reviews = maps::parse::cards(html).into_iter().map(|c| maps::observed(c, now)).collect();
-//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![], cut_after: None };
+//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![], cut_after: None, listed: None };
 //! let plan = reconcile::plan(&Known::default(), &scan);
 //! assert_eq!(plan.new.len(), 1);
 //! assert_eq!(plan.new[0].rating, Some(5));
