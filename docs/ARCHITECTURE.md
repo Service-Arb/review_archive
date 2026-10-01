@@ -32,7 +32,8 @@ crates/review_archive/          the engine (features: maps, store)
   src/places.rs                 Places API search for URLs without an id
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
   src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`), `/mfe/`, the page at `/`
-  src/auth.rs                   who is calling: the operator's token, or valeratrades.com's sign-in cookie (`va_sso`)
+  src/auth.rs                   who is calling: the operator's token, or valeratrades.com's sign-in cookie (`va_sso`);
+                                whose `/me` it is (`X-Member`, admins only)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
   src/config.rs                 the TOML config: data dir, bind, browser, defaults

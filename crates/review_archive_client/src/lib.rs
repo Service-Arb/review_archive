@@ -30,8 +30,8 @@ use std::fmt;
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 pub use review_archive_core::dto;
 use review_archive_core::dto::{
-	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, NewGmail, NewTarget, NewTgChannel, NewTrack, NewWebhook, ReinstatementDto,
-	ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
+	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, MEMBER_HEADER, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
+	NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
@@ -81,6 +81,8 @@ pub struct Client {
 	base: Url,
 	/// `None`: whatever the HTTP client carries authenticates (a browser's cookies).
 	token: Option<String>,
+	/// `/me` routes act as this member: an admin's.
+	member: Option<String>,
 }
 
 impl fmt::Debug for Client {
@@ -112,7 +114,21 @@ impl Client {
 			let path = format!("{}/", base.path());
 			base.set_path(&path);
 		}
-		Ok(Self { http, base, token: None })
+		Ok(Self {
+			http,
+			base,
+			token: None,
+			member: None,
+		})
+	}
+
+	/// The same caller, acting as `member` on `/me` routes: what an admin sees and does on
+	/// their behalf. Anyone else is refused (403).
+	pub fn as_member(self, member: impl Into<String>) -> Self {
+		Self {
+			member: Some(member.into()),
+			..self
+		}
 	}
 
 	/// The token goes only to the archive: a path that resolves to another origin (an
@@ -122,11 +138,14 @@ impl Client {
 		if url.origin() != self.base.origin() {
 			return Err(Error::Url(format!("{path:?} is not on {}", self.base)));
 		}
-		let req = self.http.request(method, url);
-		Ok(match &self.token {
-			Some(t) => req.bearer_auth(t),
-			None => req,
-		})
+		let mut req = self.http.request(method, url);
+		if let Some(t) = &self.token {
+			req = req.bearer_auth(t);
+		}
+		if let Some(m) = &self.member {
+			req = req.header(MEMBER_HEADER, m);
+		}
+		Ok(req)
 	}
 
 	async fn send(req: RequestBuilder) -> Result<reqwest::Response, Error> {
@@ -249,6 +268,16 @@ impl Client {
 	pub async fn delete_webhook(&self, id: i64) -> Result<(), Error> {
 		Self::send(self.request(Method::DELETE, &format!("webhooks/{id}"))?).await?;
 		Ok(())
+	}
+
+	/// `GET /me`: who is signed in.
+	pub async fn me(&self) -> Result<Me, Error> {
+		Self::json(self.request(Method::GET, "me")?).await
+	}
+
+	/// `GET /members`: everyone in `service-arb`, as valeratrades.com lists them. An admin's.
+	pub async fn members(&self) -> Result<Vec<MemberDto>, Error> {
+		Self::json(self.request(Method::GET, "members")?).await
 	}
 
 	/// `GET /me/overview`: the member's gmails, each with its places.

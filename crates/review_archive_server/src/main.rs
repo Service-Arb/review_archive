@@ -323,8 +323,9 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 async fn serve(archive: Archive, config: &Config, settings: &Settings) -> eyre::Result<()> {
 	let bind = config.bind;
 	let signals = std::sync::Arc::new(worker::Signals::default());
-	let (verifier, sign_in) = settings.sso()?.unzip();
-	let auth = Auth::new(settings.api_token()?, verifier);
+	let sso = settings.sso()?;
+	let sign_in = sso.as_ref().map(|s| s.refresh.clone());
+	let auth = Auth::new(settings.api_token()?, sso);
 	let app = http::router(http::AppState::new(archive.clone(), auth, signals.clone()), config.mfe_dir.as_deref(), sign_in.as_deref());
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");

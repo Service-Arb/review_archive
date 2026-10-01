@@ -25,6 +25,7 @@ ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel",
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 review_archive = { workspace = true, features = ["maps", "store"] }
 review_archive_core = { workspace = true, features = ["openapi"] }
 serde.workspace = true

@@ -198,7 +198,9 @@ Several people track their places here, grouped the way they manage them: by
 **managing gmail**, the Google manager account a small group of GBPs is attached to.
 
 - A **member** is a verified email in valeratrades.com's `service-arb` group, as its
-  `va_access` cookie says; there is no member table here.
+  `va_access` cookie says; there is no member table here. `GET /members` (admins) is the
+  site's list of the group and its admins, with their usernames, from its `/auth/members`
+  (beside `SSO_REFRESH_URL`), asked with the admin's own cookie.
 - `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
   not a credential. GBP reads keep the service's one grant: a client adds the service's
   Google account as a manager of their GBP.
@@ -221,7 +223,7 @@ Several people track their places here, grouped the way they manage them: by
 
 Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
 
-- `REVIEW_ARCHIVE_TOKEN` as a bearer is the operator: every route but `/me`. Any other
+- `REVIEW_ARCHIVE_TOKEN` as a bearer is the operator: every route but `/me`, unless it names a member (below). Any other
   bearer is a 401.
 - A browser brings the site's `va_access` cookie (`Domain=.valeratrades.com`): an EdDSA
   JWT `{sub, email, username, admin, groups, exp}` of 15 minutes, verified here with the
@@ -229,6 +231,9 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
   opens the operator's routes; `service-arb` in `groups`, or `admin`, opens `/me` and
   `GET /captures/{sha}.png` of the places the member's gmails track. Anyone else signed in
   gets 403.
+- `GET /me` is who signed in: email, username, admin. On every other `/me` route an admin —
+  the operator's token too — acts as the member `X-Member` names: their gmails, boards and
+  channels, their writes. Anyone else sending it gets 403.
 - A cookie-authenticated request other than GET/HEAD must carry
   `Sec-Fetch-Site: same-origin`, or it is a 403: the cookie rides along on requests other
   sites start.
@@ -253,7 +258,9 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
 sign-in="…">`, its bundle served by the binary under `/mfe/` (`mfe_dir`) and its page
 (`index.html`) at `/`, so it calls the API on its own origin with the sign-in cookie. A 401
 sends the top window to `sign-in` (`SSO_REFRESH_URL`, the site's `/auth/refresh`) with
-`return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard".
+`return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard",
+on ev_lib's `uikit`. An admin gets tabs: their own dashboard, and one per member opened from
+`GET /members`, acting as them through `X-Member`.
 
 ## Library
 

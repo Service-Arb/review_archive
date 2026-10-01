@@ -2,6 +2,7 @@
 //! address, browser, defaults — is the TOML config (`--config`).
 
 use review_archive::{config::Secrets, sources::gbp::Credentials};
+use review_archive_server::auth::SsoSite;
 
 ev_lib::settings! {
 	/// Each secret is needed only by what uses it; a missing one fails that, with an error
@@ -22,8 +23,8 @@ ev_lib::settings! {
 		#[secret]
 		gbp_refresh_token: Option<String>,
 		/// valeratrades.com's public key (PEM) for the `va_access` sign-in cookie, and its
-		/// `/auth/refresh`, where a browser without a live cookie is sent. Both or neither;
-		/// unset, only the operator's token works.
+		/// `/auth/refresh`, where a browser without a live cookie is sent (`/auth/members` is
+		/// its sibling). Both or neither; unset, only the operator's token works.
 		sso_public_key: Option<String>,
 		sso_refresh_url: Option<String>,
 		/// The bot members' Telegram channels are posted by.
@@ -59,13 +60,12 @@ impl Settings {
 		}
 	}
 
-	/// The sign-in cookie's verifier and where to sign in: `None` takes only the operator's token.
-	pub fn sso(&self) -> eyre::Result<Option<(va_sso::Verifier, String)>> {
+	/// valeratrades.com as the sign-in: `None` takes only the operator's token.
+	pub fn sso(&self) -> eyre::Result<Option<SsoSite>> {
 		match (&self.sso_public_key, &self.sso_refresh_url) {
 			(Some(key), Some(url)) => {
 				let verifier = va_sso::Verifier::try_new(key).map_err(|e| eyre::eyre!("SSO_PUBLIC_KEY is not an Ed25519 public key PEM: {e}"))?;
-				eyre::ensure!(url.starts_with("https://") || url.starts_with("http://"), "SSO_REFRESH_URL is not a URL: {url}");
-				Ok(Some((verifier, url.clone())))
+				Ok(Some(SsoSite::new(verifier, url)?))
 			}
 			(None, None) => Ok(None),
 			_ => eyre::bail!("SSO_PUBLIC_KEY and SSO_REFRESH_URL go together: set both, or neither"),

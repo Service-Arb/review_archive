@@ -4,6 +4,7 @@
 
 use std::{io::Read, sync::Arc, time::Duration};
 
+use axum::response::IntoResponse;
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use review_archive::{
@@ -11,13 +12,13 @@ use review_archive::{
 	config::Config,
 	core::{
 		Coverage, Known, Observed, Scan, Target,
-		dto::{CaptureRequest, Event, JobStatus, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch},
+		dto::{CaptureRequest, Event, JobStatus, Me, MemberDto, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch},
 	},
 	sources::ReviewSource,
 };
 use review_archive_client::{Captured, Client};
 use review_archive_server::{
-	auth::Auth,
+	auth::{Auth, SsoSite},
 	http::{AppState, router},
 	worker::Signals,
 };
@@ -49,7 +50,20 @@ async fn env() -> Env {
 	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
 	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
-	let auth = Auth::new(TOKEN, Some(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap()));
+	// valeratrades.com's `/auth/members`, as far as the archive sees it: answers whoever forwards a cookie
+	let site = axum::Router::new().route(
+		"/auth/members",
+		axum::routing::get(|headers: axum::http::HeaderMap| async move {
+			match headers.get("cookie").is_some_and(|c| c.to_str().unwrap().starts_with("va_access=")) {
+				true => axum::Json(serde_json::json!([{"email": BOB, "username": "bob", "display_name": "Bob B"}])).into_response(),
+				false => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+			}
+		}),
+	);
+	let site_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let refresh = format!("http://{}/auth/refresh", site_listener.local_addr().unwrap());
+	tokio::spawn(async move { axum::serve(site_listener, site).await.unwrap() });
+	let auth = Auth::new(TOKEN, Some(SsoSite::new(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap(), &refresh).unwrap()));
 	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None, None);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
@@ -679,6 +693,42 @@ async fn members_and_the_operator_keep_to_their_routes() {
 
 	let stranger = e.signed_in("stranger@x.com", false, &["another-group"], "same-origin");
 	assert_eq!(stranger.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	e.server.abort();
+}
+
+/// An admin acts as any member through `X-Member`: their overview, their writes. No one else
+/// may; without it, everyone is themselves; `/me` is always who signed in.
+#[tokio::test]
+async fn an_admin_acts_as_a_member_and_no_one_else_may() {
+	let e = env().await;
+	let alice = e.member(ALICE);
+	alice.add_gmail("alice@gmail.com").await.unwrap();
+	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
+	assert_eq!(admin.overview().await.unwrap(), vec![], "without the header, the admin's own");
+	let as_alice = admin.clone().as_member(ALICE);
+	assert_eq!(as_alice.overview().await.unwrap(), alice.overview().await.unwrap());
+	as_alice.add_gmail("ops@gmail.com").await.unwrap();
+	assert_eq!(alice.overview().await.unwrap().len(), 2, "the admin's write is alice's");
+	assert_eq!(e.client.clone().as_member(ALICE).overview().await.unwrap().len(), 2, "the operator's token acts too");
+	assert_eq!(e.member(BOB).as_member(ALICE).overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+
+	let root = Me {
+		email: "root@x.com".into(),
+		username: "root@x.com".into(),
+		admin: true,
+	};
+	assert_eq!(as_alice.me().await.unwrap(), root);
+	assert!(!alice.me().await.unwrap().admin);
+	assert_eq!(e.client.me().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "the token is no one");
+
+	let bob = MemberDto {
+		email: BOB.into(),
+		username: Some("bob".into()),
+		display_name: Some("Bob B".into()),
+	};
+	assert_eq!(admin.members().await.unwrap(), vec![bob]);
+	assert_eq!(alice.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(e.client.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "no cookie to ask the site with");
 	e.server.abort();
 }
 

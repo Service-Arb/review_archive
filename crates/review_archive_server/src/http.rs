@@ -1,7 +1,7 @@
 //! The HTTP API: everything the CLI does, for other services, and `/me` for members; at `/`,
 //! the dashboard's page. Everything but `/`, `/health`, `/openapi.json` and the MFE's files
 //! wants a caller (see [`crate::auth`]): the operator's routes refuse members, `/me` refuses
-//! the operator's token.
+//! the operator's token unless it names a member.
 //! JSON in and out — errors included, the ones axum's extractors raise too — with the
 //! DTOs of `review_archive_core::dto`. Every handler only translates: what to do, and
 //! what the caller got wrong, is the facade's.
@@ -23,8 +23,9 @@ use review_archive::{Archive, Rejected, store::export::Destination};
 use review_archive_core::{
 	ReviewId, TargetId,
 	dto::{
-		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, NewGmail, NewTarget, NewTgChannel, NewTrack, NewWebhook,
-		ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto, stats_csv,
+		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
+		NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
+		stats_csv,
 	},
 };
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -35,7 +36,7 @@ use utoipa::{
 };
 
 use crate::{
-	auth::{Auth, Caller, Member, admin_only, authenticate},
+	auth::{Auth, Caller, GROUP, Member, admin_only, authenticate, cookie},
 	worker::Signals,
 };
 
@@ -78,8 +79,10 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/stats", get(stats))
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
+		.route("/members", get(members))
 		.route_layer(middleware::from_fn(admin_only));
 	let me = Router::new()
+		.route("/me", get(me))
 		.route("/me/overview", get(overview))
 		.route("/me/gmails", post(add_gmail))
 		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail))
@@ -326,6 +329,48 @@ async fn webhooks(State(s): State<AppState>) -> ApiResult<Json<Vec<WebhookDto>>>
 async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
 	s.archive.delete_webhook(id).await?;
 	Ok(StatusCode::NO_CONTENT)
+}
+
+/// Who is signed in, whoever `X-Member` names.
+#[utoipa::path(get, path = "/me", tag = "me", responses((status = 200, body = Me), (status = 403, body = ErrorBody)))]
+async fn me(caller: Caller) -> ApiResult<Json<Me>> {
+	match (caller.email, caller.username) {
+		(Some(email), Some(username)) => Ok(Json(Me {
+			email,
+			username,
+			admin: caller.admin,
+		})),
+		_ => Err(ApiError(StatusCode::FORBIDDEN, "the operator's token is no one".into())),
+	}
+}
+
+/// Everyone in `service-arb`, as valeratrades.com lists them, asked with the admin's own sign-in.
+#[utoipa::path(get, path = "/members", tag = "me", responses((status = 200, body = [MemberDto]), (status = 403, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn members(State(s): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<MemberDto>>> {
+	let (Some(sso), Some(access)) = (&s.auth.sso, cookie(&headers, va_sso::COOKIE)) else {
+		return Err(ApiError(StatusCode::FORBIDDEN, "the site lists members to a signed-in admin, not to the operator's token".into()));
+	};
+	let bad_gateway = |e: eyre::Report| {
+		crate::report(&e, "listing members");
+		ApiError(StatusCode::BAD_GATEWAY, "valeratrades.com did not list the members".into())
+	};
+	let resp = reqwest::Client::new()
+		.get(sso.members.clone())
+		.query(&[("group", GROUP)])
+		.header(header::COOKIE, format!("{}={access}", va_sso::COOKIE))
+		.timeout(Duration::from_secs(10))
+		.send()
+		.await
+		.map_err(|e| bad_gateway(e.into()))?;
+	let status = resp.status();
+	if status.is_success() {
+		return Ok(Json(resp.json().await.map_err(|e| bad_gateway(e.into()))?));
+	}
+	let why = resp.text().await.map_err(|e| bad_gateway(e.into()))?;
+	match status {
+		reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(ApiError(StatusCode::from_u16(status.as_u16()).expect("401 and 403 are statuses"), why)),
+		_ => Err(bad_gateway(eyre::eyre!("{} answered {status}: {why}", sso.members))),
+	}
 }
 
 /// The member's gmails, each with its places, by screenshots over the last 7 days.

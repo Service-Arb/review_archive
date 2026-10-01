@@ -4798,6 +4798,7 @@ dependencies = [
  "eyre",
  "jiff",
  "rand 0.10.3",
+ "reqwest 0.13.5",
  "review_archive",
  "review_archive_core",
  "serde",

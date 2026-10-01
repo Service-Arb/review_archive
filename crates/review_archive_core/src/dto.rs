@@ -700,3 +700,30 @@ pub struct NewTgChannel {
 	/// What to send.
 	pub events: Vec<Event>,
 }
+
+/// `GET /me`: who is signed in, whoever they act as.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Me {
+	/// Their verified email.
+	pub email: String,
+	/// Their valeratrades.com username.
+	pub username: String,
+	/// May act as any member (`X-Member`).
+	pub admin: bool,
+}
+
+/// `GET /members`: a member as valeratrades.com lists them.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MemberDto {
+	/// The email the group lists.
+	pub email: String,
+	/// `None`: not signed up yet.
+	pub username: Option<String>,
+	/// Their Google name, if they signed in with Google.
+	pub display_name: Option<String>,
+}
+
+/// On `/me` routes: the member an admin acts as.
+pub const MEMBER_HEADER: &str = "x-member";
