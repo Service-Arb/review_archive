@@ -62,7 +62,13 @@ fn shown(e: review_archive_client::Error) -> String {
 			.expect("the host page names where to sign in");
 		let here = window.location().href().expect("a page has a URL");
 		let to = format!("{sign_in}?return_to={}", String::from(js_sys::encode_uri_component(&here)));
-		window.top().expect("a browsing context").expect("a top window").location().set_href(&to).expect("navigating the top window");
+		window
+			.top()
+			.expect("a browsing context")
+			.expect("a top window")
+			.location()
+			.set_href(&to)
+			.expect("navigating the top window");
 	}
 	e.to_string()
 }
@@ -148,7 +154,14 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pic
 	rsx! {
 		nav { class: "flex w-60 shrink-0 flex-col border-r border-line bg-panel",
 			div { class: "px-4 py-4 text-[14px] font-semibold", "review_archive" }
-			div { class: "px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-faint", "Managing gmails" }
+			div { class: "flex items-center gap-1.5 px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-faint",
+				"Managing gmails"
+				span {
+					class: "cursor-help normal-case text-[12px] hover:text-fg",
+					title: "Full gmail address or any alias for it. Used only to group places; it doesn't affect any actions taken.\nIf no managing account is connected, enter the email the place is on, or its shorthand.",
+					"ⓘ"
+				}
+			}
 			div { class: "flex flex-col gap-0.5 px-2",
 				for g in gmails {
 					button {
