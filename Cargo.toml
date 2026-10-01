@@ -58,10 +58,10 @@ v_utils = { version = "2.19", default-features = false, features = ["macros"] }
 va_sso = "0.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+ev_lib_classes = "0.11"
 insta = { version = "1", features = ["yaml"] }
 png = "0.18"
 tempfile = "3"
-ev_lib_classes = "0.11"
 
 [workspace.lints.clippy]
 float_cmp = "allow"
