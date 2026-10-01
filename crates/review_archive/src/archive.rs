@@ -9,9 +9,8 @@ mod members;
 use std::sync::Arc;
 #[cfg(all(feature = "store", feature = "maps"))]
 use std::sync::OnceLock;
-#[cfg(feature = "store")]
-use std::time::Duration;
 
+#[cfg(feature = "store")]
 #[cfg(any(feature = "maps", feature = "store"))]
 use jiff::Timestamp;
 #[cfg(any(feature = "maps", feature = "store"))]
@@ -22,8 +21,10 @@ use review_archive_core::{
 	GbpLocation, Rejected, ReviewId, Target, TargetId, TargetKind,
 	dto::{self, DayStats, ExportQuery, JobDto, JobKind, NewTarget, NewWebhook, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetPatch, WebhookDto},
 	fmt_ts, parse_date, parse_interval, parse_since,
-	schedule::{self, LastRun},
+	schedule::{LastRun, Schedule},
 };
+#[cfg(feature = "store")]
+use v_utils::Timeframe;
 
 #[cfg(feature = "maps")]
 use crate::browser::Browser;
@@ -72,6 +73,8 @@ pub struct Archive {
 
 struct Inner {
 	defaults: Defaults,
+	#[cfg(feature = "store")]
+	schedule: Schedule,
 	// Everything that uses the secrets and the HTTP client (resolving places, the gbp
 	// client) comes with a store.
 	#[cfg(feature = "store")]
@@ -170,7 +173,7 @@ impl Archive {
 				// inside the alerts' root, which they attach from and whose pruning leaves directories alone
 				artifacts: config.artifacts_dir().map(|dir| browser_manipulation::Artifacts {
 					dir: dir.join("browser_captures"),
-					retention: std::time::Duration::from_secs(7 * 24 * 3600),
+					retention: config.browser.artifacts_retention.duration(),
 				}),
 				..config.browser.clone()
 			};
@@ -212,15 +215,17 @@ impl Archive {
 			}),
 			_ => None,
 		};
+		#[cfg(feature = "store")]
+		let http = reqwest::Client::builder().timeout(config.defaults.api_timeout.duration()).build()?;
 		Ok(Self {
 			inner: Arc::new(Inner {
+				#[cfg(feature = "store")]
+				schedule: config.schedule,
 				defaults: config.defaults,
 				#[cfg(feature = "store")]
 				secrets: config.secrets,
-				// Places and the Business Profile API answer in seconds; a hung call must not
-				// hold the one worker forever.
 				#[cfg(feature = "store")]
-				http: reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?,
+				http,
 				#[cfg(feature = "store")]
 				webhooks: Deliverer::new(&config.webhooks, telegram)?,
 				#[cfg(feature = "maps")]
@@ -305,12 +310,10 @@ impl Archive {
 		self.insert_target(place, req.label.clone(), req.lang.clone(), interval, gbp, true).await
 	}
 
-	async fn insert_target(&self, place: &str, label: Option<String>, lang: Option<String>, interval: Option<Duration>, gbp: Option<GbpLocation>, enabled: bool) -> eyre::Result<Added> {
+	async fn insert_target(&self, place: &str, label: Option<String>, lang: Option<String>, interval: Option<Timeframe>, gbp: Option<GbpLocation>, enabled: bool) -> eyre::Result<Added> {
 		let store = self.store()?;
 		let interval = interval.unwrap_or(self.inner.defaults.interval);
-		if interval < schedule::MIN_INTERVAL {
-			return Err(Rejected::invalid("the interval must be at least 1h").into());
-		}
+		self.check_interval(interval)?;
 		let lang = lang.unwrap_or_else(|| self.inner.defaults.lang.clone());
 		check_lang(&lang)?;
 		let (place_id, resolved) = crate::places::resolve(&self.inner.http, self.inner.secrets.google_maps_key.as_deref(), place).await?;
@@ -344,8 +347,19 @@ impl Archive {
 	/// ever deleted.
 	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<Target> {
 		let store = self.store()?;
+		if let Some(interval) = patch.interval.as_deref() {
+			self.check_interval(parse_interval(interval)?)?;
+		}
 		store.update_target(id, patch).await?;
 		store.target(id).await
+	}
+
+	fn check_interval(&self, interval: Timeframe) -> Result<(), Rejected> {
+		let min = self.inner.schedule.min_interval;
+		if interval < min {
+			return Err(Rejected::invalid(format!("the interval must be at least {min}")));
+		}
+		Ok(())
 	}
 
 	/// The target's last scheduled run and the failures in a row up to it.
@@ -412,6 +426,7 @@ impl Archive {
 		let recorded = Recorder {
 			store: &stored.store,
 			blobs: &stored.blobs,
+			schedule: &self.inner.schedule,
 			now: Timestamp::now,
 		}
 		.record(source, target, job)
@@ -680,7 +695,7 @@ impl Archive {
 	/// When a target is next due by its schedule; `None`: never scanned, due now.
 	pub async fn due_at(&self, target: &Target) -> eyre::Result<Option<Timestamp>> {
 		let last = self.store()?.last_run(target.id).await?;
-		Ok(schedule::due_at(target.id, target.interval, last))
+		Ok(self.inner.schedule.due_at(target.id, target.interval, last))
 	}
 
 	/// Enabled targets and when each is due: a halted source's are left out, and a paused

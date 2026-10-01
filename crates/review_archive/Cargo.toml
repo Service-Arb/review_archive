@@ -16,6 +16,8 @@ default = ["maps", "store"]
 # Google in a headless Chromium: the `Browser` handle, the `maps` source, and the `gbp`
 # source (Business Profiles through the official API, screenshots from the Maps page).
 maps = ["dep:browser_manipulation"]
+# the config sections as v_utils `Settings` sections
+settings = ["dep:clap", "dep:schemars", "v_utils/cli", "review_archive_core/settings"]
 # SQLite + content-addressed PNGs under a data dir, runs, stats, export, webhooks.
 store = [
     "dep:futures",
@@ -28,6 +30,7 @@ store = [
 
 [dependencies]
 browser_manipulation = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 crc32fast.workspace = true
 eyre.workspace = true
 futures = { workspace = true, optional = true }
@@ -36,9 +39,11 @@ jiff.workspace = true
 miette.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 review_archive_core.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+smart-default.workspace = true
 sqlx = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tg_types = { workspace = true, optional = true }

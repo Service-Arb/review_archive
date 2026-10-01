@@ -12,7 +12,8 @@ use review_archive::{
 		dto::{JobKind, JobStatus, NewTarget, TargetPatch},
 	},
 };
-use review_archive_server::worker::{Signals, run};
+use review_archive_core::schedule::Schedule;
+use review_archive_server::worker::{Signals, WorkerConfig, run};
 use tokio::sync::watch;
 
 const PLACE: &str = "ChIJLU7jZClu5kcR4PcOOO6p3I0";
@@ -76,7 +77,8 @@ async fn a_restart_fails_the_interrupted_job_and_queued_jobs_go_before_due_targe
 	let signals = Signals::default();
 	let (stop, stopped) = watch::channel(false);
 	let mut finished = signals.job_finished.subscribe();
-	let worker = run(&archive, &signals, stopped);
+	let (cfg, schedule) = (WorkerConfig::default(), Schedule::default());
+	let worker = run(&archive, &signals, &cfg, &schedule, stopped);
 	let observe = async {
 		tokio::time::timeout(Duration::from_secs(20), finished.changed()).await.expect("a job finished").unwrap();
 		let job = store.job(queued).await.unwrap().unwrap();

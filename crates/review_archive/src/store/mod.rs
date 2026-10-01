@@ -23,12 +23,13 @@ use review_archive_core::{
 	dto::{CaptureDto, Counts, DayStats, Event, JobStatus, ReviewDetail, ReviewDto, RunDto, RunStatus, TargetPatch, VersionDto, capture_url},
 	fmt_ts, parse_interval,
 	reconcile::Plan,
-	schedule::{self, Breaker, LastRun},
+	schedule::{Breaker, LastRun, Schedule},
 };
 use sqlx::{
 	FromRow, SqliteConnection, Transaction,
 	sqlite::{Sqlite, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
+use v_utils::Timeframe;
 pub use webhooks::{Delivery, Recipient};
 
 fn parse_ts(s: &str) -> eyre::Result<Timestamp> {
@@ -59,8 +60,8 @@ pub struct InsertTarget {
 	pub gbp: Option<GbpLocation>,
 	/// UI language of the Maps page.
 	pub lang: String,
-	/// At least an hour.
-	pub interval: Duration,
+	/// At least `schedule.min_interval`.
+	pub interval: Timeframe,
 	/// Disabled targets are kept but not scheduled (ad-hoc captures).
 	pub enabled: bool,
 }
@@ -293,7 +294,12 @@ impl TryFrom<TargetRow> for Target {
 			place_id: r.place_id,
 			gbp,
 			lang: r.lang,
-			interval: Duration::from_secs(u64::try_from(r.interval_secs).wrap_err("negative interval_secs")?),
+			interval: Timeframe(
+				u64::try_from(r.interval_secs)
+					.wrap_err("negative interval_secs")?
+					.checked_mul(1000)
+					.ok_or_else(|| eyre::eyre!("interval_secs {} overflows", r.interval_secs))?,
+			),
 			enabled: r.enabled,
 			created_at: parse_ts(&r.created_at)?,
 		})
@@ -359,7 +365,7 @@ impl Store {
 		.bind(t.gbp.as_ref().map(|g| g.account.as_str()))
 		.bind(t.gbp.as_ref().map(|g| g.location.as_str()))
 		.bind(&t.lang)
-		.bind(i64::try_from(t.interval.as_secs()).map_err(|_| Rejected::invalid("the interval is too long"))?)
+		.bind(i64::try_from(t.interval.duration().as_secs()).map_err(|_| Rejected::invalid("the interval is too long"))?)
 		.bind(t.enabled)
 		.bind(fmt_ts(now))
 		.fetch_one(&self.pool)
@@ -387,15 +393,12 @@ impl Store {
 		row.ok_or_else(|| no_target(id))?.try_into()
 	}
 
-	/// Changes what the patch sets; interval at least an hour.
+	/// Changes what the patch sets.
 	pub async fn update_target(&self, id: TargetId, patch: &TargetPatch) -> eyre::Result<()> {
 		if let Some(lang) = &patch.lang {
 			check_lang(lang)?;
 		}
 		let interval = patch.interval.as_deref().map(parse_interval).transpose()?;
-		if interval.is_some_and(|i| i < schedule::MIN_INTERVAL) {
-			return Err(Rejected::invalid("the interval must be at least 1h").into());
-		}
 		let done = sqlx::query(
 			"UPDATE targets SET label = COALESCE(?, label), lang = COALESCE(?, lang), interval_secs = COALESCE(?, interval_secs),
 			                    enabled = COALESCE(?, enabled)
@@ -404,7 +407,7 @@ impl Store {
 		.bind(patch.label.as_deref())
 		.bind(patch.lang.as_deref())
 		// parse_interval keeps it within i64
-		.bind(interval.map(|i| i.as_secs() as i64))
+		.bind(interval.map(|i| i.duration().as_secs() as i64))
 		.bind(patch.enabled)
 		.bind(id.0)
 		.execute(&self.pool)
@@ -526,7 +529,7 @@ impl Store {
 	}
 
 	/// Pauses Maps, or pauses it for longer after a failed probe.
-	pub async fn trip_breaker(&self, reason: &str, now: Timestamp) -> eyre::Result<Breaker> {
+	pub async fn trip_breaker(&self, reason: &str, now: Timestamp, schedule: &Schedule) -> eyre::Result<Breaker> {
 		let mut tx = self.write().await?;
 		let prev: Option<(String, i64)> = sqlx::query_as("SELECT tripped_at, trips FROM maps_breaker")
 			.fetch_optional(&mut *tx)
@@ -542,7 +545,7 @@ impl Store {
 				})
 			})
 			.transpose()?;
-		let b = Breaker::trip(prev, reason, now);
+		let b = Breaker::trip(prev, reason, now, schedule);
 		sqlx::query("INSERT OR REPLACE INTO maps_breaker (id, tripped_at, reason_code, trips, probe_after) VALUES (1, ?, ?, ?, ?)")
 			.bind(fmt_ts(b.tripped_at))
 			.bind(&b.reason)

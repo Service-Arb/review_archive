@@ -26,11 +26,13 @@ eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-review_archive = { workspace = true, features = ["maps", "store"] }
+review_archive = { workspace = true, features = ["maps", "settings", "store"] }
 review_archive_core = { workspace = true, features = ["openapi"] }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+smart-default.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
@@ -40,6 +42,7 @@ tower-http = { workspace = true, features = ["fs", "timeout"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
+v_utils = { workspace = true, features = ["cli", "xdg"] }
 va_sso.workspace = true
 
 [lints]

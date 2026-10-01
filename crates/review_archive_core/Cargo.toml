@@ -11,20 +11,26 @@ readme.workspace = true
 [features]
 # `utoipa::ToSchema` on the DTOs, for the server's OpenAPI document.
 openapi = ["dep:utoipa"]
+# `Schedule` as a section of a v_utils `Settings` config
+settings = ["dep:clap", "dep:schemars", "v_utils/cli"]
 
 [dependencies]
+clap = { workspace = true, optional = true }
 csv.workspace = true
 eyre.workspace = true
 jiff.workspace = true
 miette.workspace = true
+schemars = { workspace = true, optional = true }
 scraper.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
+smart-default.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 url.workspace = true
 utoipa = { workspace = true, optional = true }
+v_utils.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

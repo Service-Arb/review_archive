@@ -28,38 +28,52 @@ use review_archive_core::{
 		stats_csv,
 	},
 };
+use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::{services::ServeDir, timeout::TimeoutLayer};
 use utoipa::{
 	OpenApi,
 	openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
+use v_utils::{Timeframe, macros::SettingsNested};
 
 use crate::{
 	auth::{Auth, Caller, GROUP, Member, admin_only, authenticate, cookie},
 	worker::Signals,
 };
 
-/// The longest `POST /captures?wait=` holds a request.
-pub const MAX_WAIT: Duration = Duration::from_secs(120);
-/// Past this a request is answered 408: `MAX_WAIT` and then some. Exports are exempt.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-/// API requests served at once; more wait their turn. `/health` is not counted.
-const MAX_CONCURRENT: usize = 64;
+/// How long requests may take, and how many are served at once.
+#[derive(Clone, Debug, Deserialize, Serialize, SettingsNested, SmartDefault, schemars::JsonSchema)]
+#[settings(prefix = "http")]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+	/// The longest `POST /captures?wait=` holds a request.
+	#[default(Timeframe::from("2m"))]
+	pub max_wait: Timeframe,
+	/// Past this a request is answered 408: `max_wait` and then some. Exports are exempt.
+	#[default(Timeframe::from("3m"))]
+	pub request_timeout: Timeframe,
+	/// API requests served at once; more wait their turn. `/health` is not counted.
+	#[default(64)]
+	pub max_concurrent: usize,
+}
 
 #[derive(Clone)]
 pub struct AppState {
 	pub archive: Archive,
 	pub auth: Arc<Auth>,
 	pub signals: Arc<Signals>,
+	pub cfg: Arc<HttpConfig>,
 }
 
 impl AppState {
-	pub fn new(archive: Archive, auth: Auth, signals: Arc<Signals>) -> Self {
+	pub fn new(archive: Archive, auth: Auth, signals: Arc<Signals>, cfg: HttpConfig) -> Self {
 		Self {
 			archive,
 			auth: Arc::new(auth),
 			signals,
+			cfg: Arc::new(cfg),
 		}
 	}
 }
@@ -96,11 +110,11 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 	let timed = admin
 		.merge(me)
 		.route("/captures/{file}", get(capture_png))
-		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT));
+		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, state.cfg.request_timeout.duration()));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
 		.merge(Router::new().route("/targets/{id}/export.zip", get(export_zip)).route_layer(middleware::from_fn(admin_only)))
-		.layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT))
+		.layer(GlobalConcurrencyLimitLayer::new(state.cfg.max_concurrent))
 		.route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 	// the probes answer whatever load the API is under
 	let mut app = Router::new()
@@ -245,7 +259,7 @@ async fn capture(State(s): State<AppState>, Query(q): Query<WaitQuery>, JsonBody
 	let mut finished = s.signals.job_finished.subscribe();
 	let job_id = s.archive.enqueue_capture(&req).await?;
 	s.signals.job_queued.notify_one();
-	let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.unwrap_or(0)).min(MAX_WAIT);
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.unwrap_or(0)).min(s.cfg.max_wait.duration());
 	loop {
 		let job = s.archive.job(job_id).await?;
 		if job.status.is_finished() {

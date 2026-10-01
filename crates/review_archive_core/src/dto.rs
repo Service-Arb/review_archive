@@ -47,7 +47,7 @@ impl From<Target> for TargetDto {
 			gbp_account,
 			gbp_location,
 			lang: t.lang,
-			interval_secs: t.interval.as_secs(),
+			interval_secs: t.interval.duration().as_secs(),
 			enabled: t.enabled,
 			created_at: fmt_ts(t.created_at),
 		}

@@ -19,7 +19,7 @@ use review_archive::{
 use review_archive_client::{Captured, Client};
 use review_archive_server::{
 	auth::{Auth, SsoSite},
-	http::{AppState, router},
+	http::{AppState, HttpConfig, router},
 	worker::Signals,
 };
 
@@ -64,7 +64,7 @@ async fn env() -> Env {
 	let refresh = format!("http://{}/auth/refresh", site_listener.local_addr().unwrap());
 	tokio::spawn(async move { axum::serve(site_listener, site).await.unwrap() });
 	let auth = Auth::new(TOKEN, Some(SsoSite::new(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap(), &refresh).unwrap()), None);
-	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None, None);
+	let app = router(AppState::new(archive.clone(), auth, signals.clone(), HttpConfig::default()), None, None);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -749,7 +749,7 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 		.unwrap();
 	let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
 	let mfe = tempfile::tempdir().unwrap();
-	let app = router(AppState::new(archive, auth, Arc::new(Signals::default())), Some(mfe.path()), Some("/"));
+	let app = router(AppState::new(archive, auth, Arc::new(Signals::default()), HttpConfig::default()), Some(mfe.path()), Some("/"));
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

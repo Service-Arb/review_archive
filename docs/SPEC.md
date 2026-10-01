@@ -107,10 +107,11 @@ deleted.
 
 ## Scheduling
 
-- Per-target `interval_secs`, default 1 d, minimum 1 h, ±10 % jitter.
-- One scan at a time; 5–15 s random pause between targets.
+- Per-target `interval_secs`, default `defaults.interval` (1 d), minimum `schedule.min_interval`
+  (1 h), ±`schedule.jitter` (10 %).
+- One scan at a time; a random pause between targets, `schedule.pause_{min,max}` (5–15 s).
 - Failure → `runs.status=failed` with the error, exponential backoff for that
-  target (cap: 24 h), other targets continue.
+  target (`schedule.backoff_base` doubling to `schedule.backoff_cap`: 1 h → 24 h), other targets continue.
 - Ad-hoc captures run on the same browser but are not the target's schedule: their
   runs neither delay the next scan nor count as failures.
 - A scan whose browser profile another process holds (a `scan` beside a running
@@ -139,11 +140,13 @@ HTTP (axum), the operator's bearer `REVIEW_ARCHIVE_TOKEN` or a browser's sign-in
 
 Errors are JSON (`{"error": …}`) with 400 for input the archive cannot use (a body or a
 query it cannot read included), 404 for what does not exist, 429 when the job queue is
-full, and a bare `internal error` for a 5xx. API requests take 180 s at most (an export as long as it
-needs) and 64 are served at once; `/health` and `/openapi.json` are outside both limits.
+full, and a bare `internal error` for a 5xx. API requests take `http.request_timeout` at most (an export as long as it
+needs) and `http.max_concurrent` are served at once; `/health` and `/openapi.json` are outside both limits.
 
-Config: TOML file (`--config`) for data dir, bind address, defaults (including
-`max_queued_jobs`), `[webhooks] allowed_hosts`; secrets only from env.
+Config: v_utils `Settings` (`--config`, else `$XDG_CONFIG_HOME/review_archive.{toml,nix,…}`;
+each key also a flag, e.g. `--schedule-min-interval`) for data dir, bind address, defaults,
+pacing (`[schedule]`, `[worker]`, `[http]`, `[webhooks]`, `[browser]`); every key has a default,
+`review_archive config write-defaults` lists them. Secrets only from env.
 
 ### HTTP API for other services
 

@@ -9,6 +9,7 @@ use review_archive_core::{
 	Capture, Coverage, Known, ReviewId, Scan, Target, TargetKind,
 	dto::{Counts, RunStatus, RunSummary},
 	reconcile,
+	schedule::Schedule,
 };
 
 use crate::{
@@ -39,6 +40,8 @@ pub struct Recorder<'a> {
 	pub blobs: &'a BlobStore,
 	/// What dates the run: [`Timestamp::now`], or a pinned clock in tests (time is I/O).
 	pub now: fn() -> Timestamp,
+	/// How long a tripped Maps breaker waits.
+	pub schedule: &'a Schedule,
 }
 
 impl Recorder<'_> {
@@ -79,7 +82,7 @@ impl Recorder<'_> {
 						.downcast_ref::<crate::SessionError>()
 						.and_then(miette::Diagnostic::code)
 						.expect("a pause is a SessionError, which has codes");
-					let b = self.store.trip_breaker(&reason.to_string(), (self.now)()).await?;
+					let b = self.store.trip_breaker(&reason.to_string(), (self.now)(), self.schedule).await?;
 					tracing::error!(error, trips = b.trips, probe_after = %b.probe_after, "Google flagged us: every Maps walk pauses until the probe");
 				}
 				summary.error = Some(error);

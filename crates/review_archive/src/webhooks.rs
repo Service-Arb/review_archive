@@ -12,12 +12,11 @@ use std::{
 	collections::BTreeMap,
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	sync::Arc,
-	time::Duration,
 };
 
 use futures::{StreamExt, TryStreamExt};
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::{SignedDuration, Timestamp};
+use jiff::Timestamp;
 use reqwest::{
 	StatusCode, Url,
 	dns::{Addrs, Name, Resolve, Resolving},
@@ -35,15 +34,6 @@ use crate::{
 	store::{Delivery, Recipient, Store, blobs::BlobStore},
 };
 
-/// Tries before a delivery is given up on. With the backoff below that is about a day.
-pub const MAX_ATTEMPTS: i64 = 12;
-const FIRST_RETRY: Duration = Duration::from_secs(30);
-const RETRY_CAP: Duration = Duration::from_secs(6 * 3600);
-/// Deliveries taken per pass.
-const BATCH: u32 = 50;
-/// Hooks delivered to at once: a slow one does not hold up the others.
-const PARALLEL_HOOKS: usize = 8;
-
 /// HMAC-SHA256 (RFC 2104).
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 	let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
@@ -55,12 +45,6 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 /// it over the raw body with the hook's secret and compares.
 pub fn signature(secret: &str, body: &[u8]) -> String {
 	format!("sha256={}", hex(&hmac_sha256(secret.as_bytes(), body)))
-}
-
-/// How long after the `n`th failed try (1-based) the next one is: 30 s, doubling, at most
-/// six hours.
-pub fn retry_delay(n: i64) -> Duration {
-	schedule::backoff(FIRST_RETRY, RETRY_CAP, u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// What one pass over the outbox did.
@@ -104,6 +88,7 @@ impl std::fmt::Debug for Telegram {
 #[derive(Clone, Debug)]
 pub struct Deliverer {
 	http: reqwest::Client,
+	cfg: WebhookConfig,
 	/// Lowercase; empty means any host with only public addresses.
 	allowed: Arc<[String]>,
 	/// The Bot API is the operator's to name, so it goes through a client of its own,
@@ -118,15 +103,26 @@ impl Deliverer {
 		let allowed: Arc<[String]> = cfg.allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
 		let http = reqwest::Client::builder()
 			.redirect(reqwest::redirect::Policy::none())
-			.connect_timeout(Duration::from_secs(3))
-			.timeout(Duration::from_secs(10))
+			.connect_timeout(cfg.connect_timeout.duration())
+			.timeout(cfg.timeout.duration())
 			.no_proxy()
 			.dns_resolver(Arc::new(PublicOnly { allowed: allowed.clone() }))
 			.build()?;
 		let telegram = telegram
-			.map(|t| eyre::Ok((reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(30)).build()?, t)))
+			.map(|t| {
+				let client = reqwest::Client::builder()
+					.connect_timeout(cfg.connect_timeout.duration())
+					.timeout(cfg.telegram_timeout.duration())
+					.build()?;
+				eyre::Ok((client, t))
+			})
 			.transpose()?;
-		Ok(Self { http, allowed, telegram })
+		Ok(Self {
+			http,
+			cfg: cfg.clone(),
+			allowed,
+			telegram,
+		})
 	}
 
 	/// Whether a webhook may be sent to `url`: `http` or `https`, to a host `allowed_hosts`
@@ -158,7 +154,7 @@ impl Deliverer {
 	/// failing is a retry.
 	pub async fn deliver_due(&self, store: &Store, now: Timestamp) -> eyre::Result<DeliveryReport> {
 		let mut by_recipient: BTreeMap<(bool, i64), Vec<Delivery>> = BTreeMap::new();
-		for d in store.due_deliveries(now, BATCH).await? {
+		for d in store.due_deliveries(now, self.cfg.batch).await? {
 			let key = match &d.to {
 				Recipient::Webhook { id, .. } => (false, *id),
 				Recipient::Telegram { id, .. } => (true, *id),
@@ -167,7 +163,7 @@ impl Deliverer {
 		}
 		futures::stream::iter(by_recipient.into_values())
 			.map(|deliveries| self.deliver_to(store, deliveries, now))
-			.buffer_unordered(PARALLEL_HOOKS)
+			.buffer_unordered(self.cfg.parallel)
 			.try_fold(DeliveryReport::default(), |mut sum, r| async move {
 				sum += r;
 				Ok(sum)
@@ -195,9 +191,9 @@ impl Deliverer {
 				continue;
 			};
 			let tries = d.attempts + 1;
-			let retry_at = (tries < MAX_ATTEMPTS).then(|| {
-				now.checked_add(SignedDuration::try_from(retry_delay(tries)).unwrap_or(SignedDuration::MAX))
-					.unwrap_or(Timestamp::MAX)
+			let retry_at = (tries < i64::from(self.cfg.max_attempts)).then(|| {
+				let n = u32::try_from(tries).expect("below max_attempts, a u32");
+				now.checked_add(schedule::backoff(self.cfg.first_retry, self.cfg.retry_cap, n)).unwrap_or(Timestamp::MAX)
 			});
 			tracing::warn!(delivery = d.id, to = ?d.to, tries, error, "delivery failed");
 			store.delivery_failed(d.id, &error, retry_at, Timestamp::now()).await?;
@@ -392,6 +388,8 @@ fn is_public(ip: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+	use jiff::SignedDuration;
+
 	use super::*;
 
 	/// RFC 4231, test cases 1, 2 and 6 (a key longer than the block).
@@ -409,13 +407,15 @@ mod tests {
 	}
 
 	#[test]
-	fn backoff_doubles_and_caps() {
-		assert_eq!(retry_delay(1), Duration::from_secs(30));
-		assert_eq!(retry_delay(2), Duration::from_secs(60));
-		assert_eq!(retry_delay(5), Duration::from_secs(480));
-		assert_eq!(retry_delay(40), RETRY_CAP);
-		let total: Duration = (1..MAX_ATTEMPTS).map(retry_delay).sum();
-		assert!(total > Duration::from_secs(12 * 3600) && total < Duration::from_secs(48 * 3600), "{total:?}");
+	fn default_retries_span_about_a_day() {
+		let c = WebhookConfig::default();
+		let delay = |n| schedule::backoff(c.first_retry, c.retry_cap, n);
+		assert_eq!(delay(1), SignedDuration::from_secs(30));
+		assert_eq!(delay(2), SignedDuration::from_secs(60));
+		assert_eq!(delay(5), SignedDuration::from_secs(480));
+		assert_eq!(delay(40), SignedDuration::from_hours(6));
+		let total: SignedDuration = (1..c.max_attempts).map(delay).fold(SignedDuration::ZERO, |a, b| a + b);
+		assert!(total > SignedDuration::from_hours(12) && total < SignedDuration::from_hours(48), "{total:?}");
 	}
 
 	#[test]

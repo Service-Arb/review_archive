@@ -35,11 +35,13 @@ jiff = { version = "0.2", features = ["serde"] }
 miette = "7"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
+schemars = "1"
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", default-features = false, features = ["macros"] }
 sha2 = "0.11"
+smart-default = "0.7"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 strum = { version = "0.28", features = ["derive"] }
 tg_types = "0.1"

@@ -39,10 +39,11 @@ pub mod reconcile;
 pub mod relative_date;
 pub mod schedule;
 
-use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use jiff::Timestamp;
 use sha2::{Digest, Sha256};
+use v_utils::Timeframe;
 
 /// A watched place's id in the archive.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -153,7 +154,7 @@ pub struct Target {
 	/// UI language of the Maps page, which is the language of its relative dates.
 	pub lang: String,
 	/// How often it is scanned, before jitter.
-	pub interval: Duration,
+	pub interval: Timeframe,
 	/// Disabled targets are kept, with their archive, but not scanned.
 	pub enabled: bool,
 	/// When it was added.
@@ -311,14 +312,14 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Parses `3600` (seconds), `90m`, `6h`, `1d`, `1w`.
-pub fn parse_interval(s: &str) -> Result<Duration, Rejected> {
+pub fn parse_interval(s: &str) -> Result<Timeframe, Rejected> {
 	let s = s.trim();
 	let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 	let (n, unit) = s.split_at(split);
 	let n: u64 = n
 		.parse()
 		.map_err(|_| Rejected::invalid(format!("interval {s:?}: expected a number followed by s, m, h, d or w")))?;
-	let unit_secs = match unit.trim() {
+	let unit_secs: u64 = match unit.trim() {
 		"" | "s" => 1,
 		"m" => 60,
 		"h" => 3600,
@@ -329,7 +330,8 @@ pub fn parse_interval(s: &str) -> Result<Duration, Rejected> {
 	// stored as SQLite's signed 64-bit integer
 	n.checked_mul(unit_secs)
 		.filter(|&secs| i64::try_from(secs).is_ok())
-		.map(Duration::from_secs)
+		.and_then(|secs| secs.checked_mul(1000))
+		.map(Timeframe)
 		.ok_or_else(|| Rejected::invalid(format!("interval {s:?} is too long")))
 }
 
@@ -413,10 +415,10 @@ mod tests {
 
 	#[test]
 	fn intervals() {
-		assert_eq!(parse_interval("6h").unwrap(), Duration::from_secs(6 * 3600));
-		assert_eq!(parse_interval("90m").unwrap(), Duration::from_secs(90 * 60));
-		assert_eq!(parse_interval("3600").unwrap(), Duration::from_secs(3600));
-		assert_eq!(parse_interval("1d").unwrap(), Duration::from_secs(86_400));
+		assert_eq!(parse_interval("6h").unwrap(), v_utils::TF_6H);
+		assert_eq!(parse_interval("90m").unwrap(), v_utils::TF_30MIN * 3);
+		assert_eq!(parse_interval("3600").unwrap(), v_utils::TF_1H);
+		assert_eq!(parse_interval("1d").unwrap(), v_utils::TF_1D);
 		assert!(parse_interval("soon").is_err());
 	}
 }

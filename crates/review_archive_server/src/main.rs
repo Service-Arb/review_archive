@@ -13,25 +13,29 @@ use review_archive::{Archive, SCANNER_VERSION, store::export::Destination};
 use review_archive_core::{
 	TargetId,
 	dto::{ExportQuery, NewGmail, NewTarget, StatsQuery, TargetPatch},
-	schedule,
+	schedule::Schedule,
 };
 use review_archive_server::{auth::Auth, http, report, worker};
 use tokio::sync::watch;
 
-use crate::{config::Config, settings::Settings};
+use crate::{config::AppConfig, settings::Settings};
 
 #[derive(Parser)]
 #[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics")]
 struct Cli {
-	/// TOML config: data dir, bind address, browser, defaults. Secrets come from the environment only.
-	#[arg(long, global = true)]
-	config: Option<PathBuf>,
+	#[clap(flatten)]
+	settings_flags: config::SettingsFlags,
 	#[command(subcommand)]
 	cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+	/// Write the defaults, diff against them, or export the JSON Schema / Nix module of the config.
+	Config {
+		#[command(subcommand)]
+		cmd: config::SettingsCommand,
+	},
 	/// Manage the watched places.
 	#[command(subcommand)]
 	Target(TargetCmd),
@@ -131,6 +135,10 @@ fn main() -> eyre::Result<()> {
 		}
 		return Ok(());
 	}
+	let cli = Cli::parse();
+	if let Cmd::Config { cmd } = cli.cmd {
+		AppConfig::handle_settings_command(cmd, cli.settings_flags);
+	}
 	// Exits 78 (EX_CONFIG) on a bad environment, before anything else is built.
 	let settings = ev_lib::settings::or_exit(Settings::from_env());
 
@@ -143,8 +151,7 @@ fn main() -> eyre::Result<()> {
 		service: std::env::var("OTEL_SERVICE_NAME").ok().filter(|s| !s.trim().is_empty()),
 		traces_sample_rate: error_monitoring::Config::traces_sample_rate_for(&settings.app_env),
 	});
-	let cli = Cli::parse();
-	let mut config = Config::load(cli.config.as_deref())?;
+	let mut config = AppConfig::load(cli.settings_flags.clone())?;
 	if let Cmd::Scan(args) = &cli.cmd {
 		config.browser.dump_html = args.dump_html.clone();
 	}
@@ -199,7 +206,7 @@ fn init_tracing(environment: &str, alerts: Option<alerts::AlertLayer>) -> eyre::
 	Ok(otel_guard)
 }
 
-async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
+async fn run(cli: Cli, config: AppConfig, settings: Settings) -> eyre::Result<()> {
 	// The image points TMPDIR into the data volume, which starts out empty; Chromium puts its
 	// shared memory there (`--disable-dev-shm-usage`) and dies if the directory is missing.
 	let tmp = std::env::temp_dir();
@@ -207,8 +214,9 @@ async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
 	let archive = Archive::open(config.archive(settings.secrets())).await?;
 
 	match cli.cmd {
+		Cmd::Config { .. } => unreachable!("handled before the archive opens"),
 		Cmd::Target(cmd) => target_cmd(&archive, cmd).await,
-		Cmd::Scan(args) => scan(&archive, args).await,
+		Cmd::Scan(args) => scan(&archive, &config.schedule, args).await,
 		Cmd::Serve(args) => serve(archive, &config, &settings, args).await,
 		Cmd::Gmail(GmailCmd::Add { member, gmail }) => {
 			let added = archive.add_gmail(&member.to_lowercase(), &NewGmail { gmail }).await?;
@@ -261,14 +269,14 @@ async fn target_cmd(archive: &Archive, cmd: TargetCmd) -> eyre::Result<()> {
 			for t in archive.targets().await? {
 				let last = archive.last_run(t.id).await?;
 				println!(
-					"#{:<3} {:<4} {:<8} {:<24} {} lang={} every {}h{}{}",
+					"#{:<3} {:<4} {:<8} {:<24} {} lang={} every {}{}{}",
 					t.id,
 					t.kind.as_ref(),
 					if t.enabled { "enabled" } else { "disabled" },
 					t.label,
 					t.place_id,
 					t.lang,
-					t.interval.as_secs() / 3600,
+					t.interval,
 					t.gbp.map(|g| format!(" gbp={}/{}", g.account, g.location)).unwrap_or_default(),
 					last.map(|l| format!(
 						" last run {}{}",
@@ -298,7 +306,7 @@ async fn set_enabled(archive: &Archive, id: i64, enabled: bool) -> eyre::Result<
 	Ok(())
 }
 
-async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
+async fn scan(archive: &Archive, schedule: &Schedule, args: ScanArgs) -> eyre::Result<()> {
 	let targets = match (args.target, args.all) {
 		(Some(id), false) => vec![archive.target(TargetId(id)).await?],
 		(None, true) => archive.targets().await?.into_iter().filter(|t| t.enabled).collect(),
@@ -307,7 +315,7 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 	let mut failed = 0;
 	for (i, t) in targets.iter().enumerate() {
 		if i > 0 {
-			tokio::time::sleep(schedule::pause(rand::random::<f64>())).await;
+			tokio::time::sleep(schedule.pause(rand::random::<f64>())).await;
 		}
 		match archive.scan(t).await {
 			Ok(r) => {
@@ -328,7 +336,7 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 	Ok(())
 }
 
-async fn serve(archive: Archive, config: &Config, settings: &Settings, args: ServeArgs) -> eyre::Result<()> {
+async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: ServeArgs) -> eyre::Result<()> {
 	let bind = config.bind;
 	if args.dev_member.is_some() {
 		eyre::ensure!(bind.ip().is_loopback(), "--dev-member signs everyone in: it serves on a loopback address only, not {bind}");
@@ -339,7 +347,11 @@ async fn serve(archive: Archive, config: &Config, settings: &Settings, args: Ser
 	// a dev member is never sent to sign in: no request of theirs answers 401
 	let sign_in = sso.as_ref().map(|s| s.refresh.clone()).or_else(|| args.dev_member.as_ref().map(|_| "/".to_owned()));
 	let auth = Auth::new(settings.api_token()?, sso, args.dev_member.clone());
-	let app = http::router(http::AppState::new(archive.clone(), auth, signals.clone()), config.mfe_dir.as_deref(), sign_in.as_deref());
+	let app = http::router(
+		http::AppState::new(archive.clone(), auth, signals.clone(), config.http.clone()),
+		config.mfe_dir.as_deref(),
+		sign_in.as_deref(),
+	);
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
 	match (&config.mfe_dir, &sign_in) {
@@ -365,9 +377,9 @@ async fn serve(archive: Archive, config: &Config, settings: &Settings, args: Ser
 		let _ = tx.send(true);
 		Ok::<_, eyre::Report>(())
 	};
-	let deliver = worker::deliver(&archive, rx.clone());
+	let deliver = worker::deliver(&archive, &config.worker, rx.clone());
 	let work = async {
-		let r = worker::run(&archive, &signals, rx).await;
+		let r = worker::run(&archive, &signals, &config.worker, &config.schedule, rx).await;
 		archive.close().await;
 		r
 	};

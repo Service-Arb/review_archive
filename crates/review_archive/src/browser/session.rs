@@ -1,11 +1,7 @@
 //! Driving a plain headless Chromium. No stealth, no fingerprint masking:
 //! the scanner is what it looks like, and a block from Google fails the run.
 
-use std::{
-	collections::HashSet,
-	path::{Path, PathBuf},
-	time::Duration,
-};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use browser_manipulation::{Browser, ErrorKind, Launch, Robot, Shot, Tab, Viewport};
 use eyre::WrapErr;
@@ -20,13 +16,6 @@ use review_archive_core::{
 use serde::Serialize;
 
 use crate::{SessionError, config::BrowserConfig};
-
-const STEP_WAIT: Duration = Duration::from_millis(1500);
-/// Consecutive scrolls without a new card before the feed counts as ended.
-const END_AFTER_IDLE_STEPS: u32 = 5;
-const UI_TIMEOUT: Duration = Duration::from_secs(20);
-const NAV_TIMEOUT: Duration = Duration::from_secs(60);
-const SORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The review list, open and ready to walk.
 #[derive(Debug)]
@@ -45,14 +34,13 @@ enum SortMenu {
 
 pub(crate) struct Session {
 	browser: Browser<Robot>,
-	/// Where to save the cards' HTML on every walk, for refreshing test fixtures.
-	dump_html: Option<PathBuf>,
+	cfg: BrowserConfig,
 }
 
 /// One walk's tab.
 pub(crate) struct Page<'s> {
 	tab: Tab<'s, Robot>,
-	dump_html: Option<&'s Path>,
+	cfg: &'s BrowserConfig,
 }
 
 impl Session {
@@ -70,10 +58,7 @@ impl Session {
 			}),
 		};
 		let browser = Browser::launch(launch, Robot, cfg.artifacts.clone()).await?;
-		Ok(Self {
-			browser,
-			dump_html: cfg.dump_html.clone(),
-		})
+		Ok(Self { browser, cfg: cfg.clone() })
 	}
 
 	pub(crate) async fn close(self) {
@@ -85,7 +70,7 @@ impl Session {
 	pub(crate) async fn page(&self) -> Result<Page<'_>, SessionError> {
 		Ok(Page {
 			tab: self.browser.tab().await?,
-			dump_html: self.dump_html.as_deref(),
+			cfg: &self.cfg,
 		})
 	}
 }
@@ -99,7 +84,7 @@ impl Page<'_> {
 	/// reviews at all, so there is no list.
 	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str) -> Result<Option<Opened>, SessionError> {
 		let url = sel::place_url(place_id, lang);
-		self.tab.set_timeout(NAV_TIMEOUT).await;
+		self.tab.set_timeout(self.cfg.nav_timeout.duration()).await;
 		self.tab.goto(&url).await?;
 		self.handle_interstitials().await?;
 
@@ -184,7 +169,7 @@ impl Page<'_> {
 		}
 		// The relevance-sorted cards stay in the DOM until the new list arrives; reading them
 		// would archive the wrong end of the list. Wait for the first card to change.
-		let deadline = tokio::time::Instant::now() + SORT_TIMEOUT;
+		let deadline = tokio::time::Instant::now() + self.cfg.sort_timeout.duration();
 		let sorted = loop {
 			tokio::time::sleep(Duration::from_millis(300)).await;
 			let now: String = self.eval(js::FIRST_CARD_ID, (sel::CARD, sel::CARD_ID_ATTR)).await?;
@@ -198,7 +183,7 @@ impl Page<'_> {
 				break false;
 			}
 		};
-		tokio::time::sleep(STEP_WAIT).await;
+		tokio::time::sleep(self.cfg.step_wait.duration()).await;
 		if !self.wait_for_any(&[sel::CARD]).await? {
 			return Err(markup_changed("waiting for the list to come back sorted", &[sel::CARD]));
 		}
@@ -235,7 +220,7 @@ impl Page<'_> {
 				// overlap covers a feed that re-rendered its last few cards.
 				let skip = seen.len().saturating_sub(SCREEN);
 				let html: String = self.eval(js::CARDS_HTML, (sel::CARD, skip)).await?;
-				if let Some(dir) = self.dump_html {
+				if let Some(dir) = self.cfg.dump_html.as_deref() {
 					dump(dir, &html).await?;
 				}
 				let mut grew = false;
@@ -265,7 +250,7 @@ impl Page<'_> {
 					return Ok(Some(WalkEnd::Satisfied));
 				}
 				idle = if grew { 0 } else { idle + 1 };
-				if idle >= END_AFTER_IDLE_STEPS {
+				if idle >= self.cfg.idle_steps_to_end {
 					return Ok(Some(WalkEnd::ReachedEnd));
 				}
 				self.check_not_blocked()?;
@@ -273,7 +258,7 @@ impl Page<'_> {
 				if !self.eval::<bool>(js::SCROLL_FEED, sel::CARD).await? {
 					return Ok(Some(WalkEnd::ReachedEnd));
 				}
-				tokio::time::sleep(STEP_WAIT).await;
+				tokio::time::sleep(self.cfg.step_wait.duration()).await;
 				Ok::<_, SessionError>(None)
 			};
 			match step.await {
@@ -324,7 +309,7 @@ impl Page<'_> {
 			return Err(SessionError::new_consent("could not click reject"));
 		}
 		// the answer is a cookie in the profile dir, so the next run goes straight through
-		let deadline = tokio::time::Instant::now() + UI_TIMEOUT;
+		let deadline = tokio::time::Instant::now() + self.cfg.ui_timeout.duration();
 		while self.tab.url().contains(sel::CONSENT_HOST) {
 			if tokio::time::Instant::now() >= deadline {
 				return Err(SessionError::new_consent("still on the consent page after rejecting"));
@@ -357,13 +342,13 @@ impl Page<'_> {
 
 	/// Whether any of `sels` showed up in time.
 	async fn wait_for_any(&mut self, sels: &[&str]) -> Result<bool, SessionError> {
-		self.wait_for_any_within(sels, UI_TIMEOUT).await
+		self.wait_for_any_within(sels, self.cfg.ui_timeout.duration()).await
 	}
 
 	async fn wait_for_any_within(&mut self, sels: &[&str], timeout: Duration) -> Result<bool, SessionError> {
 		self.tab.set_timeout(timeout).await;
 		let shown = self.tab.wait_for_any(sels).await;
-		self.tab.set_timeout(UI_TIMEOUT).await;
+		self.tab.set_timeout(self.cfg.ui_timeout.duration()).await;
 		match shown {
 			Ok(_) => Ok(true),
 			// what a timed-out page showed was captured and is dropped here: the caller decides whether not showing up is a failure

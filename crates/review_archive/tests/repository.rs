@@ -1,17 +1,24 @@
 //! The archive end to end on a temp SQLite: a scripted source, real storage.
 
-use std::{cell::Cell, collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+	cell::Cell,
+	collections::HashMap,
+	sync::{LazyLock, Mutex},
+};
 
 use jiff::Timestamp;
 use review_archive::{
 	core::{
 		Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind,
 		dto::{RunStatus, TargetPatch},
+		schedule::Schedule,
 	},
 	record::Recorder,
 	sources::ReviewSource,
 	store::{InsertTarget, Store, blobs::BlobStore},
 };
+
+static SCHEDULE: LazyLock<Schedule> = LazyLock::new(Schedule::default);
 
 thread_local! {
 	// `#[tokio::test]` runs each test on a thread of its own
@@ -106,7 +113,7 @@ async fn env() -> Env {
 				place_id: "ChIJtesttesttesttest".into(),
 				gbp: None,
 				lang: "fr".into(),
-				interval: Duration::from_secs(6 * 3600),
+				interval: v_utils::TF_6H,
 				enabled: true,
 			},
 			now(),
@@ -129,6 +136,7 @@ impl Env {
 			store: &self.store,
 			blobs: &self.blobs,
 			now,
+			schedule: &SCHEDULE,
 		}
 	}
 

@@ -36,7 +36,7 @@ crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, backgrou
                                 whose `/me` it is (`X-Member`, admins only)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
-  src/config.rs                 the TOML config: data dir, bind, browser, defaults
+  src/config.rs                 the config (v_utils `Settings`): data dir, bind, and every library and server section
 crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs; native and wasm
 crates/review_archive_web/      the dashboard MFE (dioxus, wasm), over the client; `package.sh` lays out /mfe/, `index.html` is `/`
 ```
@@ -82,12 +82,12 @@ with its own platform implements `sources::ReviewSource` and records through
   fails and the error says which. A browser signed out of Google fails every walk
   (`signed_out`): Maps shows it a place's first few reviews only, unsorted, which is no
   archive; Maps halts until a restart, its profile signed in. A failed walk saves the
-  page as `<data_dir>/artifacts/browser_captures/<UTC time>-<step>.{png,html}` (kept 7 days),
+  page as `<data_dir>/artifacts/browser_captures/<UTC time>-<step>.{png,html}` (kept `browser.artifacts_retention`),
   and its error names them as `[<path>]`s — which is what the server's alerts attach, from
   under `<data_dir>/artifacts/` only.
 - **A block pauses Maps, not a target.** Google flags the address, so a `blocked` or
   `limited_view` failure trips `maps_breaker` (SQLite, so a restart keeps it): no Maps walk
-  for any target until its probe time (1 h, doubling to 24 h), then one probes; a walk that
+  for any target until its probe time (`schedule.backoff_base`, doubling to `schedule.backoff_cap`), then one probes; a walk that
   gets through clears it. `gbp` lists go on, their screenshots wait. What retrying cannot
   fix — changed markup or consent page, a refused GBP grant — halts that source until a
   restart; Chromium that will not start ends `serve`.
@@ -126,9 +126,9 @@ with its own platform implements `sources::ReviewSource` and records through
   worker, its HTTP side and a hand-run `scan` never fail on each other's writes. A scan's
   reviews, events, cut, run end and job end commit together.
 - **One browser, one queue.** A single worker uses the browser: queued jobs first
-    (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than three in a
-  row while a target is overdue — then the most overdue target, with a 5–15 s pause between
-  any two. The queue is bounded (`defaults.max_queued_jobs`) and a job already queued is not
+    (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than `worker.jobs_in_a_row`
+  while a target is overdue — then the most overdue target, with a `schedule.pause_{min,max}` pause
+  between any two. The queue is bounded (`defaults.max_queued_jobs`) and a job already queued is not
   queued twice. Jobs live in SQLite; a restart keeps the queued ones and fails the job and the runs that were running — a
   hand-run `scan` still going then included, until it records how it really ended. An ad-hoc capture is stored under the place's `maps` target for its
   language, or a new disabled one: nothing captured is lost, nothing extra gets scheduled, and
@@ -141,7 +141,7 @@ with its own platform implements `sources::ReviewSource` and records through
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
   to `webhook_deliveries` in the same transaction as what they report — a row per hook, and
   per Telegram channel of a member tracking the target — and delivered from there, retried
-  with backoff (30 s doubling, cap 6 h, 12 tries), recipients in parallel, at least once. To
+  with backoff (`webhooks.first_retry` doubling, cap `webhooks.retry_cap`, `webhooks.max_attempts` tries), recipients in parallel, at least once. To
   hooks: signed (`X-Signature: sha256=<HMAC-SHA256 of the body>`); `X-Delivery-Id` lets a
   receiver drop repeats. Where a hook may go: with `webhooks.allowed_hosts` empty, public
   addresses only — its URL is checked when added and every address its host resolves to when

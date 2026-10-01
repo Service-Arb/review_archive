@@ -24,7 +24,8 @@ review_archive export --target 1 --since 2026-01-01 --out cafe.zip
 ```
 
 ```toml
-# config.toml — every key is optional, but a scan needs `browser.executable`
+# config.toml — every key is optional (`review_archive config write-defaults` lists them all),
+# but a scan needs `browser.executable`
 data_dir = "./data"
 bind = "127.0.0.1:59110"
 

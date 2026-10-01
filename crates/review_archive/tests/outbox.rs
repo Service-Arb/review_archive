@@ -4,7 +4,6 @@
 use std::{
 	collections::HashMap,
 	sync::{Arc, Mutex},
-	time::Duration,
 };
 
 use axum::{
@@ -20,11 +19,12 @@ use review_archive::{
 	core::{
 		Coverage, Known, Observed, ReviewId, Scan, Target, TargetKind,
 		dto::{Event, EventPayload, JobKind, JobStatus, NewTgChannel, NewWebhook, RunStatus},
+		schedule::Schedule,
 	},
 	record::Recorder,
 	sources::ReviewSource,
 	store::{InsertTarget, Recipient, Store, blobs::BlobStore},
-	webhooks::{Deliverer, MAX_ATTEMPTS, Telegram, signature},
+	webhooks::{Deliverer, Telegram, signature},
 };
 
 /// The receivers here listen on loopback, which only a listed host may reach.
@@ -97,7 +97,7 @@ async fn target(store: &Store) -> Target {
 				place_id: "ChIJtesttesttesttest".into(),
 				gbp: None,
 				lang: "en".into(),
-				interval: Duration::from_secs(6 * 3600),
+				interval: v_utils::TF_6H,
 				enabled: true,
 			},
 			Timestamp::now(),
@@ -132,6 +132,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 		store: &store,
 		blobs: &blobs,
 		now: Timestamp::now,
+		schedule: &Schedule::default(),
 	};
 
 	// two new reviews, then one of them gone, then a failed run; `changed` is not subscribed
@@ -202,6 +203,7 @@ async fn a_dead_receiver_is_given_up_on_and_a_removed_hook_is_owed_nothing() {
 		store: &store,
 		blobs: &blobs,
 		now: Timestamp::now,
+		schedule: &Schedule::default(),
 	}
 	.run(&src, &t)
 	.await
@@ -209,7 +211,7 @@ async fn a_dead_receiver_is_given_up_on_and_a_removed_hook_is_owed_nothing() {
 
 	let hooks = deliverer();
 	let mut at = Timestamp::now();
-	for _ in 0..MAX_ATTEMPTS {
+	for _ in 0..WebhookConfig::default().max_attempts {
 		hooks.deliver_due(&store, at).await.unwrap();
 		at = at.checked_add(jiff::SignedDuration::from_hours(7)).unwrap();
 	}
@@ -271,6 +273,7 @@ async fn an_edited_review_that_is_back_sends_changed_and_reappeared() {
 		store: &store,
 		blobs: &blobs,
 		now: Timestamp::now,
+		schedule: &Schedule::default(),
 	};
 	let src = Scripted(Mutex::new(complete(vec![review("a", "x"), review("b", "y")])));
 	rec.run(&src, &t).await.unwrap();
@@ -338,7 +341,7 @@ async fn telegram_channels_get_their_members_places_only() {
 				place_id: "ChIJelsewhereelsewhere".into(),
 				gbp: None,
 				lang: "en".into(),
-				interval: Duration::from_secs(6 * 3600),
+				interval: v_utils::TF_6H,
 				enabled: true,
 			},
 			now,
@@ -371,6 +374,7 @@ async fn telegram_channels_get_their_members_places_only() {
 		store: &store,
 		blobs: &blobs,
 		now: Timestamp::now,
+		schedule: &Schedule::default(),
 	};
 	let mut shot = review("b", "rude");
 	shot.capture = Some(review_archive::core::Capture {

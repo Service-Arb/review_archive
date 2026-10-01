@@ -6,22 +6,34 @@ use std::time::Duration;
 use jiff::Timestamp;
 use rand::RngExt;
 use review_archive::{Archive, Remedy, describe, remedy};
-use review_archive_core::{dto::JobStatus, schedule};
+use review_archive_core::{dto::JobStatus, schedule::Schedule};
+use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use tokio::{
 	sync::{Notify, watch},
 	time::Instant,
 };
+use v_utils::{Timeframe, macros::SettingsNested};
 
 use crate::report;
 
-/// The longest sleep between looks at the target list, so a target added or re-enabled
-/// from the CLI is picked up without a restart.
-const MAX_IDLE: Duration = Duration::from_secs(60);
-/// How often the outbox is looked at.
-const DELIVERY_TICK: Duration = Duration::from_secs(5);
-/// Queued jobs run back to back at most before an overdue target gets its scan: a busy
-/// queue delays the schedule, it does not stop it.
-const JOBS_IN_A_ROW: u32 = 3;
+/// How the worker and the deliverer take turns.
+#[derive(Clone, Debug, Deserialize, Serialize, SettingsNested, SmartDefault, schemars::JsonSchema)]
+#[settings(prefix = "worker")]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerConfig {
+	/// The longest sleep between looks at the target list, so a target added or re-enabled
+	/// from the CLI is picked up without a restart.
+	#[default(Timeframe::from("1m"))]
+	pub max_idle: Timeframe,
+	/// How often the outbox is looked at.
+	#[default(Timeframe::from("5s"))]
+	pub delivery_tick: Timeframe,
+	/// Queued jobs run back to back at most before an overdue target gets its scan: a busy
+	/// queue delays the schedule, it does not stop it.
+	#[default(3)]
+	pub jobs_in_a_row: u32,
+}
 
 /// How the HTTP side and the worker nudge each other.
 #[derive(Debug)]
@@ -45,7 +57,7 @@ impl Default for Signals {
 /// goes first (but not more than a few in a row while a target is overdue), then the most
 /// overdue target; between two, a polite pause. A scan in flight at shutdown is
 /// abandoned; the next start fails its run and its job.
-pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Receiver<bool>) -> eyre::Result<()> {
+pub async fn run(archive: &Archive, signals: &Signals, cfg: &WorkerConfig, schedule: &Schedule, mut shutdown: watch::Receiver<bool>) -> eyre::Result<()> {
 	let interrupted = archive.recover().await?;
 	if interrupted > 0 {
 		tracing::warn!(interrupted, "failed the jobs the previous process died running");
@@ -58,14 +70,14 @@ pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Rece
 			return Ok(());
 		}
 		if let Some(at) = last_scan {
-			let pause = schedule::pause(rand::rng().random::<f64>());
+			let pause = schedule.pause(rand::rng().random::<f64>());
 			tokio::select! {
 				() = tokio::time::sleep_until(at + pause) => {}
 				_ = shutdown.changed() => return Ok(()),
 			}
 		}
 		let step = tokio::select! {
-			r = step(archive, signals, &mut jobs_in_a_row) => r,
+			r = step(archive, signals, cfg, &mut jobs_in_a_row) => r,
 			_ = shutdown.changed() => return Ok(()),
 		};
 		let wait = match step {
@@ -78,7 +90,7 @@ pub async fn run(archive: &Archive, signals: &Signals, mut shutdown: watch::Rece
 			Err(e) => {
 				// the archive itself failed (database); try again later rather than spin
 				report(&e, "worker step failed");
-				MAX_IDLE
+				cfg.max_idle.duration()
 			}
 		};
 		last_scan = None;
@@ -99,8 +111,8 @@ enum Step {
 	Idle(Duration),
 }
 
-async fn step(archive: &Archive, signals: &Signals, jobs_in_a_row: &mut u32) -> eyre::Result<Step> {
-	if *jobs_in_a_row < JOBS_IN_A_ROW && run_job(archive, signals).await? {
+async fn step(archive: &Archive, signals: &Signals, cfg: &WorkerConfig, jobs_in_a_row: &mut u32) -> eyre::Result<Step> {
+	if *jobs_in_a_row < cfg.jobs_in_a_row && run_job(archive, signals).await? {
 		*jobs_in_a_row += 1;
 		return Ok(Step::Scanned);
 	}
@@ -123,10 +135,11 @@ async fn step(archive: &Archive, signals: &Signals, jobs_in_a_row: &mut u32) -> 
 		return Ok(Step::Scanned);
 	}
 	let now = Timestamp::now();
+	let max_idle = cfg.max_idle.duration();
 	Ok(Step::Idle(match archive.next_due(now).await? {
-		Some(next) if next > now => Duration::try_from(next - now).unwrap_or(MAX_IDLE).min(MAX_IDLE),
+		Some(next) if next > now => Duration::try_from(next.duration_since(now)).expect("positive: next > now").min(max_idle),
 		Some(_) => Duration::ZERO,
-		None => MAX_IDLE,
+		None => max_idle,
 	}))
 }
 
@@ -146,7 +159,7 @@ async fn run_job(archive: &Archive, signals: &Signals) -> eyre::Result<bool> {
 }
 
 /// Delivers the webhook outbox every few seconds, until `shutdown`.
-pub async fn deliver(archive: &Archive, mut shutdown: watch::Receiver<bool>) -> eyre::Result<()> {
+pub async fn deliver(archive: &Archive, cfg: &WorkerConfig, mut shutdown: watch::Receiver<bool>) -> eyre::Result<()> {
 	//LOOP: runs for the life of `serve`
 	loop {
 		match archive.deliver_webhooks().await {
@@ -155,7 +168,7 @@ pub async fn deliver(archive: &Archive, mut shutdown: watch::Receiver<bool>) -> 
 			Err(e) => report(&e, "webhook delivery pass failed"),
 		}
 		tokio::select! {
-			() = tokio::time::sleep(DELIVERY_TICK) => {}
+			() = tokio::time::sleep(cfg.delivery_tick.duration()) => {}
 			_ = shutdown.changed() => return Ok(()),
 		}
 	}
