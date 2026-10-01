@@ -50,7 +50,7 @@ impl Browser {
 		Self {
 			inner: Arc::new(Inner {
 				cfg,
-				profile_dir,
+				profile_dir: std::path::absolute(&profile_dir).expect("the working directory exists"), // Chromium refuses a relative one
 				state: tokio::sync::Mutex::default(),
 			}),
 		}
