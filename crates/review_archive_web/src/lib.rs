@@ -186,7 +186,7 @@ fn act<F: Future<Output = Result<(), review_archive_client::Error>> + 'static>(f
 	});
 }
 
-const SHELL: &str = "flex min-h-[640px] bg-background text-ink text-[13px] font-sans";
+const SHELL: &str = "flex min-h-0 flex-1 bg-background text-ink text-[13px] font-sans";
 
 #[component]
 fn Dashboard() -> Element {
@@ -205,8 +205,10 @@ fn Shell() -> Element {
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
 	};
 	rsx! {
-		{body}
-		Outlet::<Route> {}
+		div { class: "flex h-dvh flex-col",
+			{body}
+			Outlet::<Route> {}
+		}
 	}
 }
 
@@ -240,11 +242,11 @@ fn Admin(email: String) -> Element {
 		None => Route::at(m, View::Home),
 	};
 	let shown = |m: Option<&str>| match active.as_deref() == m {
-		true => "",
+		true => "flex min-h-0 flex-1",
 		false => "hidden",
 	};
 	rsx! {
-		div { class: "flex flex-col bg-background text-ink text-[13px] font-sans",
+		div { class: "flex min-h-0 flex-1 flex-col bg-background text-ink text-[13px] font-sans",
 			Tabs {
 				// the kit's tabs are keyed by string: "" is the admin's own
 				value: active.clone().unwrap_or_default(),
@@ -393,7 +395,7 @@ fn Workspace(view: Route) -> Element {
 	rsx! {
 		div { class: "{shell}",
 			Rail { gmails: gmails.clone(), current, telegram, tab: tab.clone() }
-			div { class: "flex flex-1 flex-col min-w-0",
+			div { class: "flex min-h-0 min-w-0 flex-1 flex-col",
 				if let Some(m) = &member {
 					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "Viewing as {m} — actions apply to their account" }
 				}
@@ -424,7 +426,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: O
 	let mut adding = use_signal(String::new);
 	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-hover";
 	rsx! {
-		nav { class: "flex w-60 shrink-0 flex-col border-r border-border bg-secondary",
+		nav { class: "flex w-60 shrink-0 flex-col overflow-y-auto border-r border-border bg-secondary",
 			div { class: "px-4 py-4 text-[14px] font-semibold", "review_archive" }
 			div { class: "flex items-center gap-1.5 px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-soft",
 				"Managing gmails"
@@ -478,7 +480,7 @@ fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 	let mut place = use_signal(String::new);
 	let gmail = scope.gmail.id;
 	rsx! {
-		header { class: "flex h-14 items-center gap-3 border-b border-border px-6",
+		header { class: "flex h-14 shrink-0 items-center gap-3 border-b border-border px-6",
 			span { class: "text-ink-soft", "{scope.gmail.gmail}" }
 			span { class: "text-ink-soft", "/" }
 			span { class: "font-medium", "Locations" }
@@ -500,7 +502,7 @@ fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 				Button { "+ Track place" }
 			}
 		}
-		main { class: "p-6",
+		main { class: "min-h-0 flex-1 overflow-y-auto p-6",
 			if scope.locations.is_empty() {
 				div { class: "text-ink-soft", "No places tracked under this gmail yet." }
 			}

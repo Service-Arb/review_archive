@@ -1962,6 +1962,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dockviewers_core"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9e3a6161ae23a636f464d4e4e04954ca2447718b73398b60605aca084aad7d5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "dockviewers_dioxus"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1461a7da512f7285998157ee8e686735f7f77338122cd0e1d4bf0b9dd4ad2df3"
+dependencies = [
+ "dioxus",
+ "dockviewers_core",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5260,6 +5284,7 @@ name = "review_archive_web"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "dockviewers_dioxus",
  "ev_lib",
  "ev_lib_classes",
  "getrandom 0.3.4",

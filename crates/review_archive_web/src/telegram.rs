@@ -25,8 +25,8 @@ pub fn Channels(gmails: Vec<GmailDto>) -> Element {
 		_ => return rsx! { div { class: "p-6 text-ink-soft", "Loading…" } },
 	};
 	rsx! {
-		header { class: "flex h-14 items-center border-b border-border px-6 font-medium", "Telegram alerts" }
-		main { class: "flex flex-col gap-6 p-6",
+		header { class: "flex h-14 shrink-0 items-center border-b border-border px-6 font-medium", "Telegram alerts" }
+		main { class: "flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-6",
 			Card { class: "gap-0 overflow-hidden rounded-lg py-0",
 				if channels.is_empty() {
 					div { class: "p-4 text-ink-soft", "No channels yet." }

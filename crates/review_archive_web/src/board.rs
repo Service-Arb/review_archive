@@ -1,8 +1,9 @@
-//! One place's reviews in three columns. A card is dragged from Removed to Reinstating when
+//! One place's reviews in three tiles of a dock. A card is dragged from Removed to Reinstating when
 //! its reinstatement was asked of Google, and back when that is withdrawn; the columns keep
 //! their own order, and a review a scan lists again goes back to Snapshotted by itself.
 
 use dioxus::{prelude::*, web::WebEventExt};
+use dockviewers_dioxus::{Config, DockPanel, Group, GroupId, MinSize, PackedApi, PackedArea, PanelId, Step};
 use review_archive_client::dto::{BoardCard, GmailDto, LocationSummary};
 
 use crate::{Api, Badge, Refresh, Route, Tone, View, act, ago, shown};
@@ -13,6 +14,17 @@ enum Column {
 	Removed,
 	Reinstating,
 }
+
+const LANES: [(Column, &str, &str); 3] = [
+	(Column::Snapshotted, "snapshotted", "Snapshotted"),
+	(Column::Removed, "removed", "Removed"),
+	(Column::Reinstating, "reinstating", "Reinstating"),
+];
+
+/// Maps the dock's chrome onto the kit's tokens.
+const DOCK_THEME: &str = "--dv-group-bg: var(--secondary); --dv-tabstrip-bg: var(--secondary); --dv-tab-bg: var(--secondary); \
+	--dv-tab-active-bg: var(--background); --dv-tab-active-fg: var(--ink); --dv-tab-border: var(--border); --dv-fg: var(--ink); \
+	--dv-accent: var(--primary); --dv-shadow-bg: var(--hover); --dv-resize-bg: var(--border); --dv-content-pad: 0;";
 
 #[component]
 pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<String>) -> Element {
@@ -27,13 +39,54 @@ pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<String>) ->
 		}
 	});
 	let dragging = use_signal(|| None::<(i64, Column)>);
-	let board = match &*board.read() {
-		Some(Ok(b)) => b.clone(),
-		Some(Err(e)) => return rsx! { div { class: "p-6 text-accent-error", "{e}" } },
-		_ => return rsx! { div { class: "p-6 text-ink-soft", "Loading…" } },
+	let mut panels = use_signal(Vec::<DockPanel>::new);
+	use_effect(move || {
+		let Some(Ok(b)) = &*board.read() else { return };
+		let mut lists = [b.snapshotted.clone(), b.removed.clone(), b.reinstating.clone()].into_iter();
+		panels.set(
+			LANES
+				.iter()
+				.map(|&(column, id, title)| {
+					let cards = lists.next().expect("a list per lane");
+					DockPanel {
+						id: PanelId(id.into()),
+						title: format!("{title} · {}", cards.len()),
+						content: rsx! { Lane { column, cards, gmail: g, dragging } },
+					}
+				})
+				.collect(),
+		);
+	});
+	let mut dock = use_signal(|| None::<PackedApi>);
+	// the tile `+`: brings back a lane closed with `✕`
+	use_context_provider(|| {
+		Callback::new(move |group: GroupId| {
+			let mut api = dock().expect("tiles exist only after on_band");
+			let open = api.tab_ids();
+			if let Some(id) = LANES.iter().map(|l| PanelId(l.1.into())).find(|p| !open.contains(p)) {
+				api.add_tab(group, id);
+			}
+		})
+	});
+	let config = Config {
+		storage_key: Some("review-archive-board".into()),
+		..Default::default()
 	};
+	let rows = config.rows;
+	let on_band = Callback::new(move |mut api: PackedApi| {
+		dock.set(Some(api));
+		if api.restored() {
+			return;
+		}
+		let w = api.cols() / 3;
+		for (i, (_, id, _)) in LANES.iter().enumerate() {
+			let group = Group::new(api.mint_group_id(), PanelId((*id).into()));
+			let w = if i == LANES.len() - 1 { api.cols() - 2 * w } else { w };
+			api.place(group, w, rows, MinSize::Steps { w: Step(2), h: Step(4) });
+		}
+	});
 	rsx! {
-		header { class: "flex h-14 items-center gap-3 border-b border-border px-6",
+		header { class: "flex h-14 shrink-0 items-center gap-3 border-b border-border px-6",
 			Link { class: "text-ink-soft hover:text-ink", to: Route::at(tab, View::Gmail(g)), "{gmail.gmail}" }
 			span { class: "text-ink-soft", "/" }
 			a {
@@ -45,10 +98,13 @@ pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<String>) ->
 				"{location.target.label} ↗"
 			}
 		}
-		main { class: "grid flex-1 grid-cols-3 gap-4 p-6",
-			Lane { title: "Snapshotted", column: Column::Snapshotted, cards: board.snapshotted, gmail: g, dragging }
-			Lane { title: "Removed", column: Column::Removed, cards: board.removed, gmail: g, dragging }
-			Lane { title: "Reinstating", column: Column::Reinstating, cards: board.reinstating, gmail: g, dragging }
+		if let Some(Err(e)) = &*board.read() {
+			div { class: "border-b border-border px-6 py-2 text-accent-error", "{e}" }
+		}
+		div { class: "relative min-h-0 flex-1",
+			div { class: "absolute inset-0", style: DOCK_THEME,
+				PackedArea { panels, on_band: Some(on_band), config: Some(config) }
+			}
 		}
 	}
 }
@@ -63,16 +119,11 @@ fn drop_means(from: Column, to: Column) -> Option<bool> {
 }
 
 #[component]
-fn Lane(title: &'static str, column: Column, cards: Vec<BoardCard>, gmail: i64, dragging: Signal<Option<(i64, Column)>>) -> Element {
+fn Lane(column: Column, cards: Vec<BoardCard>, gmail: i64, dragging: Signal<Option<(i64, Column)>>) -> Element {
 	let accepts = dragging().is_some_and(|(_, from)| drop_means(from, column).is_some());
-	let frame = if accepts {
-		"border-dashed border-primary-ink bg-primary/5"
-	} else {
-		"border-border bg-secondary"
-	};
 	rsx! {
 		section {
-			class: "flex min-h-0 flex-col gap-3 rounded-[10px] border p-3 {frame}",
+			class: if accepts { "flex h-full flex-col gap-3 overflow-y-auto p-3 font-sans leading-normal outline-2 -outline-offset-2 outline-dashed outline-primary-ink bg-primary/5" } else { "flex h-full flex-col gap-3 overflow-y-auto p-3 font-sans leading-normal" },
 			ondragover: move |e| {
 				if accepts {
 					e.prevent_default();
@@ -87,14 +138,8 @@ fn Lane(title: &'static str, column: Column, cards: Vec<BoardCard>, gmail: i64, 
 					None => {}
 				}
 			},
-			div { class: "flex items-center justify-between px-1",
-				span { class: "text-[11px] font-medium uppercase tracking-wide text-ink-soft", "{title}" }
-				span { class: "text-[11px] text-ink-soft", "{cards.len()}" }
-			}
-			div { class: "flex flex-col gap-3 overflow-y-auto",
-				for card in cards {
-					Card { key: "{card.review.id}", card: card.clone(), column, dragging }
-				}
+			for card in cards {
+				Card { key: "{card.review.id}", card: card.clone(), column, dragging }
 			}
 		}
 	}
