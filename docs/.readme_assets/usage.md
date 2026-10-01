@@ -33,7 +33,7 @@ executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 [defaults]
 lang = "en"
-interval = "6h"
+interval = "1d"
 max_reviews_per_scan = 200
 max_reviews_initial = 2000
 ```

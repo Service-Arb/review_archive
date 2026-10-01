@@ -7,7 +7,7 @@ use jiff::{SignedDuration, Timestamp};
 use crate::TargetId;
 
 /// How often a target is scanned unless told otherwise.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// No target is scanned more often than this.
 pub const MIN_INTERVAL: Duration = Duration::from_secs(3600);
 /// Relative spread applied to every delay, so targets added together drift apart.

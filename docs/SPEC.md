@@ -105,7 +105,7 @@ deleted.
 
 ## Scheduling
 
-- Per-target `interval_secs`, default 6 h, minimum 1 h, ±10 % jitter.
+- Per-target `interval_secs`, default 1 d, minimum 1 h, ±10 % jitter.
 - One scan at a time; 5–15 s random pause between targets.
 - Failure → `runs.status=failed` with the error, exponential backoff for that
   target (cap: 24 h), other targets continue.
