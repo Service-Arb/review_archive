@@ -122,7 +122,7 @@ fn Admin(email: String) -> Element {
 	let mut picking = use_signal(|| false);
 	let shown_if = |value: &str| if active() == value { "" } else { "hidden" };
 	rsx! {
-		div { class: "flex flex-col bg-background",
+		div { class: "flex flex-col bg-background text-ink text-[13px] font-sans",
 			Tabs { value: active(), on_value_change: move |v| active.set(v), class: "border-b border-border bg-secondary px-2 py-1.5",
 				div { class: "flex items-center gap-1",
 					TabsList { class: "bg-transparent",
@@ -151,6 +151,7 @@ fn Admin(email: String) -> Element {
 						size: Size::Xs,
 						icon: true,
 						r#type: "button",
+						class: "text-ink-soft text-base",
 						onclick: move |_| picking.set(true),
 						"+"
 					}
