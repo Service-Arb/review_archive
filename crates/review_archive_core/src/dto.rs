@@ -578,8 +578,18 @@ pub struct GmailDto {
 	pub id: i64,
 	/// The address.
 	pub gmail: String,
+	/// Off: its places are not scanned on its account.
+	pub enabled: bool,
 	/// When the member added it.
 	pub created_at: String,
+}
+
+/// `PATCH /me/gmails/{gmail}` and `PATCH /me/gmails/{gmail}/tracks/{target}`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Switch {
+	/// On or off.
+	pub enabled: bool,
 }
 
 /// `POST /me/gmails`.
@@ -596,6 +606,8 @@ pub struct NewGmail {
 pub struct LocationSummary {
 	/// The place.
 	pub target: TargetDto,
+	/// This gmail's track of it is on; it is scanned while any member's is, under a gmail that is on.
+	pub enabled: bool,
 	/// Screenshots taken over the last 7 days.
 	pub snapshots_7d: i64,
 	/// Screenshots taken over the last 30 days.

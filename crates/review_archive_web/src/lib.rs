@@ -14,8 +14,8 @@ use ev_lib::{
 	i18n::Messages,
 	mfe::bundle_origin,
 	uikit::{
-		self, BadgeVariant, Button, ButtonVariant, Card, CommandDialog, CommandEmpty, CommandInput, CommandItem, CommandList, InfoTip, InfoTipContent, InfoTipTrigger, Input, Size, Tabs,
-		TabsList, TabsTrigger,
+		self, BadgeVariant, Button, ButtonVariant, Card, CommandDialog, CommandEmpty, CommandInput, CommandItem, CommandList, InfoTip, InfoTipContent, InfoTipTrigger, Input, Size, Switch,
+		Tabs, TabsList, TabsTrigger,
 	},
 };
 use review_archive_client::{
@@ -424,11 +424,13 @@ fn Workspace(view: Route) -> Element {
 #[component]
 fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: Option<String>) -> Element {
 	let mut adding = use_signal(String::new);
+	let all_on = !gmails.is_empty() && gmails.iter().all(|g| g.gmail.enabled);
+	let ids: Vec<i64> = gmails.iter().map(|g| g.gmail.id).collect();
 	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-hover";
 	rsx! {
 		nav { class: "flex w-60 shrink-0 flex-col overflow-y-auto border-r border-border bg-secondary",
 			div { class: "px-4 py-4 text-[14px] font-semibold", "review_archive" }
-			div { class: "flex items-center gap-1.5 px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-soft",
+			div { class: "flex items-center gap-1.5 pl-4 pr-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-soft",
 				"Managing gmails"
 				InfoTip {
 					InfoTipTrigger { label: "What a managing gmail is" }
@@ -437,15 +439,41 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: O
 						p { "If no managing account is connected, enter the email the place is on, or its shorthand." }
 					}
 				}
+				div { class: "flex-1" }
+				Switch {
+					checked: all_on,
+					disabled: ids.is_empty(),
+					on_checked_change: move |on: bool| {
+						let ids = ids.clone();
+						act(move |c| async move {
+							for id in ids {
+								c.set_gmail_enabled(id, on).await?;
+							}
+							Ok(())
+						});
+					},
+				}
 			}
 			div { class: "flex flex-col gap-0.5 px-2",
 				for g in gmails {
-					Link {
-						key: "{g.gmail.id}",
-						class: if current == Some(g.gmail.id) && !telegram { "{row} bg-hover text-ink" } else { "{row} text-ink-soft" },
-						to: Route::at(tab.clone(), View::Gmail(g.gmail.id)),
-						span { class: "truncate flex-1", "{g.gmail.gmail}" }
-						uikit::Badge { variant: BadgeVariant::Secondary, "{g.locations.len()}" }
+					div { key: "{g.gmail.id}", class: "flex items-center gap-1",
+						Link {
+							class: format!(
+								"{row} flex-1 min-w-0 {} {}",
+								if current == Some(g.gmail.id) && !telegram { "bg-hover text-ink" } else { "text-ink-soft" },
+								if g.gmail.enabled { "" } else { "opacity-50" }
+							),
+							to: Route::at(tab.clone(), View::Gmail(g.gmail.id)),
+							span { class: "truncate flex-1", "{g.gmail.gmail}" }
+							uikit::Badge { variant: BadgeVariant::Secondary, "{g.locations.len()}" }
+						}
+						Switch {
+							checked: g.gmail.enabled,
+							on_checked_change: move |on: bool| {
+								let id = g.gmail.id;
+								act(move |c| async move { c.set_gmail_enabled(id, on).await });
+							},
+						}
 					}
 				}
 			}
@@ -510,6 +538,8 @@ fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 				for loc in scope.locations {
 					LocationCard {
 						key: "{loc.target.id}",
+						gmail,
+						gmail_on: scope.gmail.enabled,
 						loc: loc.clone(),
 						to: Route::at(tab.clone(), View::Place { gmail, target: loc.target.id }),
 					}
@@ -520,7 +550,7 @@ fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 }
 
 #[component]
-fn LocationCard(loc: LocationSummary, to: Route) -> Element {
+fn LocationCard(gmail: i64, gmail_on: bool, loc: LocationSummary, to: Route) -> Element {
 	let (dot, status) = match loc.last_run_status {
 		Some(RunStatus::Ok) => ("bg-positive", "ok"),
 		Some(RunStatus::Partial) => ("bg-accent-warn", "partial"),
@@ -528,10 +558,12 @@ fn LocationCard(loc: LocationSummary, to: Route) -> Element {
 		None => ("bg-ink-soft", "never scanned"),
 	};
 	let last = loc.last_run_at.as_deref().map(|t| format!("last run {} · ", ago(t))).unwrap_or_default();
+	let target = loc.target.id;
 	rsx! {
-		Link { class: "block text-left", to,
+		div { class: "relative",
+		Link { class: if loc.enabled && gmail_on { "block text-left" } else { "block text-left opacity-50" }, to,
 			Card { class: "gap-3 rounded-lg p-4 py-4 hover:border-ink-soft",
-				div {
+				div { class: "pr-12",
 					div { class: "truncate text-[14px] font-semibold", "{loc.target.label}" }
 					div { class: "truncate font-mono text-[11px] text-ink-soft", "{loc.target.place_id}" }
 				}
@@ -563,6 +595,13 @@ fn LocationCard(loc: LocationSummary, to: Route) -> Element {
 					"{last}{status}"
 				}
 			}
+		}
+		Switch {
+			class: "absolute top-4 right-4",
+			checked: loc.enabled,
+			disabled: !gmail_on,
+			on_checked_change: move |on: bool| act(move |c| async move { c.set_track_enabled(gmail, target, on).await }),
+		}
 		}
 	}
 }

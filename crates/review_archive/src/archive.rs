@@ -484,7 +484,7 @@ impl Archive {
 		let target = store.target(id).await?;
 		let last_run = store.runs(id, 8).await?.into_iter().find(|r| r.finished_at.is_some());
 		let counts = store.target_counts(id).await?;
-		let next_scan_at = if target.enabled {
+		let next_scan_at = if store.scheduled_targets().await?.iter().any(|t| t.id == id) {
 			Some(fmt_ts(self.due_at(&target).await?.unwrap_or_else(Timestamp::now)))
 		} else {
 			None
@@ -686,7 +686,7 @@ impl Archive {
 		Ok(due.into_iter().map(|(t, _)| t).collect())
 	}
 
-	/// When the next enabled target is due; `None` without any. A target never scanned is
+	/// When the next scheduled target is due; `None` without any. A target never scanned is
 	/// due at `now`.
 	pub async fn next_due(&self, now: Timestamp) -> eyre::Result<Option<Timestamp>> {
 		Ok(self.due_times().await?.into_iter().map(|(_, d)| d.unwrap_or(now)).min())
@@ -698,14 +698,14 @@ impl Archive {
 		Ok(self.inner.schedule.due_at(target.id, target.interval, last))
 	}
 
-	/// Enabled targets and when each is due: a halted source's are left out, and a paused
+	/// Scheduled targets and when each is due: a halted source's are left out, and a paused
 	/// Maps' wait for the probe.
 	async fn due_times(&self) -> eyre::Result<Vec<(Target, Option<Timestamp>)>> {
 		let breaker = self.store()?.breaker().await?;
 		#[cfg(feature = "maps")]
 		let halted = self.inner.halted.lock().expect("nothing under this lock panics").clone();
 		let mut out = Vec::new();
-		for t in self.targets().await?.into_iter().filter(|t| t.enabled) {
+		for t in self.store()?.scheduled_targets().await? {
 			#[cfg(feature = "maps")]
 			if match t.kind {
 				TargetKind::Maps => halted.maps.is_some(),

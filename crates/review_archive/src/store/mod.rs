@@ -385,6 +385,21 @@ impl Store {
 		rows.into_iter().map(Target::try_from).collect()
 	}
 
+	/// Enabled targets, by id, but for those every member tracking has switched off.
+	pub(crate) async fn scheduled_targets(&self) -> eyre::Result<Vec<Target>> {
+		let rows: Vec<TargetRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+			"SELECT {TARGET_COLUMNS} FROM targets t
+			 WHERE t.enabled
+			   AND (NOT EXISTS (SELECT 1 FROM tracks k WHERE k.target_id = t.id)
+			        OR EXISTS (SELECT 1 FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id WHERE k.target_id = t.id AND k.enabled AND g.enabled))
+			 ORDER BY id"
+		)))
+		.fetch_all(&self.pool)
+		.await
+		.wrap_err("listing scheduled targets")?;
+		rows.into_iter().map(Target::try_from).collect()
+	}
+
 	/// One target; [`Rejected::NotFound`] when there is none.
 	pub async fn target(&self, id: TargetId) -> eyre::Result<Target> {
 		let row: Option<TargetRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {TARGET_COLUMNS} FROM targets WHERE id = ?")))

@@ -137,7 +137,7 @@ with its own platform implements `sources::ReviewSource` and records through
   captures and blobs belong to no one: a place tracked by several members is one target,
   scanned once. What is a member's — gmails, tracks, reinstatements, Telegram channels —
   points at those facts and never alters them (tracking may put a disabled target back on
-  the schedule); every member query is scoped by the member's email in SQL.
+  the schedule; a target whose every track is switched off is left off it); every member query is scoped by the member's email in SQL.
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
   to `webhook_deliveries` in the same transaction as what they report — a row per hook, and
   per Telegram channel of a member tracking the target — and delivered from there, retried

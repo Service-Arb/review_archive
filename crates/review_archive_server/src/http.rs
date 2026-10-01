@@ -24,8 +24,8 @@ use review_archive_core::{
 	ReviewId, TargetId,
 	dto::{
 		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
-		NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
-		stats_csv,
+		NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery,
+		WebhookDto, stats_csv,
 	},
 };
 use serde::{Deserialize, Serialize};
@@ -99,9 +99,9 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/me", get(me))
 		.route("/me/overview", get(overview))
 		.route("/me/gmails", post(add_gmail))
-		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail))
+		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail).patch(set_gmail_enabled))
 		.route("/me/gmails/{gmail}/tracks", post(track))
-		.route("/me/gmails/{gmail}/tracks/{target}", axum::routing::delete(untrack))
+		.route("/me/gmails/{gmail}/tracks/{target}", axum::routing::delete(untrack).patch(set_track_enabled))
 		.route("/me/gmails/{gmail}/locations/{target}/board", get(board))
 		.route("/me/gmails/{gmail}/reinstatements/{review}", axum::routing::put(reinstate).delete(withdraw))
 		.route("/me/tg-channels", get(tg_channels).post(add_tg_channel))
@@ -418,6 +418,13 @@ async fn delete_gmail(State(s): State<AppState>, Member(m): Member, Path(gmail):
 	Ok(StatusCode::NO_CONTENT)
 }
 
+/// Switches a gmail on or off. Its places are scanned while some member has them on under a gmail that is on.
+#[utoipa::path(patch, path = "/me/gmails/{gmail}", tag = "me", params(("gmail" = i64, Path)), request_body = Switch, responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn set_gmail_enabled(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>, JsonBody(req): JsonBody<Switch>) -> ApiResult<StatusCode> {
+	s.archive.set_gmail_enabled(&m, gmail, req.enabled).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
 /// Tracks a place under the gmail. A place already watched (same place, language and
 /// source) is shared, not scanned twice.
 #[utoipa::path(post, path = "/me/gmails/{gmail}/tracks", tag = "me", params(("gmail" = i64, Path)), request_body = NewTrack,
@@ -431,6 +438,14 @@ async fn track(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i
 	responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn untrack(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>) -> ApiResult<StatusCode> {
 	s.archive.untrack(&m, gmail, TargetId(target)).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// Switches the gmail's track of a place on or off; the place's target stays as it is.
+#[utoipa::path(patch, path = "/me/gmails/{gmail}/tracks/{target}", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)), request_body = Switch,
+	responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn set_track_enabled(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>, JsonBody(req): JsonBody<Switch>) -> ApiResult<StatusCode> {
+	s.archive.set_track_enabled(&m, gmail, TargetId(target), req.enabled).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 

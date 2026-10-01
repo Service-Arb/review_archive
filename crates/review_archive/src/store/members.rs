@@ -17,6 +17,7 @@ use super::{REVIEW_SELECT, ReviewRow, Store, TargetRow, webhooks::parse_events};
 struct GmailRow {
 	id: i64,
 	gmail: String,
+	enabled: bool,
 	created_at: String,
 }
 
@@ -25,6 +26,7 @@ impl From<GmailRow> for GmailDto {
 		Self {
 			id: r.id,
 			gmail: r.gmail,
+			enabled: r.enabled,
 			created_at: r.created_at,
 		}
 	}
@@ -35,6 +37,7 @@ struct LocationRow {
 	gmail_id: i64,
 	#[sqlx(flatten)]
 	target: TargetRow,
+	track_enabled: bool,
 	snapshots_7d: i64,
 	snapshots_30d: i64,
 	live: i64,
@@ -84,13 +87,14 @@ fn no_gmail(id: i64) -> Rejected {
 impl Store {
 	/// Adds a managing gmail to a member.
 	pub async fn add_gmail(&self, member: &str, gmail: &str, now: Timestamp) -> eyre::Result<GmailDto> {
-		let row: Option<GmailRow> = sqlx::query_as("INSERT INTO managing_gmails (member_email, gmail, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, gmail, created_at")
-			.bind(member)
-			.bind(gmail)
-			.bind(fmt_ts(now))
-			.fetch_optional(&self.pool)
-			.await
-			.wrap_err("adding a gmail")?;
+		let row: Option<GmailRow> =
+			sqlx::query_as("INSERT INTO managing_gmails (member_email, gmail, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, gmail, enabled, created_at")
+				.bind(member)
+				.bind(gmail)
+				.bind(fmt_ts(now))
+				.fetch_optional(&self.pool)
+				.await
+				.wrap_err("adding a gmail")?;
 		Ok(row.ok_or_else(|| Rejected::invalid(format!("{gmail} is already one of your gmails")))?.into())
 	}
 
@@ -147,12 +151,43 @@ impl Store {
 		Ok(())
 	}
 
+	/// Switches a member's gmail on or off.
+	pub async fn set_gmail_enabled(&self, member: &str, gmail: i64, on: bool) -> eyre::Result<()> {
+		let done = sqlx::query("UPDATE managing_gmails SET enabled = ? WHERE id = ? AND member_email = ?")
+			.bind(on)
+			.bind(gmail)
+			.bind(member)
+			.execute(&self.pool)
+			.await
+			.wrap_err("switching a gmail")?;
+		if done.rows_affected() != 1 {
+			return Err(no_gmail(gmail).into());
+		}
+		Ok(())
+	}
+
+	/// Switches a member's track on or off.
+	pub async fn set_track_enabled(&self, member: &str, gmail: i64, target: TargetId, on: bool) -> eyre::Result<()> {
+		let done = sqlx::query("UPDATE tracks SET enabled = ? WHERE managing_gmail_id = (SELECT id FROM managing_gmails WHERE id = ? AND member_email = ?) AND target_id = ?")
+			.bind(on)
+			.bind(gmail)
+			.bind(member)
+			.bind(target.0)
+			.execute(&self.pool)
+			.await
+			.wrap_err("switching a track")?;
+		if done.rows_affected() != 1 {
+			return Err(Rejected::not_found(format!("gmail {gmail} does not track target {target}")).into());
+		}
+		Ok(())
+	}
+
 	/// The member's gmails and each one's places, by screenshots over 7 days, most first.
 	pub async fn overview(&self, member: &str, now: Timestamp) -> eyre::Result<Vec<GmailOverview>> {
 		let days_ago = |d: i64| fmt_ts(now - SignedDuration::from_hours(24 * d));
 		// one snapshot: every location row's gmail is among the gmails read
 		let mut tx = self.pool.begin().await.wrap_err("starting a read")?;
-		let gmails: Vec<GmailRow> = sqlx::query_as("SELECT id, gmail, created_at FROM managing_gmails WHERE member_email = ? ORDER BY gmail")
+		let gmails: Vec<GmailRow> = sqlx::query_as("SELECT id, gmail, enabled, created_at FROM managing_gmails WHERE member_email = ? ORDER BY gmail")
 			.bind(member)
 			.fetch_all(&mut *tx)
 			.await
@@ -160,6 +195,7 @@ impl Store {
 		let rows: Vec<LocationRow> = sqlx::query_as(
 			"SELECT k.managing_gmail_id AS gmail_id,
 			        t.id, t.label, t.kind, t.place_id, t.gbp_account, t.gbp_location, t.lang, t.interval_secs, t.enabled, t.created_at,
+			        k.enabled AS track_enabled,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?2) AS snapshots_7d,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?3) AS snapshots_30d,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NULL) AS live,
@@ -195,6 +231,7 @@ impl Store {
 			let g = out.iter_mut().find(|g| g.gmail.id == r.gmail_id).expect("read in the same transaction");
 			g.locations.push(LocationSummary {
 				target: Target::try_from(r.target)?.into(),
+				enabled: r.track_enabled,
 				snapshots_7d: r.snapshots_7d,
 				snapshots_30d: r.snapshots_30d,
 				live: r.live,

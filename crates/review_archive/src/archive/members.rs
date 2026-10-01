@@ -62,6 +62,16 @@ impl Archive {
 		self.store()?.untrack(member, gmail, target).await
 	}
 
+	/// Switches the member's gmail on or off: off, its places are scanned only if someone else has them on.
+	pub async fn set_gmail_enabled(&self, member: &str, gmail: i64, on: bool) -> eyre::Result<()> {
+		self.store()?.set_gmail_enabled(member, gmail, on).await
+	}
+
+	/// Switches the member's gmail's track of a place on or off.
+	pub async fn set_track_enabled(&self, member: &str, gmail: i64, target: TargetId, on: bool) -> eyre::Result<()> {
+		self.store()?.set_track_enabled(member, gmail, target, on).await
+	}
+
 	/// The member's gmails and each one's places.
 	pub async fn overview(&self, member: &str) -> eyre::Result<Vec<GmailOverview>> {
 		self.store()?.overview(member, Timestamp::now()).await

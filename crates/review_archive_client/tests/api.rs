@@ -927,6 +927,59 @@ async fn a_reinstatement_is_asked_withdrawn_and_answered_by_a_scan() {
 	e.server.abort();
 }
 
+/// A place is scanned while any track of it is on under a gmail that is on; turning
+/// tracks off is the member's own and leaves the shared target as it was.
+#[tokio::test]
+async fn a_place_is_scanned_while_anyone_has_it_on() {
+	let e = env().await;
+	let (alice, bob) = (e.member(ALICE), e.member(BOB));
+	let (a, b) = (alice.add_gmail("a@gmail.com").await.unwrap(), bob.add_gmail("b@gmail.com").await.unwrap());
+	let track = NewTrack {
+		place: PLACE.into(),
+		..Default::default()
+	};
+	let t = alice.track(a.id, &track).await.unwrap().id;
+	bob.track(b.id, &track).await.unwrap();
+	let untracked = e
+		.client
+		.add_target(&NewTarget {
+			place: Some(PLACE.into()),
+			lang: Some("de".into()),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+		.id;
+	let scanned = async || {
+		let due = e.archive.due(Timestamp::now()).await.unwrap().into_iter().map(|t| t.id.0).collect::<Vec<_>>();
+		let next = e.client.target(t).await.unwrap().next_scan_at.is_some();
+		assert_eq!(due.contains(&t), next, "the schedule and the target's detail agree");
+		assert!(due.contains(&untracked), "a target no one tracks keeps its own flag");
+		next
+	};
+	assert!(scanned().await);
+	let overview = alice.overview().await.unwrap();
+	assert!(overview[0].gmail.enabled && overview[0].locations[0].enabled, "on by default");
+
+	alice.set_track_enabled(a.id, t, false).await.unwrap();
+	assert!(!alice.overview().await.unwrap()[0].locations[0].enabled);
+	assert!(scanned().await, "bob still has it on");
+	bob.set_gmail_enabled(b.id, false).await.unwrap();
+	assert!(!scanned().await, "bob's track is on, under a gmail that is off");
+	assert!(bob.overview().await.unwrap()[0].locations[0].enabled, "a gmail's switch leaves its tracks' own");
+	assert!(e.client.target(t).await.unwrap().target.enabled, "the shared target is untouched");
+
+	assert_eq!(
+		bob.set_track_enabled(a.id, t, true).await.unwrap_err().status(),
+		Some(StatusCode::NOT_FOUND),
+		"alice's gmail is not bob's"
+	);
+	assert_eq!(bob.set_gmail_enabled(a.id, true).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	bob.set_gmail_enabled(b.id, true).await.unwrap();
+	assert!(scanned().await);
+	e.server.abort();
+}
+
 /// A channel's destination has to be one Telegram can take, and one member's channels are
 /// not another's.
 #[tokio::test]

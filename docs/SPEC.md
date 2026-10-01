@@ -216,6 +216,10 @@ Several people track their places here, grouped the way they manage them: by
   reviews, captures and blobs stay shared, so two members on one place cost one scan and
   one PNG. Scheduling stays per target. The operator assigns existing targets with
   `gmail add <member> <gmail>` and `track <gmail-id> <target-id>`.
+- Gmails and tracks are switched on or off by their member (`enabled`, on when added;
+  `PATCH /me/gmails/{id}`, `PATCH /me/gmails/{id}/tracks/{target}`). A target someone
+  tracks is scanned while one of its tracks is on under a gmail that is on; one nobody
+  tracks keeps to its own `enabled`. Switching never touches the shared target.
 - `reinstatements(managing_gmail_id, review_id, requested_at, withdrawn_at, reinstated_at)`
   record that a member asked Google to reinstate a removed review (the archive asks
   nothing of Google). Withdrawing sets `withdrawn_at`; nothing is deleted. A scan that lists

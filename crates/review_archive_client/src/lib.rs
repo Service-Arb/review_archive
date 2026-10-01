@@ -31,7 +31,7 @@ use reqwest::{Method, RequestBuilder, StatusCode, Url};
 pub use review_archive_core::dto;
 use review_archive_core::dto::{
 	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, MEMBER_HEADER, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
-	NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
+	NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
@@ -296,6 +296,12 @@ impl Client {
 		Ok(())
 	}
 
+	/// `PATCH /me/gmails/{gmail}`: on or off.
+	pub async fn set_gmail_enabled(&self, gmail: i64, enabled: bool) -> Result<(), Error> {
+		Self::send(self.request(Method::PATCH, &format!("me/gmails/{gmail}"))?.json(&Switch { enabled })).await?;
+		Ok(())
+	}
+
 	/// `POST /me/gmails/{gmail}/tracks`: the place's target, shared or new.
 	pub async fn track(&self, gmail: i64, req: &NewTrack) -> Result<TargetDto, Error> {
 		Self::json(self.request(Method::POST, &format!("me/gmails/{gmail}/tracks"))?.json(req)).await
@@ -304,6 +310,12 @@ impl Client {
 	/// `DELETE /me/gmails/{gmail}/tracks/{target}`.
 	pub async fn untrack(&self, gmail: i64, target: i64) -> Result<(), Error> {
 		Self::send(self.request(Method::DELETE, &format!("me/gmails/{gmail}/tracks/{target}"))?).await?;
+		Ok(())
+	}
+
+	/// `PATCH /me/gmails/{gmail}/tracks/{target}`: on or off.
+	pub async fn set_track_enabled(&self, gmail: i64, target: i64, enabled: bool) -> Result<(), Error> {
+		Self::send(self.request(Method::PATCH, &format!("me/gmails/{gmail}/tracks/{target}"))?.json(&Switch { enabled })).await?;
 		Ok(())
 	}
 
