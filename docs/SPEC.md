@@ -262,7 +262,9 @@ sign-in="…">`, its bundle served by the binary under `/mfe/` (`mfe_dir`) and i
 sends the top window to `sign-in` (`SSO_REFRESH_URL`, the site's `/auth/refresh`) with
 `return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard",
 on ev_lib's `uikit`. An admin gets tabs: their own dashboard, and one per member opened from
-`GET /members`, acting as them through `X-Member`.
+`GET /members`, acting as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
+`/gmails/{id}/places/{target}`, `/telegram`, under `/members/{email}` for a member's tab —
+which the binary answers with the same page.
 
 ## Library
 

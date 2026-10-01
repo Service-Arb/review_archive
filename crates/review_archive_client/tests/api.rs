@@ -748,7 +748,8 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 		.await
 		.unwrap();
 	let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
-	let app = router(AppState::new(archive, auth, Arc::new(Signals::default())), None, None);
+	let mfe = tempfile::tempdir().unwrap();
+	let app = router(AppState::new(archive, auth, Arc::new(Signals::default())), Some(mfe.path()), Some("/"));
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -762,6 +763,19 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 		Some(StatusCode::FORBIDDEN),
 		"the token is still the token"
 	);
+	for view in [
+		"/",
+		"/telegram",
+		"/gmails/1",
+		"/gmails/1/places/2",
+		"/members/bob@x.com",
+		"/members/bob@x.com/",
+		"/members/bob@x.com/gmails/1/places/2",
+	] {
+		let page = reqwest::get(format!("{base}{view}")).await.unwrap();
+		assert_eq!(page.status(), StatusCode::OK, "{view} is the dashboard's page");
+		assert!(page.text().await.unwrap().contains("mfe-review-archive-dashboard"));
+	}
 	server.abort();
 }
 

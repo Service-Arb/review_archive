@@ -5,7 +5,7 @@
 use dioxus::{prelude::*, web::WebEventExt};
 use review_archive_client::dto::{BoardCard, GmailDto, LocationSummary};
 
-use crate::{Api, Badge, Refresh, Tone, act, ago, shown};
+use crate::{Api, Badge, Refresh, Route, Tone, View, act, ago, shown};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Column {
@@ -15,7 +15,7 @@ enum Column {
 }
 
 #[component]
-pub fn Board(gmail: GmailDto, location: LocationSummary, on_back: EventHandler<()>) -> Element {
+pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<String>) -> Element {
 	let Api(api) = use_context();
 	let Refresh(refresh) = use_context();
 	let (g, target) = (gmail.id, location.target.id);
@@ -34,9 +34,16 @@ pub fn Board(gmail: GmailDto, location: LocationSummary, on_back: EventHandler<(
 	};
 	rsx! {
 		header { class: "flex h-14 items-center gap-3 border-b border-border px-6",
-			button { class: "text-ink-soft hover:text-ink", onclick: move |_| on_back.call(()), "{gmail.gmail}" }
+			Link { class: "text-ink-soft hover:text-ink", to: Route::at(tab, View::Gmail(g)), "{gmail.gmail}" }
 			span { class: "text-ink-soft", "/" }
-			span { class: "font-medium", "{location.target.label}" }
+			a {
+				class: "font-medium hover:underline",
+				href: "https://www.google.com/maps/place/?q=place_id:{location.target.place_id}",
+				target: "_blank",
+				rel: "noopener noreferrer",
+				title: "Open on Google Maps",
+				"{location.target.label} ↗"
+			}
 		}
 		main { class: "grid flex-1 grid-cols-3 gap-4 p-6",
 			Lane { title: "Snapshotted", column: Column::Snapshotted, cards: board.snapshotted, gmail: g, dragging }

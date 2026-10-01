@@ -111,7 +111,18 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		app = app.nest_service("/mfe", ServeDir::new(dir));
 		if let Some(sign_in) = sign_in {
 			let page = include_str!("../../review_archive_web/index.html").replace("{sign_in}", sign_in);
-			app = app.route("/", get(|| async { axum::response::Html(page) }));
+			let page = move || {
+				let page = page.clone();
+				async move { axum::response::Html(page) }
+			};
+			// the dashboard's own paths: a link to one of its views loads the page, which routes there
+			app = app
+				.route("/", get(page.clone()))
+				.route("/telegram", get(page.clone()))
+				.route("/gmails/{*view}", get(page.clone()))
+				.route("/members/{member}/{*view}", get(page.clone()))
+				.route("/members/{member}/", get(page.clone()))
+				.route("/members/{member}", get(page));
 		}
 	}
 	app.with_state(state)

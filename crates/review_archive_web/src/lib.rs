@@ -48,11 +48,98 @@ struct Refresh(Signal<u32>);
 #[derive(Clone, Copy)]
 struct Failure(Signal<Option<String>>);
 
-#[derive(Clone, Copy, PartialEq)]
-enum Page {
-	Places,
-	Board(i64),
+/// What a tab shows.
+#[derive(Clone, Debug, PartialEq)]
+enum View {
+	Home,
+	Gmail(i64),
+	Place { gmail: i64, target: i64 },
 	Telegram,
+}
+
+impl dioxus::router::ToRouteSegments for View {
+	fn display_route_segments(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Home => write!(f, "/"), // an empty path would be no URL at all: a link to it goes nowhere
+			Self::Gmail(g) => write!(f, "/gmails/{g}"),
+			Self::Place { gmail, target } => write!(f, "/gmails/{gmail}/places/{target}"),
+			Self::Telegram => write!(f, "/telegram"),
+		}
+	}
+}
+
+impl dioxus::router::FromRouteSegments for View {
+	type Err = String;
+
+	fn from_route_segments(segments: &[&str]) -> Result<Self, String> {
+		let id = |s: &str| s.parse::<i64>().map_err(|_| format!("{s:?} is not an id"));
+		match segments {
+			[] | [""] => Ok(Self::Home),
+			["gmails", g] => Ok(Self::Gmail(id(g)?)),
+			["gmails", g, "places", t] => Ok(Self::Place { gmail: id(g)?, target: id(t)? }),
+			["telegram"] => Ok(Self::Telegram),
+			_ => Err(format!("no view at /{}", segments.join("/"))),
+		}
+	}
+}
+
+/// Where the dashboard is, as its URL says: a view of the caller's own, or of the member an
+/// admin's tab acts as.
+#[derive(Clone, Debug, PartialEq, Routable)]
+#[rustfmt::skip]
+enum Route {
+	#[layout(Shell)]
+		#[route("/members/:member/:..view", TheirView)]
+		Theirs { member: String, view: View },
+		#[route("/:..view", MyView)]
+		Mine { view: View },
+}
+
+impl Route {
+	fn at(member: Option<String>, view: View) -> Self {
+		match member {
+			Some(member) => Self::Theirs { member, view },
+			None => Self::Mine { view },
+		}
+	}
+
+	fn member(&self) -> Option<&str> {
+		match self {
+			Self::Theirs { member, .. } => Some(member),
+			Self::Mine { .. } => None,
+		}
+	}
+
+	fn view(&self) -> &View {
+		match self {
+			Self::Theirs { view, .. } | Self::Mine { view } => view,
+		}
+	}
+}
+
+/// Each tab's last route, by its member: what a hidden tab keeps showing, and where going
+/// back to it lands.
+#[derive(Clone, Copy)]
+struct Views(Signal<std::collections::HashMap<Option<String>, Route>>);
+
+/// The routes render nothing themselves — every tab stays mounted under [`Shell`] — they
+/// only note where their tab is.
+fn remember(route: Route) -> Element {
+	let Views(mut views) = use_context();
+	use_effect(use_reactive!(|route| {
+		views.write().insert(route.member().map(str::to_owned), route);
+	}));
+	rsx! {}
+}
+
+#[component]
+fn MyView(view: View) -> Element {
+	remember(Route::Mine { view })
+}
+
+#[component]
+fn TheirView(member: String, view: View) -> Element {
+	remember(Route::Theirs { member, view })
 }
 
 fn api() -> Client {
@@ -103,42 +190,84 @@ const SHELL: &str = "flex min-h-[640px] bg-background text-ink text-[13px] font-
 
 #[component]
 fn Dashboard() -> Element {
+	rsx! { Router::<Route> {} }
+}
+
+#[component]
+fn Shell() -> Element {
+	use_context_provider(|| Views(Signal::new(Default::default())));
+	let route = use_route::<Route>();
 	let me = use_resource(|| async { api().me().await.map_err(shown) });
-	match &*me.read() {
+	let body = match &*me.read() {
 		Some(Ok(me)) if me.admin => rsx! { Admin { email: me.email.clone() } },
-		Some(Ok(_)) => rsx! { Workspace { member: None } },
+		Some(Ok(_)) => rsx! { Workspace { view: route } },
 		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
+	};
+	rsx! {
+		{body}
+		Outlet::<Route> {}
 	}
 }
 
 /// "You", then a tab per member opened; every tab stays mounted, so switching keeps where
-/// each one was.
+/// each one was. The active tab is the URL's `member`.
 #[component]
 fn Admin(email: String) -> Element {
-	const YOU: &str = "";
-	let mut tabs = use_signal(Vec::<MemberDto>::new);
-	let mut active = use_signal(|| YOU.to_owned());
+	let route = use_route::<Route>();
+	let Views(mut views) = use_context();
+	let active = route.member().map(str::to_owned);
+	let mut opened = use_signal(Vec::<String>::new);
+	let mut labels = use_signal(std::collections::HashMap::<String, String>::new);
 	let mut picking = use_signal(|| false);
-	let shown_if = |value: &str| if active() == value { "" } else { "hidden" };
+	// a link to a member's view opens their tab
+	use_effect(use_reactive!(|active| {
+		if let Some(m) = active
+			&& !opened.peek().contains(&m)
+		{
+			opened.write().push(m);
+		}
+	}));
+	let mut tabs = opened();
+	if let Some(m) = &active
+		&& !tabs.contains(m)
+	{
+		tabs.push(m.clone());
+	}
+	// where a tab is: the URL for the active one, else where it was left; a tab never visited starts at its home
+	let view_of = move |m: Option<String>| match views.read().get(&m) {
+		Some(r) => r.clone(),
+		None => Route::at(m, View::Home),
+	};
+	let shown = |m: Option<&str>| match active.as_deref() == m {
+		true => "",
+		false => "hidden",
+	};
 	rsx! {
 		div { class: "flex flex-col bg-background text-ink text-[13px] font-sans",
-			Tabs { value: active(), on_value_change: move |v| active.set(v), class: "border-b border-border bg-secondary px-2 py-1.5",
+			Tabs {
+				// the kit's tabs are keyed by string: "" is the admin's own
+				value: active.clone().unwrap_or_default(),
+				on_value_change: move |m: String| {
+					navigator().push(view_of((!m.is_empty()).then_some(m)));
+				},
+				class: "border-b border-border bg-secondary px-2 py-1.5",
 				div { class: "flex items-center gap-1",
 					TabsList { class: "bg-transparent",
-						TabsTrigger { value: YOU, "You" }
-						for m in tabs() {
-							div { key: "{m.email}", class: "flex items-center",
-								TabsTrigger { value: m.email.clone(), {m.username.clone().unwrap_or_else(|| m.email.clone())} }
+						TabsTrigger { value: "", "You" }
+						for m in tabs.clone() {
+							div { key: "{m}", class: "flex items-center",
+								TabsTrigger { value: m.clone(), {labels.read().get(&m).cloned().unwrap_or_else(|| m.clone())} }
 								Button {
 									variant: ButtonVariant::Ghost,
 									size: Size::Xs,
 									icon: true,
 									r#type: "button",
 									onclick: move |_| {
-										tabs.write().retain(|t| t.email != m.email);
-										if active() == m.email {
-											active.set(YOU.to_owned());
+										opened.write().retain(|t| *t != m);
+										views.write().remove(&Some(m.clone()));
+										if router().current::<Route>().member() == Some(m.as_str()) {
+											navigator().push(view_of(None));
 										}
 									},
 									"×"
@@ -157,22 +286,23 @@ fn Admin(email: String) -> Element {
 					}
 				}
 			}
-			div { class: shown_if(YOU), Workspace { member: None } }
-			for m in tabs() {
-				div { key: "{m.email}", class: shown_if(&m.email), Workspace { member: Some(m.email.clone()) } }
+			div { class: shown(None),
+				Workspace { view: if active.is_none() { route.clone() } else { view_of(None) } }
+			}
+			for m in tabs {
+				div { key: "{m}", class: shown(Some(&m)),
+					Workspace { view: if active.as_ref() == Some(&m) { route.clone() } else { view_of(Some(m.clone())) } }
+				}
 			}
 			if picking() {
 				Picker {
 					on_pick: move |m: MemberDto| {
 						picking.set(false);
-						if m.email == email {
-							active.set(YOU.to_owned());
-							return;
+						let tab = (m.email != email).then(|| m.email.clone());
+						if let Some(name) = m.username {
+							labels.write().insert(m.email, name);
 						}
-						if !tabs.read().iter().any(|t| t.email == m.email) {
-							tabs.write().push(m.clone());
-						}
-						active.set(m.email);
+						navigator().push(view_of(tab));
 					},
 					on_close: move |_| picking.set(false),
 				}
@@ -222,9 +352,12 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 	}
 }
 
-/// One member's dashboard: the signed-in person's own, or (`member`) the one an admin acts as.
+/// One tab's dashboard at `view`: the signed-in person's own, or (its `member`) the one an
+/// admin acts as.
 #[component]
-fn Workspace(member: Option<String>) -> Element {
+fn Workspace(view: Route) -> Element {
+	let tab = view.member().map(str::to_owned);
+	let member = tab.clone();
 	let Api(client) = use_context_provider(|| {
 		Api(match &member {
 			Some(m) => api().as_member(m.clone()),
@@ -233,8 +366,6 @@ fn Workspace(member: Option<String>) -> Element {
 	});
 	let refresh = use_context_provider(|| Refresh(Signal::new(0)));
 	let failure = use_context_provider(|| Failure(Signal::new(None)));
-	let mut page = use_signal(|| Page::Places);
-	let mut gmail = use_signal(|| None::<i64>);
 	let overview = use_resource(move || {
 		let client = client.clone();
 		async move {
@@ -249,22 +380,19 @@ fn Workspace(member: Option<String>) -> Element {
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
 		_ => return rsx! { div { class: "{shell} p-6 text-ink-soft", "Loading…" } },
 	};
+	let (picked, target, telegram) = match *view.view() {
+		View::Home => (None, None, false),
+		View::Gmail(gmail) => (Some(gmail), None, false),
+		View::Place { gmail, target } => (Some(gmail), Some(target), false),
+		View::Telegram => (None, None, true),
+	};
 	// the first gmail until one is picked; a removed one falls back the same way
-	let current = gmail().filter(|id| gmails.iter().any(|g| g.gmail.id == *id)).or_else(|| gmails.first().map(|g| g.gmail.id));
+	let current = picked.filter(|id| gmails.iter().any(|g| g.gmail.id == *id)).or_else(|| gmails.first().map(|g| g.gmail.id));
 	let scope = current.and_then(|id| gmails.iter().find(|g| g.gmail.id == id)).cloned();
 
 	rsx! {
 		div { class: "{shell}",
-			Rail {
-				gmails: gmails.clone(),
-				current,
-				telegram: page() == Page::Telegram,
-				on_pick: move |id| {
-					gmail.set(Some(id));
-					page.set(Page::Places);
-				},
-				on_telegram: move |_| page.set(Page::Telegram),
-			}
+			Rail { gmails: gmails.clone(), current, telegram, tab: tab.clone() }
 			div { class: "flex flex-1 flex-col min-w-0",
 				if let Some(m) = &member {
 					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "Viewing as {m} — actions apply to their account" }
@@ -272,24 +400,19 @@ fn Workspace(member: Option<String>) -> Element {
 				if let Some(e) = failure.0() {
 					div { class: "border-b border-border bg-accent-error/15 px-6 py-2 text-accent-error", "{e}" }
 				}
-				match (page(), scope) {
-					(Page::Telegram, _) => rsx! {
+				match (telegram, scope) {
+					(true, _) => rsx! {
 						telegram::Channels { gmails: gmails.iter().map(|g| g.gmail.clone()).collect::<Vec<_>>() }
 					},
-					(_, None) => rsx! {
+					(false, None) => rsx! {
 						div { class: "p-6 text-ink-soft", "Add the gmail your places are managed from, on the left." }
 					},
-					(Page::Board(target), Some(g)) => match g.locations.iter().find(|l| l.target.id == target) {
+					(false, Some(g)) => match target.and_then(|t| g.locations.iter().find(|l| l.target.id == t)) {
 						Some(loc) => rsx! {
-							board::Board {
-								gmail: g.gmail.clone(),
-								location: loc.clone(),
-								on_back: move |_| page.set(Page::Places),
-							}
+							board::Board { gmail: g.gmail.clone(), location: loc.clone(), tab: tab.clone() }
 						},
-						None => rsx! { Places { scope: g, on_open: move |t| page.set(Page::Board(t)) } },
+						None => rsx! { Places { scope: g, tab: tab.clone() } },
 					},
-					(Page::Places, Some(g)) => rsx! { Places { scope: g, on_open: move |t| page.set(Page::Board(t)) } },
 				}
 			}
 		}
@@ -297,7 +420,7 @@ fn Workspace(member: Option<String>) -> Element {
 }
 
 #[component]
-fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pick: EventHandler<i64>, on_telegram: EventHandler<()>) -> Element {
+fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: Option<String>) -> Element {
 	let mut adding = use_signal(String::new);
 	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-hover";
 	rsx! {
@@ -315,10 +438,10 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pic
 			}
 			div { class: "flex flex-col gap-0.5 px-2",
 				for g in gmails {
-					button {
+					Link {
 						key: "{g.gmail.id}",
 						class: if current == Some(g.gmail.id) && !telegram { "{row} bg-hover text-ink" } else { "{row} text-ink-soft" },
-						onclick: move |_| on_pick.call(g.gmail.id),
+						to: Route::at(tab.clone(), View::Gmail(g.gmail.id)),
 						span { class: "truncate flex-1", "{g.gmail.gmail}" }
 						uikit::Badge { variant: BadgeVariant::Secondary, "{g.locations.len()}" }
 					}
@@ -340,9 +463,9 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pic
 				}
 			}
 			div { class: "flex-1" }
-			button {
+			Link {
 				class: if telegram { "{row} mx-2 mb-3 bg-hover text-ink" } else { "{row} mx-2 mb-3 text-ink-soft" },
-				onclick: move |_| on_telegram.call(()),
+				to: Route::at(tab, View::Telegram),
 				"Telegram alerts"
 			}
 		}
@@ -351,7 +474,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pic
 
 /// The gmail's places as cards, most screenshots over the last week first.
 #[component]
-fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
+fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 	let mut place = use_signal(String::new);
 	let gmail = scope.gmail.id;
 	rsx! {
@@ -383,7 +506,11 @@ fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
 			}
 			div { class: "grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4",
 				for loc in scope.locations {
-					LocationCard { key: "{loc.target.id}", loc: loc.clone(), on_open: move |_| on_open.call(loc.target.id) }
+					LocationCard {
+						key: "{loc.target.id}",
+						loc: loc.clone(),
+						to: Route::at(tab.clone(), View::Place { gmail, target: loc.target.id }),
+					}
 				}
 			}
 		}
@@ -391,7 +518,7 @@ fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
 }
 
 #[component]
-fn LocationCard(loc: LocationSummary, on_open: EventHandler<()>) -> Element {
+fn LocationCard(loc: LocationSummary, to: Route) -> Element {
 	let (dot, status) = match loc.last_run_status {
 		Some(RunStatus::Ok) => ("bg-positive", "ok"),
 		Some(RunStatus::Partial) => ("bg-accent-warn", "partial"),
@@ -400,7 +527,7 @@ fn LocationCard(loc: LocationSummary, on_open: EventHandler<()>) -> Element {
 	};
 	let last = loc.last_run_at.as_deref().map(|t| format!("last run {} · ", ago(t))).unwrap_or_default();
 	rsx! {
-		button { class: "text-left", onclick: move |_| on_open.call(()),
+		Link { class: "block text-left", to,
 			Card { class: "gap-3 rounded-lg p-4 py-4 hover:border-ink-soft",
 				div {
 					div { class: "truncate text-[14px] font-semibold", "{loc.target.label}" }
