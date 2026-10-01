@@ -202,7 +202,7 @@ Several people track their places here, grouped the way they manage them: by
   site's list of the group and its admins, with their usernames, from its `/auth/members`
   (beside `SSO_REFRESH_URL`), asked with the admin's own cookie.
 - `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
-  not a credential. GBP reads keep the service's one grant: a client adds the service's
+  not a credential: an address, or any alias for one without spaces (`tg:@owner`), lowercased. GBP reads keep the service's one grant: a client adds the service's
   Google account as a manager of their GBP.
 - `tracks(managing_gmail_id, target_id, created_at)`. Tracking a place finds the target on
   that place, language and source, or makes one (enabling a disabled one): targets,

@@ -586,7 +586,7 @@ pub struct GmailDto {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NewGmail {
-	/// The manager account's address.
+	/// The manager account's address, or an alias for it.
 	pub gmail: String,
 }
 

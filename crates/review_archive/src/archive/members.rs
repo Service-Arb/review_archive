@@ -14,9 +14,8 @@ impl Archive {
 	/// Adds a managing gmail to the member.
 	pub async fn add_gmail(&self, member: &str, req: &NewGmail) -> eyre::Result<GmailDto> {
 		let gmail = req.gmail.trim().to_lowercase();
-		let looks_like_one = gmail.split_once('@').is_some_and(|(user, host)| !user.is_empty() && host.contains('.') && !host.contains('@')) && !gmail.contains(char::is_whitespace);
-		if !looks_like_one {
-			return Err(Rejected::invalid(format!("{:?} is not an email address", req.gmail)).into());
+		if gmail.is_empty() || gmail.contains(char::is_whitespace) {
+			return Err(Rejected::invalid(format!("{:?} is not an address or an alias for one", req.gmail)).into());
 		}
 		self.store()?.add_gmail(member, &gmail, Timestamp::now()).await
 	}

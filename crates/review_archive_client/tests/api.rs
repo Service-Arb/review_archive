@@ -769,7 +769,12 @@ async fn members_share_places_but_see_only_their_own() {
 	let a = alice.add_gmail(" Ops.Paris@gmail.com ").await.unwrap();
 	assert_eq!(a.gmail, "ops.paris@gmail.com");
 	assert_eq!(alice.add_gmail("ops.paris@gmail.com").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST), "twice");
-	assert_eq!(alice.add_gmail("not an address").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	assert_eq!(alice.add_gmail("two words").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	assert_eq!(
+		e.member("carol@x.com").add_gmail(" tg:@Owner ").await.unwrap().gmail,
+		"tg:@owner",
+		"an alias groups as well as an address"
+	);
 	let b = bob.add_gmail("bob@gmail.com").await.unwrap();
 
 	let track = NewTrack {
