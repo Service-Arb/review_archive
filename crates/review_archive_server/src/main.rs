@@ -38,7 +38,7 @@ enum Cmd {
 	/// One pass now, with a summary per target.
 	Scan(ScanArgs),
 	/// Scheduler + HTTP API.
-	Serve,
+	Serve(ServeArgs),
 	/// Members' managing gmails.
 	#[command(subcommand)]
 	Gmail(GmailCmd),
@@ -93,6 +93,14 @@ enum TargetCmd {
 	Enable {
 		id: i64,
 	},
+}
+
+#[derive(Args)]
+struct ServeArgs {
+	/// Treat a browser without a sign-in as this member: a local dashboard without
+	/// valeratrades.com. Loopback binds outside production only.
+	#[arg(long)]
+	dev_member: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -201,7 +209,7 @@ async fn run(cli: Cli, config: Config, settings: Settings) -> eyre::Result<()> {
 	match cli.cmd {
 		Cmd::Target(cmd) => target_cmd(&archive, cmd).await,
 		Cmd::Scan(args) => scan(&archive, args).await,
-		Cmd::Serve => serve(archive, &config, &settings).await,
+		Cmd::Serve(args) => serve(archive, &config, &settings, args).await,
 		Cmd::Gmail(GmailCmd::Add { member, gmail }) => {
 			let added = archive.add_gmail(&member.to_lowercase(), &NewGmail { gmail }).await?;
 			println!("added gmail {} ({})", added.id, added.gmail);
@@ -320,15 +328,24 @@ async fn scan(archive: &Archive, args: ScanArgs) -> eyre::Result<()> {
 	Ok(())
 }
 
-async fn serve(archive: Archive, config: &Config, settings: &Settings) -> eyre::Result<()> {
+async fn serve(archive: Archive, config: &Config, settings: &Settings, args: ServeArgs) -> eyre::Result<()> {
 	let bind = config.bind;
+	if args.dev_member.is_some() {
+		eyre::ensure!(bind.ip().is_loopback(), "--dev-member signs everyone in: it serves on a loopback address only, not {bind}");
+		eyre::ensure!(settings.app_env != "production", "--dev-member is for development, and APP_ENV is production");
+	}
 	let signals = std::sync::Arc::new(worker::Signals::default());
 	let sso = settings.sso()?;
-	let sign_in = sso.as_ref().map(|s| s.refresh.clone());
-	let auth = Auth::new(settings.api_token()?, sso);
+	// a dev member is never sent to sign in: no request of theirs answers 401
+	let sign_in = sso.as_ref().map(|s| s.refresh.clone()).or_else(|| args.dev_member.as_ref().map(|_| "/".to_owned()));
+	let auth = Auth::new(settings.api_token()?, sso, args.dev_member.clone());
 	let app = http::router(http::AppState::new(archive.clone(), auth, signals.clone()), config.mfe_dir.as_deref(), sign_in.as_deref());
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
+	match (&config.mfe_dir, &sign_in) {
+		(Some(_), Some(_)) => println!("▶ dashboard: http://{bind}/{}", args.dev_member.map(|m| format!("  (signed in as {m})")).unwrap_or_default()),
+		_ => println!("▶ API: http://{bind}/"),
+	}
 
 	let (tx, rx) = watch::channel(false);
 	let mut http_rx = rx.clone();

@@ -148,15 +148,15 @@
           auditable = false;
         };
 
-        # `nix run .#dev-mfe`: the dashboard built (debug) into tmp/mfe-dev and served by a
-        # local `serve` at `/`. Signing in takes the site running locally (`cookie_domain`
-        # unset shares its cookie with every localhost port) and its public key and refresh
-        # URL in the environment, which passes through to `serve`:
-        # SSO_PUBLIC_KEY, SSO_REFRESH_URL=http://localhost:61156/auth/refresh.
+        # `nix run .#dev-mfe -- <member email>`: the dashboard built (debug) into tmp/mfe-dev and
+        # served by a local `serve` at `/`, on the repo's `data/`, signed in as that member
+        # (`--dev-member`: no valeratrades.com needed). Scans run in a Chromium window: a
+        # headless one gets Maps' limited view (#9).
         devMfe = pkgs.writeShellApplication {
           name = "dev-mfe";
           runtimeInputs = [ pkgs.git ];
           text = ''
+            member="''${1:?usage: nix run .#dev-mfe -- <member email>}"
             repo="$(git rev-parse --show-toplevel)"
             cd "$repo"
             out="$repo/tmp/mfe-dev"
@@ -164,9 +164,14 @@
               cargo build -p review_archive_web --target wasm32-unknown-unknown
               bash crates/review_archive_web/package.sh target/wasm32-unknown-unknown/debug/review_archive_web.wasm '$out'
             "
-            printf 'mfe_dir = "%s"\n' "$out" >"$out/config.toml"
-            echo "▶ http://localhost:${toString port}/"
-            exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve
+            cat >"$out/config.toml" <<EOF
+            data_dir = "$repo/data"
+            mfe_dir = "$out"
+            [browser]
+            executable = "${pkgs.chromium}/bin/chromium"
+            headful = true
+            EOF
+            exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve --dev-member "$member"
           '';
         };
 
@@ -215,7 +220,7 @@
             nix build                         the review_archive binary
             nix build .#${pname}-container    OCI image with chromium (Linux only)
             nix build .#mfe                   the dashboard bundle (served under /mfe/)
-            nix run .#dev-mfe                 the dashboard, built and served locally at /
+            nix run .#dev-mfe -- <email>      the dashboard, built and served locally at / as that member
             nix run .#help                    this
             cargo test                        parser snapshots, repository, scheduler, gbp stub
             cargo test -- --ignored live      one real scan; needs a browser and the network

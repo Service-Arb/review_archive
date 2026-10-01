@@ -238,6 +238,8 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
   `Sec-Fetch-Site: same-origin`, or it is a 403: the cookie rides along on requests other
   sites start.
 - Without `SSO_PUBLIC_KEY` + `SSO_REFRESH_URL` only the operator's token works.
+- `serve --dev-member <email>` (loopback, outside production): a request with neither token
+  nor cookie is that member, for a local dashboard (`nix run .#dev-mfe -- <email>`).
 
 ### Telegram
 

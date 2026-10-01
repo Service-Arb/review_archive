@@ -63,7 +63,7 @@ async fn env() -> Env {
 	let site_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let refresh = format!("http://{}/auth/refresh", site_listener.local_addr().unwrap());
 	tokio::spawn(async move { axum::serve(site_listener, site).await.unwrap() });
-	let auth = Auth::new(TOKEN, Some(SsoSite::new(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap(), &refresh).unwrap()));
+	let auth = Auth::new(TOKEN, Some(SsoSite::new(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap(), &refresh).unwrap()), None);
 	let app = router(AppState::new(archive.clone(), auth, signals.clone()), None, None);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
@@ -730,6 +730,39 @@ async fn an_admin_acts_as_a_member_and_no_one_else_may() {
 	assert_eq!(alice.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	assert_eq!(e.client.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "no cookie to ask the site with");
 	e.server.abort();
+}
+
+/// `serve --dev-member`: a browser with no sign-in is that member, so a dashboard runs
+/// without valeratrades.com; a token or a cookie still says who it is.
+#[tokio::test]
+async fn a_dev_member_stands_in_for_a_missing_sign_in() {
+	let dir = tempfile::tempdir().unwrap();
+	let archive = Archive::open(Config {
+		data_dir: Some(dir.path().to_owned()),
+		..Config::default()
+	})
+	.await
+	.unwrap();
+	archive
+		.add_gmail("test@x.com", &review_archive::core::dto::NewGmail { gmail: "ops@gmail.com".into() })
+		.await
+		.unwrap();
+	let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
+	let app = router(AppState::new(archive, auth, Arc::new(Signals::default())), None, None);
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let base = format!("http://{}", listener.local_addr().unwrap());
+	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+	let nobody = Client::ambient(reqwest::Client::new(), &base).unwrap();
+	assert_eq!(nobody.overview().await.unwrap()[0].gmail.gmail, "ops@gmail.com");
+	assert_eq!(nobody.me().await.unwrap().email, "test@x.com");
+	assert_eq!(nobody.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "a member, not the operator");
+	assert_eq!(
+		Client::new(&base, TOKEN).unwrap().overview().await.unwrap_err().status(),
+		Some(StatusCode::FORBIDDEN),
+		"the token is still the token"
+	);
+	server.abort();
 }
 
 /// A sign-in cookie reads from anywhere it is sent, but writes only from the archive's own

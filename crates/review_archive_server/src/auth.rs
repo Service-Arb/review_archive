@@ -51,14 +51,17 @@ pub struct Auth {
 	/// SHA-256 of the admin token: compared as digests, so the comparison time says nothing about it.
 	admin_digest: [u8; 32],
 	pub(crate) sso: Option<SsoSite>,
+	/// Who a request without a token or cookie is: `serve --dev-member`, for a local dashboard.
+	dev_member: Option<String>,
 }
 
 impl Auth {
 	/// `sso`: `None` takes only the operator's token.
-	pub fn new(admin_token: &str, sso: Option<SsoSite>) -> Self {
+	pub fn new(admin_token: &str, sso: Option<SsoSite>, dev_member: Option<String>) -> Self {
 		Self {
 			admin_digest: Sha256::digest(admin_token.as_bytes()).into(),
 			sso,
+			dev_member: dev_member.map(|m| m.to_lowercase()),
 		}
 	}
 
@@ -76,7 +79,14 @@ impl Auth {
 			};
 		}
 		let (Some(sso), Some(cookie)) = (&self.sso, cookie(headers, va_sso::COOKIE)) else {
-			return Err(unauthorized());
+			return match &self.dev_member {
+				Some(m) => Ok(Caller {
+					email: Some(m.clone()),
+					username: Some(m.clone()),
+					admin: false,
+				}),
+				None => Err(unauthorized()),
+			};
 		};
 		let claims = sso.verifier.verify(cookie).map_err(|_| unauthorized())?;
 		// a cookie rides along on requests other sites start; only this origin's own may write
