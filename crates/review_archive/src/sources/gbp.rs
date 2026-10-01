@@ -196,6 +196,7 @@ impl ReviewSource for GbpSource<'_> {
 			coverage,
 			warnings,
 			cut_after: None,
+			listed: list.total,
 		})
 	}
 }

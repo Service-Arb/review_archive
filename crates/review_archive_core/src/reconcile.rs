@@ -146,6 +146,7 @@ mod tests {
 			coverage: Coverage::DownTo(None),
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		};
 		let p = plan(&k, &scan);
 		assert_eq!(p.new.iter().map(|o| o.source_review_id.as_str()).collect::<Vec<_>>(), ["new"]);
@@ -164,6 +165,7 @@ mod tests {
 			coverage: Coverage::Complete,
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		};
 		// b is already gone and stays so without being marked again
 		assert_eq!(plan(&k, &scan).gone, [ReviewId(1)]);
@@ -183,6 +185,7 @@ mod tests {
 			coverage: Coverage::DownTo(Some(ts("2026-08-01T00:00:00Z"))),
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		};
 		assert_eq!(plan(&k, &scan).gone, [ReviewId(1)]);
 
@@ -204,6 +207,7 @@ mod tests {
 			coverage: Coverage::DownTo(Some(ts("2026-07-26T12:00:00Z"))),
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		};
 		assert!(plan(&k, &scan).gone.is_empty());
 		// walked well past even the earliest it can be: gone
@@ -224,6 +228,7 @@ mod tests {
 			coverage: Coverage::Complete,
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		};
 		let p = plan(&k, &scan);
 		assert!(p.gone.is_empty());

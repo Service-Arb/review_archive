@@ -29,6 +29,7 @@ impl ReviewSource for Served {
 			coverage: Coverage::Complete,
 			warnings: vec![],
 			cut_after: None,
+			listed: None,
 		})
 	}
 }

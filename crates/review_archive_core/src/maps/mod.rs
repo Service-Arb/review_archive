@@ -287,6 +287,7 @@ pub fn scan_of(walked: Walked, now: Timestamp) -> Scan {
 		coverage,
 		warnings,
 		cut_after: None,
+		listed: total,
 	}
 }
 

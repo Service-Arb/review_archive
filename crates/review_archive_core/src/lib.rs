@@ -227,6 +227,9 @@ pub struct Scan {
 	/// A walk stopped short of the archived part of the list (by its limit, or by the page
 	/// failing under it): the last card it read. The next scan reads on past it.
 	pub cut_after: Option<String>,
+	/// How many reviews the source says the place has: Maps' own count, the API's
+	/// `totalReviewCount`. `None` when it did not say.
+	pub listed: Option<u64>,
 }
 
 /// A review the archive already holds, as much of it as reconciling needs.

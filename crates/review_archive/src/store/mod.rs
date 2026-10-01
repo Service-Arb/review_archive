@@ -107,6 +107,8 @@ pub struct ScanWrite<'a> {
 	pub captures: &'a HashMap<String, StoredCapture>,
 	/// See [`review_archive_core::Scan::cut_after`].
 	pub cut_after: Option<&'a str>,
+	/// See [`review_archive_core::Scan::listed`].
+	pub listed: Option<u64>,
 	/// An ad-hoc capture: it may record a gap but never closes one.
 	pub ad_hoc: bool,
 	/// Recorded with each capture.
@@ -621,6 +623,14 @@ impl Store {
 			.execute(&mut *tx)
 			.await
 			.wrap_err("recording where the walk stopped")?;
+		if let Some(listed) = scan.listed {
+			sqlx::query("UPDATE targets SET listed = ? WHERE id = ?")
+				.bind(i64::try_from(listed).expect("Google lists fewer than 2^63 reviews"))
+				.bind(target.0)
+				.execute(&mut *tx)
+				.await
+				.wrap_err("recording how many reviews the source lists")?;
+		}
 
 		seen.sort_unstable();
 		let seen: Vec<ReviewId> = seen.into_iter().map(|(_, id)| id).collect();

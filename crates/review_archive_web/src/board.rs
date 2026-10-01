@@ -140,8 +140,15 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 			}
 			div { class: "mt-2 flex items-center justify-between text-[11px] text-ink-soft",
 				span { "{when}" }
-				if let Some(days) = reinstated {
-					Badge { tone: Tone::Ok, "reinstated after {days}d" }
+				div { class: "flex gap-1.5",
+					if let Some(days) = reinstated {
+						Badge { tone: Tone::Ok, "reinstated after {days}d" }
+					}
+					if r.reply.is_some() {
+						Badge { tone: Tone::Ok, "responded" }
+					} else {
+						Badge { tone: Tone::Warn, "no reply" }
+					}
 				}
 			}
 		}

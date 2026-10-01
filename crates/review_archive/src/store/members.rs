@@ -38,6 +38,8 @@ struct LocationRow {
 	snapshots_7d: i64,
 	snapshots_30d: i64,
 	live: i64,
+	responded: i64,
+	listed: Option<i64>,
 	gone: i64,
 	reinstating: i64,
 	last_run_at: Option<String>,
@@ -161,6 +163,8 @@ impl Store {
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?2) AS snapshots_7d,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?3) AS snapshots_30d,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NULL) AS live,
+			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NULL AND r.reply IS NOT NULL) AS responded,
+			        t.listed,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NOT NULL) AS gone,
 			        (SELECT COUNT(*) FROM reviews r JOIN reinstatements x ON x.review_id = r.id
 			          WHERE r.target_id = t.id AND r.gone_at IS NOT NULL AND x.managing_gmail_id = k.managing_gmail_id
@@ -194,6 +198,8 @@ impl Store {
 				snapshots_7d: r.snapshots_7d,
 				snapshots_30d: r.snapshots_30d,
 				live: r.live,
+				responded: r.responded,
+				listed: r.listed,
 				removed: r.gone - r.reinstating,
 				reinstating: r.reinstating,
 				last_run_at: r.last_run_at,

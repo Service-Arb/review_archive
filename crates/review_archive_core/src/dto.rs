@@ -602,6 +602,10 @@ pub struct LocationSummary {
 	pub snapshots_30d: i64,
 	/// Reviews listed now.
 	pub live: i64,
+	/// Of which the owner has replied to.
+	pub responded: i64,
+	/// How many reviews Google says the place has, as of the last scan that read it.
+	pub listed: Option<i64>,
 	/// Gone, with no open appeal from this gmail.
 	pub removed: i64,
 	/// Gone, with an open appeal from this gmail.

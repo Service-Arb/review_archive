@@ -112,6 +112,7 @@ impl ReviewSource for Listed {
 			coverage: Coverage::Complete,
 			warnings: vec![],
 			cut_after: None,
+			listed: Some(u64::try_from(self.0.len()).unwrap()),
 		})
 	}
 }
@@ -840,14 +841,19 @@ async fn members_share_places_but_see_only_their_own() {
 		o.capture.as_mut().unwrap().captured_at = Timestamp::now() - jiff::SignedDuration::from_hours(24 * days_ago);
 		o
 	};
-	record(&e, t.id, vec![taken("r1", 0), taken("r2", 14), review("r3")]).await;
+	let replied = Observed {
+		reply: Some("Thanks".into()),
+		..review("r3")
+	};
+	record(&e, t.id, vec![taken("r1", 0), taken("r2", 14), replied]).await;
 	let overview = alice.overview().await.unwrap();
 	assert_eq!(overview.len(), 1);
 	let loc = &overview[0].locations[0];
 	assert_eq!(
-		(loc.target.id, loc.snapshots_7d, loc.snapshots_30d, loc.live, loc.removed, loc.reinstating),
-		(t.id, 1, 2, 3, 0, 0)
+		(loc.target.id, loc.snapshots_7d, loc.snapshots_30d, loc.live, loc.responded, loc.removed, loc.reinstating),
+		(t.id, 1, 2, 3, 1, 0, 0)
 	);
+	assert_eq!(loc.listed, Some(3), "what the source says the place has");
 	assert_eq!(loc.last_run_status, Some(review_archive::core::dto::RunStatus::Ok));
 
 	let board = alice.board(a.id, t.id).await.unwrap();

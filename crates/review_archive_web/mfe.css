@@ -25,6 +25,10 @@
 		font: inherit;
 		text-align: inherit;
 	}
+	mfe-review-archive-dashboard :where(a) {
+		color: inherit;
+		text-decoration: inherit;
+	}
 	mfe-review-archive-dashboard :where(*) {
 		box-sizing: border-box;
 	}

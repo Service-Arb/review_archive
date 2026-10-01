@@ -540,7 +540,15 @@ fn LocationCard(loc: LocationSummary, to: Route) -> Element {
 					span { class: "text-ink-soft", "30d" }
 				}
 				div { class: "flex flex-wrap gap-1.5",
-					Badge { tone: Tone::Ok, "live {loc.live}" }
+					Badge { tone: Tone::Ok,
+						match loc.listed {
+							Some(listed) => rsx! { span { title: "archived and still listed / listed on Google", "live {loc.live}/{listed}" } },
+							None => rsx! { "live {loc.live}" },
+						}
+					}
+					Badge { tone: if loc.responded < loc.live { Tone::Warn } else { Tone::Ok },
+						span { title: "replied to by the owner / live", "responded {loc.responded}/{loc.live}" }
+					}
 					if loc.removed > 0 {
 						Badge { tone: Tone::Bad, "removed {loc.removed}" }
 					}

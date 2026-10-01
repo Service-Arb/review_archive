@@ -63,6 +63,7 @@ fn complete(reviews: Vec<Observed>) -> Result<Scan, String> {
 		coverage: Coverage::Complete,
 		warnings: vec![],
 		cut_after: None,
+		listed: None,
 	})
 }
 
