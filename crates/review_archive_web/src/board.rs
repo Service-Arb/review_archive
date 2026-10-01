@@ -5,7 +5,7 @@
 use dioxus::{prelude::*, web::WebEventExt};
 use review_archive_client::dto::{BoardCard, GmailDto, LocationSummary};
 
-use crate::{Badge, Refresh, act, ago, api, shown};
+use crate::{Api, Badge, Refresh, Tone, act, ago, shown};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Column {
@@ -16,22 +16,26 @@ enum Column {
 
 #[component]
 pub fn Board(gmail: GmailDto, location: LocationSummary, on_back: EventHandler<()>) -> Element {
+	let Api(api) = use_context();
 	let Refresh(refresh) = use_context();
 	let (g, target) = (gmail.id, location.target.id);
-	let board = use_resource(move || async move {
-		refresh();
-		api().board(g, target).await.map_err(shown)
+	let board = use_resource(move || {
+		let api = api.clone();
+		async move {
+			refresh();
+			api.board(g, target).await.map_err(shown)
+		}
 	});
 	let dragging = use_signal(|| None::<(i64, Column)>);
 	let board = match &*board.read() {
 		Some(Ok(b)) => b.clone(),
-		Some(Err(e)) => return rsx! { div { class: "p-6 text-bad", "{e}" } },
-		_ => return rsx! { div { class: "p-6 text-muted", "Loading…" } },
+		Some(Err(e)) => return rsx! { div { class: "p-6 text-accent-error", "{e}" } },
+		_ => return rsx! { div { class: "p-6 text-ink-soft", "Loading…" } },
 	};
 	rsx! {
-		header { class: "flex h-14 items-center gap-3 border-b border-line px-6",
-			button { class: "text-muted hover:text-fg", onclick: move |_| on_back.call(()), "{gmail.gmail}" }
-			span { class: "text-faint", "/" }
+		header { class: "flex h-14 items-center gap-3 border-b border-border px-6",
+			button { class: "text-ink-soft hover:text-ink", onclick: move |_| on_back.call(()), "{gmail.gmail}" }
+			span { class: "text-ink-soft", "/" }
 			span { class: "font-medium", "{location.target.label}" }
 		}
 		main { class: "grid flex-1 grid-cols-3 gap-4 p-6",
@@ -54,7 +58,11 @@ fn drop_means(from: Column, to: Column) -> Option<bool> {
 #[component]
 fn Lane(title: &'static str, column: Column, cards: Vec<BoardCard>, gmail: i64, dragging: Signal<Option<(i64, Column)>>) -> Element {
 	let accepts = dragging().is_some_and(|(_, from)| drop_means(from, column).is_some());
-	let frame = if accepts { "border-dashed border-accent bg-accent/5" } else { "border-line bg-panel" };
+	let frame = if accepts {
+		"border-dashed border-primary-ink bg-primary/5"
+	} else {
+		"border-border bg-secondary"
+	};
 	rsx! {
 		section {
 			class: "flex min-h-0 flex-col gap-3 rounded-[10px] border p-3 {frame}",
@@ -73,8 +81,8 @@ fn Lane(title: &'static str, column: Column, cards: Vec<BoardCard>, gmail: i64, 
 				}
 			},
 			div { class: "flex items-center justify-between px-1",
-				span { class: "text-[11px] font-medium uppercase tracking-wide text-muted", "{title}" }
-				span { class: "text-[11px] text-faint", "{cards.len()}" }
+				span { class: "text-[11px] font-medium uppercase tracking-wide text-ink-soft", "{title}" }
+				span { class: "text-[11px] text-ink-soft", "{cards.len()}" }
 			}
 			div { class: "flex flex-col gap-3 overflow-y-auto",
 				for card in cards {
@@ -103,7 +111,7 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 	let id = r.id;
 	rsx! {
 		article {
-			class: if movable { "rounded-lg border border-line bg-page p-3 cursor-grab" } else { "rounded-lg border border-line bg-page p-3" },
+			class: if movable { "rounded-lg border border-border bg-card p-3 cursor-grab" } else { "rounded-lg border border-border bg-card p-3" },
 			draggable: movable,
 			ondragstart: move |e| {
 				// Firefox starts no drag without data on it
@@ -114,19 +122,19 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 			},
 			ondragend: move |_| dragging.set(None),
 			if let Some(url) = r.capture_url.clone() {
-				img { class: "w-full rounded-md bg-shot", src: "{url}" }
+				img { class: "w-full rounded-md bg-muted", src: "{url}" }
 			}
 			div { class: "mt-2 flex items-center gap-2",
-				span { class: "text-warn", "{stars}" }
+				span { class: "text-accent-warn", "{stars}" }
 				span { class: "truncate font-medium", "{r.author}" }
 			}
 			if let Some(text) = &r.text {
-				p { class: "mt-1 line-clamp-3 text-muted", "{text}" }
+				p { class: "mt-1 line-clamp-3 text-ink-soft", "{text}" }
 			}
-			div { class: "mt-2 flex items-center justify-between text-[11px] text-faint",
+			div { class: "mt-2 flex items-center justify-between text-[11px] text-ink-soft",
 				span { "{when}" }
 				if let Some(days) = reinstated {
-					Badge { tone: "ok", "reinstated after {days}d" }
+					Badge { tone: Tone::Ok, "reinstated after {days}d" }
 				}
 			}
 		}

@@ -88,6 +88,7 @@
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes."browser_manipulation-0.2.1" = "sha256-3Je1LiU6dYg0+Vpw2N+rHN/K47oKMfEf12JAncHc5eM=";
+          outputHashes."ev_lib_classes-0.11.0" = "sha256-rwSUyYzP8pWGn7BMBOwsF2XcAB8Y/1POZC0OBkyvI2I=";
         };
         bin = rustPlatform.buildRustPackage {
           inherit pname;

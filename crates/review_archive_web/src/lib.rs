@@ -1,6 +1,7 @@
 //! The dashboard: a member's managing gmails, the places each tracks, and per place a board
 //! of its reviews — snapshotted, removed, reinstating. Served by the archive under `/mfe/`,
 //! so the API is the bundle's own origin, and the browser's `va_access` cookie signs its calls.
+//! An admin gets tabs: their own dashboard, and any member's, acting as them.
 
 #![cfg(target_arch = "wasm32")]
 #![allow(clippy::useless_format)] // rsx! lowers every "{x}" to a format!
@@ -9,10 +10,17 @@ mod board;
 mod telegram;
 
 use dioxus::prelude::*;
-use ev_lib::{i18n::Messages, mfe::bundle_origin};
+use ev_lib::{
+	i18n::Messages,
+	mfe::bundle_origin,
+	uikit::{
+		self, BadgeVariant, Button, ButtonVariant, Card, CommandDialog, CommandEmpty, CommandInput, CommandItem, CommandList, InfoTip, InfoTipContent, InfoTipTrigger, Input, Size, Tabs,
+		TabsList, TabsTrigger,
+	},
+};
 use review_archive_client::{
 	Client,
-	dto::{GmailOverview, LocationSummary, NewTrack, RunStatus},
+	dto::{GmailOverview, LocationSummary, MemberDto, NewTrack, RunStatus},
 };
 
 ev_lib::mfe! {
@@ -27,6 +35,10 @@ fn catalogue(_: ev_lib::i18n::Locale) -> Messages {
 }
 
 const TAG: &str = "mfe-review-archive-dashboard";
+
+/// The API as this tab's member: the caller, or the member an admin's tab acts as.
+#[derive(Clone)]
+struct Api(Client);
 
 /// Bumped after a write, so what was read is read again.
 #[derive(Clone, Copy)]
@@ -75,10 +87,11 @@ fn shown(e: review_archive_client::Error) -> String {
 
 /// Runs a write against the API, then reads everything again; a failure is shown.
 fn act<F: Future<Output = Result<(), review_archive_client::Error>> + 'static>(f: impl FnOnce(Client) -> F + 'static) {
+	let Api(api) = consume_context();
 	let Refresh(mut refresh) = consume_context();
 	let Failure(mut failure) = consume_context();
 	spawn(async move {
-		match f(api()).await {
+		match f(api).await {
 			Ok(()) => failure.set(None),
 			Err(e) => failure.set(Some(shown(e))),
 		}
@@ -86,22 +99,154 @@ fn act<F: Future<Output = Result<(), review_archive_client::Error>> + 'static>(f
 	});
 }
 
+const SHELL: &str = "flex min-h-[640px] bg-background text-ink text-[13px] font-sans";
+
 #[component]
 fn Dashboard() -> Element {
+	let me = use_resource(|| async { api().me().await.map_err(shown) });
+	match &*me.read() {
+		Some(Ok(me)) if me.admin => rsx! { Admin { email: me.email.clone() } },
+		Some(Ok(_)) => rsx! { Workspace { member: None } },
+		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
+		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
+	}
+}
+
+/// "You", then a tab per member opened; every tab stays mounted, so switching keeps where
+/// each one was.
+#[component]
+fn Admin(email: String) -> Element {
+	const YOU: &str = "";
+	let mut tabs = use_signal(Vec::<MemberDto>::new);
+	let mut active = use_signal(|| YOU.to_owned());
+	let mut picking = use_signal(|| false);
+	let shown_if = |value: &str| if active() == value { "" } else { "hidden" };
+	rsx! {
+		div { class: "flex flex-col bg-background",
+			Tabs { value: active(), on_value_change: move |v| active.set(v), class: "border-b border-border bg-secondary px-2 py-1.5",
+				div { class: "flex items-center gap-1",
+					TabsList { class: "bg-transparent",
+						TabsTrigger { value: YOU, "You" }
+						for m in tabs() {
+							div { key: "{m.email}", class: "flex items-center",
+								TabsTrigger { value: m.email.clone(), {m.username.clone().unwrap_or_else(|| m.email.clone())} }
+								Button {
+									variant: ButtonVariant::Ghost,
+									size: Size::Xs,
+									icon: true,
+									r#type: "button",
+									onclick: move |_| {
+										tabs.write().retain(|t| t.email != m.email);
+										if active() == m.email {
+											active.set(YOU.to_owned());
+										}
+									},
+									"×"
+								}
+							}
+						}
+					}
+					Button {
+						variant: ButtonVariant::Ghost,
+						size: Size::Xs,
+						icon: true,
+						r#type: "button",
+						onclick: move |_| picking.set(true),
+						"+"
+					}
+				}
+			}
+			div { class: shown_if(YOU), Workspace { member: None } }
+			for m in tabs() {
+				div { key: "{m.email}", class: shown_if(&m.email), Workspace { member: Some(m.email.clone()) } }
+			}
+			if picking() {
+				Picker {
+					on_pick: move |m: MemberDto| {
+						picking.set(false);
+						if m.email == email {
+							active.set(YOU.to_owned());
+							return;
+						}
+						if !tabs.read().iter().any(|t| t.email == m.email) {
+							tabs.write().push(m.clone());
+						}
+						active.set(m.email);
+					},
+					on_close: move |_| picking.set(false),
+				}
+			}
+		}
+	}
+}
+
+/// fzf over the members valeratrades.com lists: name and email.
+#[component]
+fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Element {
+	let members = use_resource(|| async { api().members().await.map_err(shown) });
+	rsx! {
+		CommandDialog {
+			open: true,
+			on_open_change: move |open: bool| {
+				if !open {
+					on_close.call(());
+				}
+			},
+			CommandInput { placeholder: "Member's name or email" }
+			CommandList {
+				match &*members.read() {
+					Some(Ok(members)) => rsx! {
+						for m in members.clone() {
+							CommandItem {
+								key: "{m.email}",
+								value: format!("{} {}", m.username.as_deref().unwrap_or_default(), m.email),
+								on_select: {
+									let m = m.clone();
+									move |_| on_pick.call(m.clone())
+								},
+								match &m.username {
+									Some(name) => rsx! { span { "{name}" } },
+									None => rsx! { uikit::Badge { variant: BadgeVariant::Outline, "not signed up" } },
+								}
+								span { class: "truncate text-ink-soft", "{m.email}" }
+							}
+						}
+						CommandEmpty { "No member matches." }
+					},
+					Some(Err(e)) => rsx! { div { class: "p-3 text-accent-error", "{e}" } },
+					None => rsx! { div { class: "p-3 text-ink-soft", "Loading…" } },
+				}
+			}
+		}
+	}
+}
+
+/// One member's dashboard: the signed-in person's own, or (`member`) the one an admin acts as.
+#[component]
+fn Workspace(member: Option<String>) -> Element {
+	let Api(client) = use_context_provider(|| {
+		Api(match &member {
+			Some(m) => api().as_member(m.clone()),
+			None => api(),
+		})
+	});
 	let refresh = use_context_provider(|| Refresh(Signal::new(0)));
 	let failure = use_context_provider(|| Failure(Signal::new(None)));
 	let mut page = use_signal(|| Page::Places);
 	let mut gmail = use_signal(|| None::<i64>);
-	let overview = use_resource(move || async move {
-		refresh.0();
-		api().overview().await.map_err(shown)
+	let overview = use_resource(move || {
+		let client = client.clone();
+		async move {
+			refresh.0();
+			client.overview().await.map_err(shown)
+		}
 	});
 
-	let shell = "flex min-h-[640px] bg-page text-fg text-[13px] font-sans";
+	let shell = SHELL;
 	let gmails: Vec<GmailOverview> = match &*overview.read() {
 		Some(Ok(g)) => g.clone(),
-		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-bad", "{e}" } },
-		_ => return rsx! { div { class: "{shell} p-6 text-muted", "Loading…" } },
+		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
+		_ => return rsx! { div { class: "{shell} p-6 text-ink-soft", "Loading…" } },
 	};
 	// the first gmail until one is picked; a removed one falls back the same way
 	let current = gmail().filter(|id| gmails.iter().any(|g| g.gmail.id == *id)).or_else(|| gmails.first().map(|g| g.gmail.id));
@@ -120,15 +265,18 @@ fn Dashboard() -> Element {
 				on_telegram: move |_| page.set(Page::Telegram),
 			}
 			div { class: "flex flex-1 flex-col min-w-0",
+				if let Some(m) = &member {
+					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "Viewing as {m} — actions apply to their account" }
+				}
 				if let Some(e) = failure.0() {
-					div { class: "border-b border-line bg-bad/15 px-6 py-2 text-bad", "{e}" }
+					div { class: "border-b border-border bg-accent-error/15 px-6 py-2 text-accent-error", "{e}" }
 				}
 				match (page(), scope) {
 					(Page::Telegram, _) => rsx! {
 						telegram::Channels { gmails: gmails.iter().map(|g| g.gmail.clone()).collect::<Vec<_>>() }
 					},
 					(_, None) => rsx! {
-						div { class: "p-6 text-muted", "Add the gmail your places are managed from, on the left." }
+						div { class: "p-6 text-ink-soft", "Add the gmail your places are managed from, on the left." }
 					},
 					(Page::Board(target), Some(g)) => match g.locations.iter().find(|l| l.target.id == target) {
 						Some(loc) => rsx! {
@@ -150,26 +298,28 @@ fn Dashboard() -> Element {
 #[component]
 fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pick: EventHandler<i64>, on_telegram: EventHandler<()>) -> Element {
 	let mut adding = use_signal(String::new);
-	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-raised";
+	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-hover";
 	rsx! {
-		nav { class: "flex w-60 shrink-0 flex-col border-r border-line bg-panel",
+		nav { class: "flex w-60 shrink-0 flex-col border-r border-border bg-secondary",
 			div { class: "px-4 py-4 text-[14px] font-semibold", "review_archive" }
-			div { class: "flex items-center gap-1.5 px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-faint",
+			div { class: "flex items-center gap-1.5 px-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-soft",
 				"Managing gmails"
-				span {
-					class: "cursor-help normal-case text-[12px] hover:text-fg",
-					title: "Full gmail address or any alias for it. Used only to group places; it doesn't affect any actions taken.\nIf no managing account is connected, enter the email the place is on, or its shorthand.",
-					"ⓘ"
+				InfoTip {
+					InfoTipTrigger { label: "What a managing gmail is" }
+					InfoTipContent { class: "normal-case font-normal tracking-normal flex flex-col gap-2",
+						p { "Full gmail address or any alias for it. Used only to group places; it doesn't affect any actions taken." }
+						p { "If no managing account is connected, enter the email the place is on, or its shorthand." }
+					}
 				}
 			}
 			div { class: "flex flex-col gap-0.5 px-2",
 				for g in gmails {
 					button {
 						key: "{g.gmail.id}",
-						class: if current == Some(g.gmail.id) && !telegram { "{row} bg-raised text-fg" } else { "{row} text-muted" },
+						class: if current == Some(g.gmail.id) && !telegram { "{row} bg-hover text-ink" } else { "{row} text-ink-soft" },
 						onclick: move |_| on_pick.call(g.gmail.id),
 						span { class: "truncate flex-1", "{g.gmail.gmail}" }
-						span { class: "text-[11px] text-faint", "{g.locations.len()}" }
+						uikit::Badge { variant: BadgeVariant::Secondary, "{g.locations.len()}" }
 					}
 				}
 			}
@@ -181,16 +331,16 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, on_pic
 					act(move |c| async move { c.add_gmail(&gmail).await.map(drop) });
 					adding.set(String::new());
 				},
-				input {
-					class: "min-w-0 flex-1 rounded-md border border-line bg-page px-2 py-1.5 text-fg placeholder:text-faint focus:border-accent focus:outline-none",
+				Input {
+					size: Size::Sm,
 					placeholder: "+ Add gmail",
-					value: "{adding}",
-					oninput: move |e| adding.set(e.value()),
+					value: adding(),
+					oninput: move |e: FormEvent| adding.set(e.value()),
 				}
 			}
 			div { class: "flex-1" }
 			button {
-				class: if telegram { "{row} mx-2 mb-3 bg-raised text-fg" } else { "{row} mx-2 mb-3 text-muted" },
+				class: if telegram { "{row} mx-2 mb-3 bg-hover text-ink" } else { "{row} mx-2 mb-3 text-ink-soft" },
 				onclick: move |_| on_telegram.call(()),
 				"Telegram alerts"
 			}
@@ -204,9 +354,9 @@ fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
 	let mut place = use_signal(String::new);
 	let gmail = scope.gmail.id;
 	rsx! {
-		header { class: "flex h-14 items-center gap-3 border-b border-line px-6",
-			span { class: "text-muted", "{scope.gmail.gmail}" }
-			span { class: "text-faint", "/" }
+		header { class: "flex h-14 items-center gap-3 border-b border-border px-6",
+			span { class: "text-ink-soft", "{scope.gmail.gmail}" }
+			span { class: "text-ink-soft", "/" }
 			span { class: "font-medium", "Locations" }
 			div { class: "flex-1" }
 			form {
@@ -217,18 +367,18 @@ fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
 					act(move |c| async move { c.track(gmail, &req).await.map(drop) });
 					place.set(String::new());
 				},
-				input {
-					class: "w-80 rounded-md border border-line bg-page px-2.5 py-2 text-fg placeholder:text-faint focus:border-accent focus:outline-none",
+				Input {
+					class: "w-80",
 					placeholder: "Place id or Google Maps URL",
-					value: "{place}",
-					oninput: move |e| place.set(e.value()),
+					value: place(),
+					oninput: move |e: FormEvent| place.set(e.value()),
 				}
-				button { class: "rounded-md bg-accent px-3 py-1.5 font-medium text-on-accent", "+ Track place" }
+				Button { "+ Track place" }
 			}
 		}
 		main { class: "p-6",
 			if scope.locations.is_empty() {
-				div { class: "text-muted", "No places tracked under this gmail yet." }
+				div { class: "text-ink-soft", "No places tracked under this gmail yet." }
 			}
 			div { class: "grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4",
 				for loc in scope.locations {
@@ -242,53 +392,59 @@ fn Places(scope: GmailOverview, on_open: EventHandler<i64>) -> Element {
 #[component]
 fn LocationCard(loc: LocationSummary, on_open: EventHandler<()>) -> Element {
 	let (dot, status) = match loc.last_run_status {
-		Some(RunStatus::Ok) => ("bg-ok", "ok"),
-		Some(RunStatus::Partial) => ("bg-warn", "partial"),
-		Some(RunStatus::Failed) => ("bg-bad", "failed"),
-		None => ("bg-faint", "never scanned"),
+		Some(RunStatus::Ok) => ("bg-positive", "ok"),
+		Some(RunStatus::Partial) => ("bg-accent-warn", "partial"),
+		Some(RunStatus::Failed) => ("bg-accent-error", "failed"),
+		None => ("bg-ink-soft", "never scanned"),
 	};
 	let last = loc.last_run_at.as_deref().map(|t| format!("last run {} · ", ago(t))).unwrap_or_default();
 	rsx! {
-		button {
-			class: "flex flex-col gap-3 rounded-lg border border-line bg-panel p-4 text-left hover:border-faint",
-			onclick: move |_| on_open.call(()),
-			div {
-				div { class: "truncate text-[14px] font-semibold", "{loc.target.label}" }
-				div { class: "truncate font-mono text-[11px] text-faint", "{loc.target.place_id}" }
-			}
-			div { class: "flex items-baseline gap-3",
-				span { class: "text-[28px] font-semibold leading-none", "{loc.snapshots_7d}" }
-				span { class: "text-muted", "snapshots 7d" }
-				span { class: "text-[15px] text-muted", "{loc.snapshots_30d}" }
-				span { class: "text-faint", "30d" }
-			}
-			div { class: "flex flex-wrap gap-1.5",
-				Badge { tone: "ok", "live {loc.live}" }
-				if loc.removed > 0 {
-					Badge { tone: "bad", "removed {loc.removed}" }
+		button { class: "text-left", onclick: move |_| on_open.call(()),
+			Card { class: "gap-3 rounded-lg p-4 py-4 hover:border-ink-soft",
+				div {
+					div { class: "truncate text-[14px] font-semibold", "{loc.target.label}" }
+					div { class: "truncate font-mono text-[11px] text-ink-soft", "{loc.target.place_id}" }
 				}
-				if loc.reinstating > 0 {
-					Badge { tone: "warn", "reinstating {loc.reinstating}" }
+				div { class: "flex items-baseline gap-3",
+					span { class: "text-[28px] font-semibold leading-none", "{loc.snapshots_7d}" }
+					span { class: "text-ink-soft", "snapshots 7d" }
+					span { class: "text-[15px] text-ink-soft", "{loc.snapshots_30d}" }
+					span { class: "text-ink-soft", "30d" }
 				}
-			}
-			div { class: "flex items-center gap-2 border-t border-line pt-3 text-[11px] text-muted",
-				span { class: "size-1.5 rounded-full {dot}" }
-				"{last}{status}"
+				div { class: "flex flex-wrap gap-1.5",
+					Badge { tone: Tone::Ok, "live {loc.live}" }
+					if loc.removed > 0 {
+						Badge { tone: Tone::Bad, "removed {loc.removed}" }
+					}
+					if loc.reinstating > 0 {
+						Badge { tone: Tone::Warn, "reinstating {loc.reinstating}" }
+					}
+				}
+				div { class: "flex items-center gap-2 border-t border-border pt-3 text-[11px] text-ink-soft",
+					span { class: "size-1.5 rounded-full {dot}" }
+					"{last}{status}"
+				}
 			}
 		}
 	}
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+	Ok,
+	Bad,
+	Warn,
+}
+
 #[component]
-fn Badge(tone: &'static str, children: Element) -> Element {
-	let class = match tone {
-		"ok" => "bg-ok/15 text-ok",
-		"bad" => "bg-bad/15 text-bad",
-		"warn" => "bg-warn/15 text-warn",
-		_ => "bg-raised text-muted",
+fn Badge(tone: Tone, children: Element) -> Element {
+	let (variant, class) = match tone {
+		Tone::Ok => (BadgeVariant::Success, ""),
+		Tone::Bad => (BadgeVariant::Outline, "border-transparent bg-accent-error/15 text-accent-error"),
+		Tone::Warn => (BadgeVariant::Outline, "border-transparent bg-accent-warn/15 text-accent-warn"),
 	};
 	rsx! {
-		span { class: "rounded px-2 py-0.5 text-[12px] {class}", {children} }
+		uikit::Badge { variant, class, {children} }
 	}
 }
 

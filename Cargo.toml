@@ -61,6 +61,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 insta = { version = "1", features = ["yaml"] }
 png = "0.18"
 tempfile = "3"
+ev_lib_classes = "0.11"
 
 [workspace.lints.clippy]
 float_cmp = "allow"
@@ -69,3 +70,7 @@ result_large_err = "allow" # typed errors carry their backtrace and span trace; 
 
 [workspace.lints.rust]
 unused_features = "allow"
+
+# ev_lib 0.22's uikit names classes published ev_lib_classes 0.11.0 lacks; the ones it was released against
+[patch.crates-io]
+ev_lib_classes = { git = "https://github.com/EV-invest/lib", tag = "ev_lib-v0.22.0" }

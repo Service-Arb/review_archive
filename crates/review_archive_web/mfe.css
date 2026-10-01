@@ -1,27 +1,14 @@
 /* Utilities only, in a layer of their own: the bundle mounts into the host's light DOM,
- * and the host's styles must win where they meet (see real_estate_allocation's mfe.css). */
-@import "tailwindcss/theme.css" layer(ramfe);
+ * and the host's styles must win where they meet (see real_estate_allocation's mfe.css).
+ * The theme stays unlayered: layered, the spacing scale is hidden from the utility
+ * generator and fractional steps (`gap-1.5`) silently compile to nothing. */
+@import "tailwindcss/theme.css";
 @import "tailwindcss/utilities.css" layer(ramfe);
+/* ev_lib's kit tokens, written by build.rs */
+@import "./assets/tokens.css" layer(ramfe);
 
 @source "./src/**/*.rs";
-
-/* Figma "review_archive / dashboard" */
-@theme {
-	--color-page: #0b0d10;
-	--color-panel: #14171c;
-	--color-raised: #1b1f26;
-	--color-line: #262a31;
-	--color-fg: #e6e8eb;
-	--color-muted: #8b929c;
-	--color-faint: #5c636e;
-	--color-accent: #f38020;
-	--color-on-accent: #1a0d00;
-	--color-ok: #3fb950;
-	--color-bad: #f85149;
-	--color-warn: #d29922;
-	--color-info: #58a6ff;
-	--color-shot: #23272e;
-}
+@source "./uikit-classes.txt";
 
 /* No preflight is shipped, but the controls must not look like the browser's wherever the
  * host has none either. `:where` keeps this below every utility. */
