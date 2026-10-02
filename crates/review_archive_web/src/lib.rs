@@ -8,6 +8,7 @@
 
 mod board;
 mod telegram;
+mod tokens;
 
 use dioxus::prelude::*;
 use ev_lib::{
@@ -20,7 +21,7 @@ use ev_lib::{
 };
 use review_archive_client::{
 	Client,
-	dto::{GmailOverview, LocationSummary, MemberDto, NewTrack, RunStatus},
+	dto::{BalanceChange, GmailOverview, LocationSummary, MemberDto, NewTrack, RunStatus, TokensChange, TokensDto},
 };
 
 ev_lib::mfe! {
@@ -55,6 +56,7 @@ enum View {
 	Gmail(i64),
 	Place { gmail: i64, target: i64 },
 	Telegram,
+	Tokens,
 }
 
 impl dioxus::router::ToRouteSegments for View {
@@ -64,6 +66,7 @@ impl dioxus::router::ToRouteSegments for View {
 			Self::Gmail(g) => write!(f, "/gmails/{g}"),
 			Self::Place { gmail, target } => write!(f, "/gmails/{gmail}/places/{target}"),
 			Self::Telegram => write!(f, "/telegram"),
+			Self::Tokens => write!(f, "/tokens"),
 		}
 	}
 }
@@ -78,6 +81,7 @@ impl dioxus::router::FromRouteSegments for View {
 			["gmails", g] => Ok(Self::Gmail(id(g)?)),
 			["gmails", g, "places", t] => Ok(Self::Place { gmail: id(g)?, target: id(t)? }),
 			["telegram"] => Ok(Self::Telegram),
+			["tokens"] => Ok(Self::Tokens),
 			_ => Err(format!("no view at /{}", segments.join("/"))),
 		}
 	}
@@ -341,7 +345,8 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 									Some(name) => rsx! { span { "{name}" } },
 									None => rsx! { uikit::Badge { variant: BadgeVariant::Outline, "not signed up" } },
 								}
-								span { class: "truncate text-ink-soft", "{m.email}" }
+								span { class: "flex-1 truncate text-ink-soft", "{m.email}" }
+								Balance { member: m.email.clone(), balance: m.balance }
 							}
 						}
 						CommandEmpty { "No member matches." }
@@ -350,6 +355,49 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 					None => rsx! { div { class: "p-3 text-ink-soft", "Loading…" } },
 				}
 			}
+		}
+	}
+}
+
+/// A member's balance in the picker, and an admin's change of it.
+#[component]
+fn Balance(member: String, balance: i64) -> Element {
+	let mut balance = use_signal(|| balance);
+	let mut amount = use_signal(String::new);
+	let mut failure = use_signal(|| None::<String>);
+	let mut change = move |to: fn(i64) -> BalanceChange| {
+		let n = match amount().trim().parse::<i64>() {
+			Ok(n) => n,
+			Err(e) => return failure.set(Some(format!("{:?}: {e}", amount()))),
+		};
+		let member = member.clone();
+		spawn(async move {
+			match api().change_tokens(&member, &TokensChange { change: to(n), note: None }).await {
+				Ok(t) => {
+					balance.set(t.balance);
+					amount.set(String::new());
+					failure.set(None);
+				}
+				Err(e) => failure.set(Some(shown(e))),
+			}
+		});
+	};
+	let mut set = change.clone();
+	rsx! {
+		// the row's click picks the member: these are not that
+		div { class: "flex shrink-0 items-center gap-1", onclick: |e| e.stop_propagation(),
+			if let Some(e) = failure() {
+				span { class: "max-w-40 truncate text-[11px] text-accent-error", title: "{e}", "{e}" }
+			}
+			span { class: "w-20 text-right font-mono text-ink-soft", "{balance} tokens" }
+			Input {
+				class: "w-16",
+				size: Size::Xs,
+				value: amount(),
+				oninput: move |e: FormEvent| amount.set(e.value()),
+			}
+			Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "button", onclick: move |_| set(BalanceChange::Set), "set" }
+			Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "button", onclick: move |_| change(BalanceChange::Grant), "grant" }
 		}
 	}
 }
@@ -375,6 +423,28 @@ fn Workspace(view: Route) -> Element {
 			client.overview().await.map_err(shown)
 		}
 	});
+	// `/me` is the caller whoever they act as: a member tab's balance is read off the members list
+	let acting = tab.clone();
+	let tokens = use_resource(move || {
+		let member = acting.clone();
+		async move {
+			refresh.0();
+			let me = api().me().await.map_err(shown)?;
+			let balance = match member {
+				None => me.tokens.balance,
+				Some(m) =>
+					api()
+						.members()
+						.await
+						.map_err(shown)?
+						.into_iter()
+						.find(|x| x.email == m)
+						.ok_or_else(|| format!("{m} is not a member"))?
+						.balance,
+			};
+			Ok::<_, String>(TokensDto { balance, ..me.tokens })
+		}
+	});
 
 	let shell = SHELL;
 	let gmails: Vec<GmailOverview> = match &*overview.read() {
@@ -382,11 +452,16 @@ fn Workspace(view: Route) -> Element {
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
 		_ => return rsx! { div { class: "{shell} p-6 text-ink-soft", "Loading…" } },
 	};
-	let (picked, target, telegram) = match *view.view() {
-		View::Home => (None, None, false),
-		View::Gmail(gmail) => (Some(gmail), None, false),
-		View::Place { gmail, target } => (Some(gmail), Some(target), false),
-		View::Telegram => (None, None, true),
+	let tokens = match &*tokens.read() {
+		Some(Ok(t)) => Some(*t),
+		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
+		None => None,
+	};
+	let at = view.view().clone();
+	let (picked, target) = match at {
+		View::Home | View::Telegram | View::Tokens => (None, None),
+		View::Gmail(gmail) => (Some(gmail), None),
+		View::Place { gmail, target } => (Some(gmail), Some(target)),
 	};
 	// the first gmail until one is picked; a removed one falls back the same way
 	let current = picked.filter(|id| gmails.iter().any(|g| g.gmail.id == *id)).or_else(|| gmails.first().map(|g| g.gmail.id));
@@ -394,7 +469,7 @@ fn Workspace(view: Route) -> Element {
 
 	rsx! {
 		div { class: "{shell}",
-			Rail { gmails: gmails.clone(), current, telegram, tab: tab.clone() }
+			Rail { gmails: gmails.clone(), current, at: at.clone(), tokens, tab: tab.clone() }
 			div { class: "flex min-h-0 min-w-0 flex-1 flex-col",
 				if let Some(m) = &member {
 					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "Viewing as {m} — actions apply to their account" }
@@ -402,14 +477,17 @@ fn Workspace(view: Route) -> Element {
 				if let Some(e) = failure.0() {
 					div { class: "border-b border-border bg-accent-error/15 px-6 py-2 text-accent-error", "{e}" }
 				}
-				match (telegram, scope) {
-					(true, _) => rsx! {
+				match (at, scope) {
+					(View::Telegram, _) => rsx! {
 						telegram::Channels { gmails: gmails.iter().map(|g| g.gmail.clone()).collect::<Vec<_>>() }
 					},
-					(false, None) => rsx! {
+					(View::Tokens, _) => rsx! {
+						tokens::Ledger { gmails: gmails.clone(), tokens, tab: tab.clone() }
+					},
+					(_, None) => rsx! {
 						div { class: "p-6 text-ink-soft", "Add the gmail your places are managed from, on the left." }
 					},
-					(false, Some(g)) => match target.and_then(|t| g.locations.iter().find(|l| l.target.id == t)) {
+					(_, Some(g)) => match target.and_then(|t| g.locations.iter().find(|l| l.target.id == t)) {
 						Some(loc) => rsx! {
 							board::Board { gmail: g.gmail.clone(), location: loc.clone(), tab: tab.clone() }
 						},
@@ -422,14 +500,25 @@ fn Workspace(view: Route) -> Element {
 }
 
 #[component]
-fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: Option<String>) -> Element {
+fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Option<TokensDto>, tab: Option<String>) -> Element {
+	let telegram = at == View::Telegram;
+	let aside = telegram || at == View::Tokens;
 	let mut adding = use_signal(String::new);
 	let all_on = !gmails.is_empty() && gmails.iter().all(|g| g.gmail.enabled);
 	let ids: Vec<i64> = gmails.iter().map(|g| g.gmail.id).collect();
 	let row = "flex items-center gap-2 rounded-md px-3 py-2 text-left cursor-pointer hover:bg-hover";
 	rsx! {
 		nav { class: "flex w-60 shrink-0 flex-col overflow-y-auto border-r border-border bg-secondary",
-			div { class: "px-4 py-4 text-[14px] font-semibold", "review_archive" }
+			div { class: "flex items-center gap-2 px-4 py-4",
+				span { class: "flex-1 text-[14px] font-semibold", "review_archive" }
+				if let Some(t) = tokens {
+					Link {
+						class: if at == View::Tokens { "rounded-md px-2 py-0.5 bg-hover text-ink" } else { "rounded-md px-2 py-0.5 text-ink-soft hover:bg-hover" },
+						to: Route::at(tab.clone(), View::Tokens),
+						span { title: "+{t.daily}/day up to {t.cap}", "{t.balance} tokens" }
+					}
+				}
+			}
 			div { class: "flex items-center gap-1.5 pl-4 pr-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-soft",
 				"Managing gmails"
 				InfoTip {
@@ -460,7 +549,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, telegram: bool, tab: O
 						Link {
 							class: format!(
 								"{row} flex-1 min-w-0 {} {}",
-								if current == Some(g.gmail.id) && !telegram { "bg-hover text-ink" } else { "text-ink-soft" },
+								if current == Some(g.gmail.id) && !aside { "bg-hover text-ink" } else { "text-ink-soft" },
 								if g.gmail.enabled { "" } else { "opacity-50" }
 							),
 							to: Route::at(tab.clone(), View::Gmail(g.gmail.id)),
@@ -596,6 +685,11 @@ fn LocationCard(gmail: i64, gmail_on: bool, loc: LocationSummary, to: Route) -> 
 					}
 					if loc.reinstating > 0 {
 						Badge { tone: Tone::Warn, "reinstating {loc.reinstating}" }
+					}
+					if loc.held {
+						Badge { tone: Tone::Warn,
+							span { title: "not scanned: every member tracking it is out of tokens", "out of tokens" }
+						}
 					}
 				}
 				div { class: "flex items-center gap-2 border-t border-border pt-3 text-[11px] text-ink-soft",

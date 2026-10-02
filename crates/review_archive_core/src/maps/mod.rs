@@ -196,7 +196,8 @@ impl<'a> NewestFirst<'a> {
 			// read to the end, or done; or a first scan at its limit, which is how deep the
 			// archive goes
 			None
-		} else if !self.caught_up {
+		} else if !self.caught_up || (end == WalkEnd::Budget && self.known.initial) {
+			// a first scan reads the whole list, whatever ad-hoc captures archived of it
 			last
 		} else if unreached > 0 && !filling_gap {
 			// caught up, but reviews still without a screenshot lie deeper than this scan may
@@ -214,7 +215,7 @@ impl<'a> NewestFirst<'a> {
 		}
 		if end == WalkEnd::Budget && cut_after.is_some() {
 			scan.warnings
-				.push("out of tokens before reaching archived reviews or the end of the list; the next scan goes on from there".to_owned());
+				.push("out of tokens before the end of the list; the next scan goes on from its last card".to_owned());
 		}
 		if end.cut_short() && unreached > 0 && cut_after.is_some() {
 			scan.warnings.push(format!("{unreached} reviews still without a screenshot were not reached"));
@@ -588,6 +589,16 @@ mod tests {
 		let s = p.conclude(walked(newest_first(), WalkEnd::Budget, true, Some(4000)), 2000, now());
 		assert_eq!(s.cut_after.as_deref(), Some("c"));
 		assert_eq!(s.warnings.len(), 1);
+
+		// over cards ad-hoc captures archived already, too
+		let captured = Known {
+			initial: true,
+			..known((0..SCREEN).map(|i| format!("k{i}")), &[])
+		};
+		let mut p = NewestFirst::new(&captured, now());
+		(0..SCREEN).for_each(|i| p.observe(&card(&format!("k{i}"), "a week ago").0));
+		let s = p.conclude(walked(vec![card("k9", "a week ago")], WalkEnd::Budget, true, Some(4000)), 2000, now());
+		assert_eq!(s.cut_after.as_deref(), Some("k9"));
 	}
 
 	/// A page that fails after the walk caught up with the archive leaves nothing unread.
