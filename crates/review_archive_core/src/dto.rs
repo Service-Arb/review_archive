@@ -608,6 +608,8 @@ pub struct LocationSummary {
 	pub target: TargetDto,
 	/// This gmail's track of it is on; it is scanned while any member's is, under a gmail that is on.
 	pub enabled: bool,
+	/// Reviews posted over the last 7 days, as their dates are estimated; gone ones too.
+	pub new_7d: i64,
 	/// Screenshots taken over the last 7 days.
 	pub snapshots_7d: i64,
 	/// Screenshots taken over the last 30 days.

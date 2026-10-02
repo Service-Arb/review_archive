@@ -38,6 +38,7 @@ struct LocationRow {
 	#[sqlx(flatten)]
 	target: TargetRow,
 	track_enabled: bool,
+	new_7d: i64,
 	snapshots_7d: i64,
 	snapshots_30d: i64,
 	live: i64,
@@ -196,6 +197,7 @@ impl Store {
 			"SELECT k.managing_gmail_id AS gmail_id,
 			        t.id, t.label, t.kind, t.place_id, t.gbp_account, t.gbp_location, t.lang, t.interval_secs, t.enabled, t.created_at,
 			        k.enabled AS track_enabled,
+			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.published_est >= ?2) AS new_7d,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?2) AS snapshots_7d,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?3) AS snapshots_30d,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NULL) AS live,
@@ -232,6 +234,7 @@ impl Store {
 			g.locations.push(LocationSummary {
 				target: Target::try_from(r.target)?.into(),
 				enabled: r.track_enabled,
+				new_7d: r.new_7d,
 				snapshots_7d: r.snapshots_7d,
 				snapshots_30d: r.snapshots_30d,
 				live: r.live,

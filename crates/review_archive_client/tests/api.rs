@@ -843,6 +843,7 @@ async fn members_share_places_but_see_only_their_own() {
 	};
 	let replied = Observed {
 		reply: Some("Thanks".into()),
+		published_est: Some(Timestamp::now() - jiff::SignedDuration::from_hours(24 * 3)),
 		..review("r3")
 	};
 	record(&e, t.id, vec![taken("r1", 0), taken("r2", 14), replied]).await;
@@ -850,8 +851,10 @@ async fn members_share_places_but_see_only_their_own() {
 	assert_eq!(overview.len(), 1);
 	let loc = &overview[0].locations[0];
 	assert_eq!(
-		(loc.target.id, loc.snapshots_7d, loc.snapshots_30d, loc.live, loc.responded, loc.removed, loc.reinstating),
-		(t.id, 1, 2, 3, 1, 0, 0)
+		(
+			loc.target.id, loc.snapshots_7d, loc.snapshots_30d, loc.new_7d, loc.live, loc.responded, loc.removed, loc.reinstating
+		),
+		(t.id, 1, 2, 1, 3, 1, 0, 0)
 	);
 	assert_eq!(loc.listed, Some(3), "what the source says the place has");
 	assert_eq!(loc.last_run_status, Some(review_archive::core::dto::RunStatus::Ok));
