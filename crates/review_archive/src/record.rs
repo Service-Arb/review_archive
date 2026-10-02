@@ -103,6 +103,7 @@ impl Recorder<'_> {
 					captures: &captures,
 					cut_after: scan.cut_after.as_deref(),
 					listed: scan.listed,
+					post: scan.post.as_ref(),
 					ad_hoc: source.ad_hoc(),
 					scanner_version: SCANNER_VERSION,
 				};

@@ -197,6 +197,7 @@ impl ReviewSource for GbpSource<'_> {
 			warnings,
 			cut_after: None,
 			listed: list.total,
+			post: None,
 		})
 	}
 }

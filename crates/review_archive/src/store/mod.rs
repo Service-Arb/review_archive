@@ -19,7 +19,7 @@ use eyre::WrapErr;
 use jiff::{Timestamp, civil::Date};
 pub use jobs::ClaimedJob;
 use review_archive_core::{
-	GbpLocation, Known, KnownReview, Observed, Rejected, ReviewId, Target, TargetId, TargetKind, check_lang,
+	GbpLocation, Known, KnownReview, Observed, OwnerPost, Rejected, ReviewId, Target, TargetId, TargetKind, check_lang, content_hash,
 	dto::{CaptureDto, Counts, DayStats, Event, JobStatus, ReviewDetail, ReviewDto, RunDto, RunStatus, TargetPatch, VersionDto, capture_url},
 	fmt_ts, parse_interval,
 	reconcile::Plan,
@@ -109,6 +109,8 @@ pub struct ScanWrite<'a> {
 	pub cut_after: Option<&'a str>,
 	/// See [`review_archive_core::Scan::listed`].
 	pub listed: Option<u64>,
+	/// See [`review_archive_core::Scan::post`].
+	pub post: Option<&'a OwnerPost>,
 	/// An ad-hoc capture: it may record a gap but never closes one.
 	pub ad_hoc: bool,
 	/// Recorded with each capture.
@@ -651,6 +653,22 @@ impl Store {
 				.execute(&mut *tx)
 				.await
 				.wrap_err("recording how many reviews the source lists")?;
+		}
+		if let Some(post) = scan.post {
+			// the first sighting's estimate is kept: "6 hours ago" says more than a later "3 days ago"
+			sqlx::query(
+				"INSERT INTO posts (target_id, content_hash, text, published_raw, published_est, first_seen, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+				 ON CONFLICT (target_id, content_hash) DO UPDATE SET last_seen = ?6",
+			)
+			.bind(target.0)
+			.bind(content_hash(None, Some(&post.text), None))
+			.bind(&post.text)
+			.bind(&post.published_raw)
+			.bind(post.published_est.map(fmt_ts))
+			.bind(&now_s)
+			.execute(&mut *tx)
+			.await
+			.wrap_err("recording the owner's post")?;
 		}
 
 		seen.sort_unstable();

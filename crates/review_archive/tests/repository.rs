@@ -90,6 +90,7 @@ fn scan(reviews: Vec<Observed>, coverage: Coverage) -> Result<Scan, String> {
 		warnings: vec![],
 		cut_after: None,
 		listed: None,
+		post: None,
 	})
 }
 
@@ -253,6 +254,7 @@ async fn failures_are_runs_and_back_off() {
 		warnings: vec!["screenshot of a failed".into()],
 		cut_after: None,
 		listed: None,
+		post: None,
 	}));
 	let s = e.archive().run(&src, &e.target).await.unwrap();
 	assert_eq!(s.status, RunStatus::Partial);
@@ -367,6 +369,7 @@ fn cut(reviews: Vec<Observed>, cut_after: Option<&str>) -> Result<Scan, String> 
 		warnings: vec![],
 		cut_after: cut_after.map(str::to_owned),
 		listed: None,
+		post: None,
 	})
 }
 

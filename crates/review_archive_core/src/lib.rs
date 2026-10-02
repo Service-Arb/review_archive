@@ -23,7 +23,7 @@
 //!   <div class="MyEned"><span class="wiI7pd">Lovely</span></div></div>"#;
 //! let now = "2026-09-26T12:00:00Z".parse().unwrap();
 //! let reviews = maps::parse::cards(html).into_iter().map(|c| maps::observed(c, now)).collect();
-//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![], cut_after: None, listed: None };
+//! let scan = Scan { reviews, coverage: Coverage::DownTo(None), warnings: vec![], cut_after: None, listed: None, post: None };
 //! let plan = reconcile::plan(&Known::default(), &scan);
 //! assert_eq!(plan.new.len(), 1);
 //! assert_eq!(plan.new[0].rating, Some(5));
@@ -230,6 +230,19 @@ pub struct Scan {
 	/// How many reviews the source says the place has: Maps' own count, the API's
 	/// `totalReviewCount`. `None` when it did not say.
 	pub listed: Option<u64>,
+	/// The owner's latest post, when the source shows one.
+	pub post: Option<OwnerPost>,
+}
+
+/// A post by the place's owner, as a scan saw it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnerPost {
+	/// Line breaks kept.
+	pub text: String,
+	/// When it was posted, as the source prints it.
+	pub published_raw: Option<String>,
+	/// When it was posted, as well as `published_raw` says; `None` for a printed date.
+	pub published_est: Option<Timestamp>,
 }
 
 /// A review the archive already holds, as much of it as reconciling needs.

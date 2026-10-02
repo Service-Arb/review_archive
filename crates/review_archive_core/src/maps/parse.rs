@@ -26,6 +26,25 @@ pub struct Card {
 	pub photo_count: u32,
 }
 
+/// The owner's latest post, as the place's overview shows it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Post {
+	/// Line breaks kept.
+	pub text: String,
+	/// "6 hours ago", or a date, in the page's language.
+	pub date_raw: Option<String>,
+}
+
+/// The post under "From the owner" in `html`, if the place shows one.
+pub fn owner_post(html: &str) -> Option<Post> {
+	let doc = Html::parse_fragment(html);
+	let el = first(doc.root_element(), sel::OWNER_POST)?;
+	Some(Post {
+		text: first_text(el, sel::OWNER_POST_TEXT)?,
+		date_raw: first_text(el, sel::OWNER_POST_DATE),
+	})
+}
+
 /// Parses every outermost review card in `html`, in document order.
 pub fn cards(html: &str) -> Vec<Card> {
 	let doc = Html::parse_fragment(html);
@@ -172,6 +191,9 @@ mod tests {
 			sel::SORT_NEWEST,
 			sel::SIGN_IN_GATE,
 			sel::EXPAND,
+			sel::OWNER_POST,
+			sel::OWNER_POST_TEXT,
+			sel::OWNER_POST_DATE,
 			sel::AUTHOR_NAME,
 			sel::AUTHOR_LINK,
 			sel::RATING_STARS,

@@ -26,7 +26,7 @@ use review_archive_core::{Known, Scan, Target};
 ///
 /// impl ReviewSource for Listed {
 ///     async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
-///         Ok(Scan { reviews: self.0.clone(), coverage: Coverage::Complete, warnings: vec![], cut_after: None, listed: None })
+///         Ok(Scan { reviews: self.0.clone(), coverage: Coverage::Complete, warnings: vec![], cut_after: None, listed: None, post: None })
 ///     }
 /// }
 /// ```

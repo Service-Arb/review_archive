@@ -50,3 +50,22 @@ fn en_replies() {
 	assert!(cards.iter().any(|c| c.reply.is_some()));
 	insta::assert_yaml_snapshot!(cards);
 }
+
+fn post(name: &str) -> Option<parse::Post> {
+	let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+	parse::owner_post(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+}
+
+#[test]
+fn owner_posts() {
+	let en = post("maps_en_owner_post.html").expect("the overview shows one");
+	assert_eq!(en.date_raw.as_deref(), Some("6 hours ago"));
+	assert!(en.text.starts_with("There's a plumbing emergency") && en.text.ends_with("#SecureHome"), "{en:?}");
+	assert!(en.text.contains("\n\n"), "paragraphs survive");
+
+	let fr = post("maps_fr_owner_post.html").expect("the overview shows one");
+	assert_eq!(fr.date_raw.as_deref(), Some("16 sept. 2026"));
+	assert!(fr.text.starts_with("A Stay That Works Around You!"), "{fr:?}");
+
+	assert_eq!(post("maps_en_overview_no_post.html"), None, "a reply to a review is not a post");
+}

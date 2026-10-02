@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use jiff::Timestamp;
 pub use parse::Card;
 
-use crate::{Capture, Coverage, Known, Observed, Scan, relative_date};
+use crate::{Capture, Coverage, Known, Observed, OwnerPost, Scan, relative_date};
 
 /// Cards per screen of the feed: a run this long of already-archived cards ends a walk.
 pub const SCREEN: usize = 10;
@@ -73,11 +73,13 @@ pub struct Walked {
 	pub sorted: bool,
 	/// How many reviews the page says the list holds, when it says.
 	pub total: Option<u64>,
+	/// The owner's latest post, from the place's overview.
+	pub post: Option<parse::Post>,
 }
 
 impl Walked {
 	/// The walk of a place that has no reviews: nothing to read, and that is all of it.
-	pub fn empty(page_url: String) -> Self {
+	pub fn empty(page_url: String, post: Option<parse::Post>) -> Self {
 		Self {
 			cards: Vec::new(),
 			end: WalkEnd::ReachedEnd,
@@ -85,11 +87,12 @@ impl Walked {
 			warnings: Vec::new(),
 			sorted: true,
 			total: Some(0),
+			post,
 		}
 	}
 
 	/// The walk of a list the policy did not want read: nothing read, nothing judged.
-	pub fn unchanged(page_url: String, total: Option<u64>) -> Self {
+	pub fn unchanged(page_url: String, total: Option<u64>, post: Option<parse::Post>) -> Self {
 		Self {
 			cards: Vec::new(),
 			end: WalkEnd::Unread,
@@ -97,6 +100,7 @@ impl Walked {
 			warnings: Vec::new(),
 			sorted: false,
 			total,
+			post,
 		}
 	}
 
@@ -304,6 +308,7 @@ pub fn scan_of(walked: Walked, now: Timestamp) -> Scan {
 		mut warnings,
 		sorted,
 		total,
+		post,
 		..
 	} = walked;
 	let reviews: Vec<Observed> = cards.into_iter().map(|(card, capture)| Observed { capture, ..observed(card, now) }).collect();
@@ -314,6 +319,11 @@ pub fn scan_of(walked: Walked, now: Timestamp) -> Scan {
 		warnings,
 		cut_after: None,
 		listed: total,
+		post: post.map(|p| OwnerPost {
+			published_est: p.date_raw.as_deref().and_then(|d| relative_date::estimate(d, now)),
+			published_raw: p.date_raw,
+			text: p.text,
+		}),
 	}
 }
 
@@ -365,6 +375,7 @@ mod tests {
 			warnings: vec![],
 			sorted,
 			total,
+			post: None,
 		}
 	}
 
@@ -441,7 +452,7 @@ mod tests {
 
 	#[test]
 	fn a_place_without_reviews_is_an_empty_complete_scan() {
-		let s = NewestFirst::new(&Known::default(), now()).conclude(Walked::empty(String::new()), 200, now());
+		let s = NewestFirst::new(&Known::default(), now()).conclude(Walked::empty(String::new(), None), 200, now());
 		assert_eq!((s.reviews.len(), s.coverage, s.cut_after), (0, Coverage::Complete, None));
 		assert!(s.warnings.is_empty());
 	}
@@ -565,7 +576,7 @@ mod tests {
 		let p = NewestFirst::new(&settled, now());
 		assert!(!p.wants_list(Some(1)));
 		assert!(p.wants_list(Some(2)) && p.wants_list(Some(0)) && p.wants_list(None));
-		let s = p.conclude(Walked::unchanged(String::new(), Some(1)), 200, now());
+		let s = p.conclude(Walked::unchanged(String::new(), Some(1), None), 200, now());
 		assert_eq!((s.reviews.len(), s.coverage, s.cut_after, s.listed), (0, Coverage::DownTo(None), None, Some(1)));
 		assert!(s.warnings.is_empty());
 

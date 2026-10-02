@@ -130,6 +130,14 @@ pub const PHOTO_MORE: &[&str] = &[r#"button[jsaction*="showMorePhotos"]"#];
 /// The number on that tile.
 pub const PHOTO_MORE_COUNT: &[&str] = &[".Tap5If"];
 
+/// The owner's latest post, under "From the owner" on the place's overview; clicking it
+/// opens the rest. Matched by its action, not its label, which is translated.
+pub const OWNER_POST: &[&str] = &[r#"[jsaction*="local-post.expand"]"#];
+/// The post's text, inside `OWNER_POST`.
+pub const OWNER_POST_TEXT: &[&str] = &[".VpMB0"];
+/// When it was posted: "6 hours ago", or a date once it is older ("16 sept. 2026").
+pub const OWNER_POST_DATE: &[&str] = &[".lqMB"];
+
 /// In-page helpers. Selectors reach them as JSON arguments, so this file stays the only
 /// place a selector is spelled.
 pub mod js {
@@ -146,6 +154,15 @@ pub mod js {
 	pub const HAS_TEXT: &str = r#"(texts) => {
 		const body = (document.body && document.body.innerText || "").replace(/\u00a0/g, " ");
 		return texts.some(t => body.includes(t));
+	}"#;
+
+	/// `(sels) => html`: the outer HTML of the first match, "" without one.
+	pub const FIRST_HTML: &str = r#"(sels) => {
+		for (const s of sels) {
+			const el = document.querySelector(s);
+			if (el) return el.outerHTML;
+		}
+		return "";
 	}"#;
 
 	/// `(selectors) => bool`: whether any selector matches.

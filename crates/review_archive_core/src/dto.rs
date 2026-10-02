@@ -610,6 +610,10 @@ pub struct LocationSummary {
 	pub enabled: bool,
 	/// Reviews posted over the last 7 days, as their dates are estimated; gone ones too.
 	pub new_7d: i64,
+	/// Owner's posts published over the last 7 days, as their dates are estimated.
+	pub posts_7d: i64,
+	/// The owner's post seen most recently first.
+	pub latest_post: Option<PostDto>,
 	/// Screenshots taken over the last 7 days.
 	pub snapshots_7d: i64,
 	/// Screenshots taken over the last 30 days.
@@ -628,6 +632,18 @@ pub struct LocationSummary {
 	pub last_run_at: Option<String>,
 	/// How it went.
 	pub last_run_status: Option<RunStatus>,
+}
+
+/// A post by a place's owner.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PostDto {
+	/// Line breaks kept.
+	pub text: String,
+	/// When it was posted, estimated when first seen; `null` when the page printed a date.
+	pub published_est: Option<String>,
+	/// When the archive first saw it.
+	pub first_seen: String,
 }
 
 /// A gmail and its places, by snapshots over 7 days, most first.

@@ -11,7 +11,7 @@ use review_archive::{
 	Archive,
 	config::Config,
 	core::{
-		Coverage, Known, Observed, Scan, Target,
+		Coverage, Known, Observed, OwnerPost, Scan, Target,
 		dto::{CaptureRequest, Event, JobStatus, Me, MemberDto, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch},
 	},
 	sources::ReviewSource,
@@ -113,6 +113,23 @@ impl ReviewSource for Listed {
 			warnings: vec![],
 			cut_after: None,
 			listed: Some(u64::try_from(self.0.len()).unwrap()),
+			post: None,
+		})
+	}
+}
+
+/// Lists nothing it could judge by, and shows an owner's post.
+struct Posted(OwnerPost);
+
+impl ReviewSource for Posted {
+	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+		Ok(Scan {
+			reviews: vec![],
+			coverage: Coverage::DownTo(None),
+			warnings: vec![],
+			cut_after: None,
+			listed: None,
+			post: Some(self.0.clone()),
 		})
 	}
 }
@@ -857,6 +874,22 @@ async fn members_share_places_but_see_only_their_own() {
 		(t.id, 1, 2, 1, 3, 1, 0, 0)
 	);
 	assert_eq!(loc.listed, Some(3), "what the source says the place has");
+	assert_eq!((loc.posts_7d, loc.latest_post.clone()), (0, None));
+
+	let target = e.archive.target(review_archive::core::TargetId(t.id)).await.unwrap();
+	let post = |text: &str, days_ago: i64| {
+		Posted(OwnerPost {
+			text: text.into(),
+			published_raw: Some(format!("{days_ago} days ago")),
+			published_est: Some(Timestamp::now() - jiff::SignedDuration::from_hours(24 * days_ago)),
+		})
+	};
+	for p in [post("Closed for renovation", 12), post("Open on Sunday", 1), post("Open on Sunday", 1)] {
+		e.archive.record(&p, &target).await.unwrap();
+	}
+	let loc = alice.overview().await.unwrap()[0].locations[0].clone();
+	assert_eq!(loc.posts_7d, 1, "one post, seen twice, in the last week");
+	assert_eq!(loc.latest_post.map(|p| p.text).as_deref(), Some("Open on Sunday"));
 	assert_eq!(loc.last_run_status, Some(review_archive::core::dto::RunStatus::Ok));
 
 	let board = alice.board(a.id, t.id).await.unwrap();

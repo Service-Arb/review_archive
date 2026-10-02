@@ -583,6 +583,11 @@ fn LocationCard(gmail: i64, gmail_on: bool, loc: LocationSummary, to: Route) -> 
 					Badge { tone: Tone::Ok,
 						span { title: "posted over the last 7 days, removed ones included", "new 7d +{loc.new_7d}" }
 					}
+					if let Some(post) = &loc.latest_post {
+						Badge { tone: Tone::Ok,
+							span { title: "owner's latest post, {ago(post.published_est.as_deref().unwrap_or(&post.first_seen))}:\n{post.text}", "posts 7d {loc.posts_7d}" }
+						}
+					}
 					Badge { tone: if loc.responded < loc.live { Tone::Warn } else { Tone::Ok },
 						span { title: "replied to by the owner / live", "responded {loc.responded}/{loc.live}" }
 					}

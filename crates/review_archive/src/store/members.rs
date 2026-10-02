@@ -6,7 +6,7 @@ use eyre::WrapErr;
 use jiff::{SignedDuration, Timestamp};
 use review_archive_core::{
 	Rejected, ReviewId, Target, TargetId,
-	dto::{Board, BoardCard, GmailDto, GmailOverview, LocationSummary, NewTgChannel, ReinstatementDto, ReviewDto, TgChannelDto},
+	dto::{Board, BoardCard, GmailDto, GmailOverview, LocationSummary, NewTgChannel, PostDto, ReinstatementDto, ReviewDto, TgChannelDto},
 	fmt_ts,
 };
 use sqlx::FromRow;
@@ -39,6 +39,10 @@ struct LocationRow {
 	target: TargetRow,
 	track_enabled: bool,
 	new_7d: i64,
+	posts_7d: i64,
+	post_text: Option<String>,
+	post_published_est: Option<String>,
+	post_first_seen: Option<String>,
 	snapshots_7d: i64,
 	snapshots_30d: i64,
 	live: i64,
@@ -198,6 +202,8 @@ impl Store {
 			        t.id, t.label, t.kind, t.place_id, t.gbp_account, t.gbp_location, t.lang, t.interval_secs, t.enabled, t.created_at,
 			        k.enabled AS track_enabled,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.published_est >= ?2) AS new_7d,
+			        (SELECT COUNT(*) FROM posts p WHERE p.target_id = t.id AND p.published_est >= ?2) AS posts_7d,
+			        p.text AS post_text, p.published_est AS post_published_est, p.first_seen AS post_first_seen,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?2) AS snapshots_7d,
 			        (SELECT COUNT(*) FROM captures c JOIN reviews r ON r.id = c.review_id WHERE r.target_id = t.id AND c.captured_at >= ?3) AS snapshots_30d,
 			        (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id AND r.gone_at IS NULL) AS live,
@@ -212,6 +218,7 @@ impl Store {
 			 FROM tracks k
 			 JOIN managing_gmails g ON g.id = k.managing_gmail_id
 			 JOIN targets t ON t.id = k.target_id
+			 LEFT JOIN posts p ON p.id = (SELECT id FROM posts WHERE target_id = t.id ORDER BY first_seen DESC, id DESC LIMIT 1)
 			 WHERE g.member_email = ?1
 			 ORDER BY snapshots_7d DESC, t.id",
 		)
@@ -235,6 +242,16 @@ impl Store {
 				target: Target::try_from(r.target)?.into(),
 				enabled: r.track_enabled,
 				new_7d: r.new_7d,
+				posts_7d: r.posts_7d,
+				latest_post: match (r.post_text, r.post_first_seen) {
+					(Some(text), Some(first_seen)) => Some(PostDto {
+						text,
+						published_est: r.post_published_est,
+						first_seen,
+					}),
+					(None, None) => None,
+					_ => unreachable!("both NOT NULL in a joined row"),
+				},
 				snapshots_7d: r.snapshots_7d,
 				snapshots_30d: r.snapshots_30d,
 				live: r.live,

@@ -38,6 +38,9 @@ Out — do not build, even as an option:
 - The browser profile is signed in to a Google account: signed out, Maps shows a place's
   first few reviews only and will not sort them, so the walk fails (`signed_out`) and Maps
   halts until a restart.
+- On the place's overview, read the owner's latest post under "From the owner" (text,
+  date as printed); it is kept once per distinct text (`posts`), with when it was first
+  and last seen. Only the latest shows there: two posts between scans keep the newer.
 - Open the Reviews tab. When the place's review count is the one the last scan read
   (`targets.listed`; ad-hoc captures do not set it), and no gap or pending screenshot is
   owed, stop there: the run lists nothing and judges nothing. Otherwise sort by *Newest*,
@@ -93,6 +96,7 @@ blob dir. Everything under one data dir (`/data` in the container).
   reading ("Edited a day ago") does not replace it.
 - `review_versions(review_id, seen_at, content_hash, rating, text, reply)` — a
   row whenever `content_hash` changes; history is never overwritten.
+- `posts(id, target_id, content_hash, text, published_raw, published_est, first_seen, last_seen)`
 - `captures(id, review_id, captured_at, sha256, width, height, page_url, scanner_version)`
 - `runs(id, target_id, started_at, finished_at, status[ok|partial|failed], error, n_seen, n_new, n_changed, n_gone, ad_hoc)`
   — `ad_hoc` marks the runs of ad-hoc captures. A run a stopped process left open is
