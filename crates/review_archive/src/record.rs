@@ -10,6 +10,7 @@ use review_archive_core::{
 	dto::{Counts, RunStatus, RunSummary},
 	reconcile,
 	schedule::Schedule,
+	tokens::{Meter, Tokens},
 };
 
 use crate::{
@@ -42,6 +43,8 @@ pub struct Recorder<'a> {
 	pub now: fn() -> Timestamp,
 	/// How long a tripped Maps breaker waits.
 	pub schedule: &'a Schedule,
+	/// What members' balances and the account's hour allow.
+	pub tokens: &'a Tokens,
 }
 
 impl Recorder<'_> {
@@ -52,9 +55,12 @@ impl Recorder<'_> {
 	}
 
 	/// [`Self::run`], with the run's id and the reviews it listed. With `job`, that job ends
-	/// with the run, in the same transaction.
+	/// with the run, in the same transaction. The members tracking the target pay for its
+	/// walk, in that transaction too — but not for a job or an ad-hoc look, which are the operator's.
 	pub async fn record<S: ReviewSource>(&self, source: &S, target: &Target, job: Option<i64>) -> eyre::Result<Recorded> {
 		let known = self.store.known(target.id).await?;
+		let bill = self.store.bill(target.id, job.is_some() || source.ad_hoc(), (self.now)(), self.tokens).await?;
+		let mut meter = Meter::new(bill.allowance);
 		let run = self.store.start_run(target.id, source.ad_hoc(), (self.now)()).await?;
 		let mut summary = RunSummary {
 			target: target.id.0,
@@ -66,7 +72,7 @@ impl Recorder<'_> {
 			error: None,
 		};
 		let mut failure = None;
-		let seen = match source.scan(target, &known).await {
+		let seen = match source.scan(target, &known, &mut meter).await {
 			Err(e) => {
 				let error = crate::describe(&e);
 				let end = RunEnd {
@@ -74,6 +80,8 @@ impl Recorder<'_> {
 					status: RunStatus::Failed,
 					error: Some(&error),
 					job,
+					tokens: meter.spent(),
+					payers: &bill.payers,
 				};
 				self.store.fail_run(end, (self.now)()).await?;
 				#[cfg(feature = "maps")]
@@ -112,6 +120,8 @@ impl Recorder<'_> {
 					status: summary.status,
 					error: summary.error.as_deref(),
 					job,
+					tokens: meter.spent(),
+					payers: &bill.payers,
 				};
 				let applied = match self.store.apply(target.id, write, end, (self.now)()).await {
 					Ok(applied) => applied,

@@ -4,7 +4,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use review_archive::config::{BrowserConfig, Defaults, WebhookConfig};
-use review_archive_core::schedule::Schedule;
+use review_archive_core::{maps::cost, schedule::Schedule, tokens::Tokens};
 use review_archive_server::{http::HttpConfig, worker::WorkerConfig};
 use smart_default::SmartDefault;
 use v_utils::macros::{ConfigJsonSchema, MyConfigPrimitives, Settings};
@@ -29,6 +29,9 @@ pub struct AppConfig {
 	pub schedule: Schedule,
 	#[serde(default)]
 	#[settings(flatten)]
+	pub tokens: Tokens,
+	#[serde(default)]
+	#[settings(flatten)]
 	pub webhooks: WebhookConfig,
 	#[serde(default)]
 	#[settings(flatten)]
@@ -47,6 +50,12 @@ impl AppConfig {
 			cfg.defaults.interval,
 			cfg.schedule.min_interval
 		);
+		eyre::ensure!(
+			cfg.tokens.per_hour >= cost::FIRST_SCREEN,
+			"tokens.per_hour ({}) is below what a walk's first screen costs ({})",
+			cfg.tokens.per_hour,
+			cost::FIRST_SCREEN
+		);
 		Ok(cfg)
 	}
 
@@ -57,6 +66,7 @@ impl AppConfig {
 			browser: self.browser.clone(),
 			defaults: self.defaults.clone(),
 			schedule: self.schedule.clone(),
+			tokens: self.tokens.clone(),
 			webhooks: self.webhooks.clone(),
 			secrets,
 		}

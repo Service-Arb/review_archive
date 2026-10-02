@@ -266,6 +266,8 @@ pub struct RunDto {
 	/// What it changed.
 	#[serde(flatten)]
 	pub counts: Counts,
+	/// What its walk cost, paid or not.
+	pub tokens: i64,
 }
 
 /// What a job does. Stored as its lowercase name.
@@ -632,6 +634,8 @@ pub struct LocationSummary {
 	pub last_run_at: Option<String>,
 	/// How it went.
 	pub last_run_status: Option<RunStatus>,
+	/// Not scanned: every member tracking it is out of tokens.
+	pub held: bool,
 }
 
 /// A post by a place's owner.
@@ -745,6 +749,85 @@ pub struct Me {
 	pub username: String,
 	/// May act as any member (`X-Member`).
 	pub admin: bool,
+	/// Their tokens.
+	pub tokens: TokensDto,
+}
+
+/// A member's tokens: what their places' scans are paid with.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TokensDto {
+	/// What they hold now.
+	pub balance: i64,
+	/// Added per day while under `cap`.
+	pub daily: i64,
+	/// Where daily renewal stops.
+	pub cap: i64,
+}
+
+/// Why a member's balance moved. Stored as its lowercase name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::AsRefStr, strum::Display, strum::EnumString)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum TokenKind {
+	/// Daily renewal.
+	Accrual,
+	/// Given by an admin.
+	Grant,
+	/// Bought; recorded by an admin.
+	Purchase,
+	/// An admin set the balance; the row is the difference.
+	Set,
+	/// A scan of their place.
+	Charge,
+}
+
+/// `GET /me/tokens`: a row of the member's ledger.
+#[skip_serializing_none]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LedgerEntry {
+	/// When.
+	pub at: String,
+	/// How much the balance moved.
+	pub delta: i64,
+	/// Why.
+	pub kind: TokenKind,
+	/// The admin who recorded it.
+	pub by: Option<String>,
+	/// What they wrote with it.
+	pub note: Option<String>,
+	/// A charge's run.
+	pub run_id: Option<i64>,
+	/// A charge's place.
+	pub target_id: Option<i64>,
+	/// See `target_id`.
+	pub target_label: Option<String>,
+}
+
+/// `POST /members/{email}/tokens`: one change of a member's balance.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TokensChange {
+	/// What changes.
+	#[serde(flatten)]
+	pub change: BalanceChange,
+	/// A payment reference, a reason.
+	pub note: Option<String>,
+}
+
+/// See [`TokensChange`]: `{"set": n}`, `{"grant": n}` or `{"purchase": n}`.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum BalanceChange {
+	/// The balance becomes this.
+	Set(i64),
+	/// Adds this.
+	Grant(i64),
+	/// Adds this, bought.
+	Purchase(i64),
 }
 
 /// `GET /members`: a member as valeratrades.com lists them.
@@ -757,6 +840,8 @@ pub struct MemberDto {
 	pub username: Option<String>,
 	/// Their Google name, if they signed in with Google.
 	pub display_name: Option<String>,
+	/// Their token balance.
+	pub balance: i64,
 }
 
 /// On `/me` routes: the member an admin acts as.

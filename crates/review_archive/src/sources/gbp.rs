@@ -9,7 +9,8 @@ use jiff::Timestamp;
 use review_archive_core::{
 	GbpLocation, Known, Observed, Scan, Target,
 	gbp::{FindCards, ReviewList, ReviewsPage, list_coverage, match_captures, observed},
-	maps::WalkPolicy,
+	maps::{WalkPolicy, cost},
+	tokens::Meter,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -158,7 +159,7 @@ pub struct GbpSource<'a> {
 }
 
 impl ReviewSource for GbpSource<'_> {
-	async fn scan(&self, target: &Target, known: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, target: &Target, known: &Known, meter: &mut Meter) -> eyre::Result<Scan> {
 		let loc = target.gbp.as_ref().ok_or_else(|| eyre::eyre!("target {} is gbp but has no account/location", target.id))?;
 		let list = self.client.reviews(loc).await?;
 		let mut reviews: Vec<Observed> = list.reviews.into_iter().map(observed).collect();
@@ -171,8 +172,9 @@ impl ReviewSource for GbpSource<'_> {
 			let mut policy = FindCards::new(&wanted, Timestamp::now());
 			// The API list stands on its own; a failed screenshot pass only leaves captures pending.
 			let walked = match self.browser {
+				Ok(_) if meter.left() < cost::FIRST_SCREEN => Err("out of tokens".to_owned()),
 				Ok(browser) => browser
-					.walk(&target.place_id, &target.lang, &mut policy, max)
+					.walk(&target.place_id, &target.lang, &mut policy, meter, max)
 					.await
 					.map_err(|e| format!("Maps page failed: {e:#}")),
 				Err(ref why) => Err(why.clone()),

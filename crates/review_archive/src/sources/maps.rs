@@ -5,6 +5,7 @@ use review_archive_core::{
 	Known, Scan, Target,
 	dto::CaptureLimits,
 	maps::{NewestFirst, Requested},
+	tokens::Meter,
 };
 
 use super::ReviewSource;
@@ -20,10 +21,10 @@ pub struct MapsSource<'a> {
 }
 
 impl ReviewSource for MapsSource<'_> {
-	async fn scan(&self, target: &Target, known: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, target: &Target, known: &Known, meter: &mut Meter) -> eyre::Result<Scan> {
 		let max = self.defaults.max_for(known);
 		let mut policy = NewestFirst::new(known, Timestamp::now());
-		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, max).await?;
+		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, meter, max).await?;
 		Ok(policy.conclude(walked, max, Timestamp::now()))
 	}
 }
@@ -41,9 +42,9 @@ pub struct RequestedSource<'a> {
 }
 
 impl ReviewSource for RequestedSource<'_> {
-	async fn scan(&self, target: &Target, known: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, target: &Target, known: &Known, meter: &mut Meter) -> eyre::Result<Scan> {
 		let mut policy = Requested::new(known, self.limits.review_ids.clone());
-		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, self.max).await?;
+		let walked = self.browser.walk(&target.place_id, &target.lang, &mut policy, meter, self.max).await?;
 		Ok(policy.conclude(walked, Timestamp::now()))
 	}
 

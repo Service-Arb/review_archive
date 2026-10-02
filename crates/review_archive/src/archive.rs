@@ -75,6 +75,8 @@ struct Inner {
 	defaults: Defaults,
 	#[cfg(feature = "store")]
 	schedule: Schedule,
+	#[cfg(feature = "store")]
+	tokens: review_archive_core::tokens::Tokens,
 	// Everything that uses the secrets and the HTTP client (resolving places, the gbp
 	// client) comes with a store.
 	#[cfg(feature = "store")]
@@ -221,6 +223,8 @@ impl Archive {
 			inner: Arc::new(Inner {
 				#[cfg(feature = "store")]
 				schedule: config.schedule,
+				#[cfg(feature = "store")]
+				tokens: config.tokens,
 				defaults: config.defaults,
 				#[cfg(feature = "store")]
 				secrets: config.secrets,
@@ -269,7 +273,9 @@ impl Archive {
 		// nothing archived: every card is wanted, and stopping at the limit leaves no gap
 		let nothing = Known { initial: true, ..Known::default() };
 		let mut policy = Requested::new(&nothing, req.limits.review_ids.clone());
-		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, max).await?;
+		// nothing stored, so no one to charge and no hour to keep
+		let mut meter = review_archive_core::tokens::Meter::new(i64::MAX);
+		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, &mut meter, max).await?;
 		let page_url = walked.page_url.clone();
 		let mut scan = policy.conclude(walked, Timestamp::now());
 		for r in &mut scan.reviews {
@@ -387,6 +393,9 @@ impl Archive {
 		if let Some(why) = self.closed(target.kind, Timestamp::now()).await? {
 			return Err(Rejected::Busy(why).into());
 		}
+		if target.kind == TargetKind::Maps && job.is_none() && self.store()?.held(target.id, Timestamp::now(), &self.inner.tokens).await? {
+			return Err(Rejected::Busy(format!("target {} is held: the members tracking it are out of tokens", target.id)).into());
+		}
 		self.inner.browser.claim().await?;
 		match target.kind {
 			TargetKind::Maps => {
@@ -427,6 +436,7 @@ impl Archive {
 			store: &stored.store,
 			blobs: &stored.blobs,
 			schedule: &self.inner.schedule,
+			tokens: &self.inner.tokens,
 			now: Timestamp::now,
 		}
 		.record(source, target, job)
@@ -456,10 +466,11 @@ impl Archive {
 		let halted = self.inner.halted.lock().expect("nothing under this lock panics").clone();
 		Ok(match kind {
 			TargetKind::Gbp => halted.gbp.map(|why| format!("gbp is halted until a restart: {why}")),
-			TargetKind::Maps => match (halted.maps, self.store()?.breaker().await?) {
-				(Some(why), _) => Some(format!("Maps is halted until a restart: {why}")),
-				(None, Some(b)) if now < b.probe_after => Some(format!("Maps is paused after {} until {}; nothing goes to Google before then", b.reason, b.probe_after)),
-				(None, _) => None,
+			TargetKind::Maps => match (halted.maps, self.store()?.breaker().await?, self.store()?.rail(now, &self.inner.tokens).await?.reopens_at) {
+				(Some(why), ..) => Some(format!("Maps is halted until a restart: {why}")),
+				(None, Some(b), _) if now < b.probe_after => Some(format!("Maps is paused after {} until {}; nothing goes to Google before then", b.reason, b.probe_after)),
+				(None, _, Some(at)) => Some(format!("Maps has spent its hour's tokens; it reopens at {at}")),
+				(None, ..) => None,
 			},
 		})
 	}
@@ -701,11 +712,14 @@ impl Archive {
 	/// Scheduled targets and when each is due: a halted source's are left out, and a paused
 	/// Maps' wait for the probe.
 	async fn due_times(&self) -> eyre::Result<Vec<(Target, Option<Timestamp>)>> {
-		let breaker = self.store()?.breaker().await?;
+		let store = self.store()?;
+		let now = Timestamp::now();
+		let breaker = store.breaker().await?;
+		let rail = store.rail(now, &self.inner.tokens).await?;
 		#[cfg(feature = "maps")]
 		let halted = self.inner.halted.lock().expect("nothing under this lock panics").clone();
 		let mut out = Vec::new();
-		for t in self.store()?.scheduled_targets().await? {
+		for t in store.scheduled_targets().await? {
 			#[cfg(feature = "maps")]
 			if match t.kind {
 				TargetKind::Maps => halted.maps.is_some(),
@@ -713,11 +727,15 @@ impl Archive {
 			} {
 				continue;
 			}
+			// held until its members' balances renew, which is when it is looked at again
+			if t.kind == TargetKind::Maps && store.held(t.id, now, &self.inner.tokens).await? {
+				continue;
+			}
 			let mut due = self.due_at(&t).await?;
-			if t.kind == TargetKind::Maps
-				&& let Some(b) = &breaker
-			{
-				due = Some(due.map_or(b.probe_after, |d| d.max(b.probe_after)));
+			if t.kind == TargetKind::Maps {
+				for at in [breaker.as_ref().map(|b| b.probe_after), rail.reopens_at].into_iter().flatten() {
+					due = Some(due.map_or(at, |d| d.max(at)));
+				}
 			}
 			out.push((t, due));
 		}
@@ -739,7 +757,7 @@ struct Unavailable(eyre::Report);
 
 #[cfg(all(feature = "store", feature = "maps"))]
 impl ReviewSource for Unavailable {
-	async fn scan(&self, _: &Target, _: &review_archive_core::Known) -> eyre::Result<review_archive_core::Scan> {
+	async fn scan(&self, _: &Target, _: &review_archive_core::Known, _: &mut review_archive_core::tokens::Meter) -> eyre::Result<review_archive_core::Scan> {
 		Err(eyre::eyre!("{:#}", self.0))
 	}
 }

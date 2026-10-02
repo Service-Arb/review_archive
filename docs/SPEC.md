@@ -98,8 +98,8 @@ blob dir. Everything under one data dir (`/data` in the container).
   row whenever `content_hash` changes; history is never overwritten.
 - `posts(id, target_id, content_hash, text, published_raw, published_est, first_seen, last_seen)`
 - `captures(id, review_id, captured_at, sha256, width, height, page_url, scanner_version)`
-- `runs(id, target_id, started_at, finished_at, status[ok|partial|failed], error, n_seen, n_new, n_changed, n_gone, ad_hoc)`
-  — `ad_hoc` marks the runs of ad-hoc captures. A run a stopped process left open is
+- `runs(id, target_id, started_at, finished_at, status[ok|partial|failed], error, n_seen, n_new, n_changed, n_gone, ad_hoc, tokens)`
+  — `ad_hoc` marks the runs of ad-hoc captures; `tokens` is what its walk cost (see Tokens), a failed one's too. A run a stopped process left open is
   failed ("interrupted") on the next start of `serve` — a hand-run `scan` still going at
   that moment included; its run is marked ended again, with its real outcome, when it
   finishes.
@@ -118,6 +118,10 @@ deleted.
 - One scan at a time; a random pause between targets, `schedule.pause_{min,max}` (5–15 s).
 - Failure → `runs.status=failed` with the error, exponential backoff for that
   target (`schedule.backoff_base` doubling to `schedule.backoff_cap`: 1 h → 24 h), other targets continue.
+- A tracked target whose members hold fewer tokens together than a walk's first screen
+  costs is held, not scanned, until a balance renews or is topped up. All walks together
+  spend `tokens.per_hour` at most in any hour; past it Maps closes until older runs leave
+  the window, like the breaker.
 - Ad-hoc captures run on the same browser but are not the target's schedule: their
   runs neither delay the next scan nor count as failures.
 - A scan whose browser profile another process holds (a `scan` beside a running
@@ -151,7 +155,7 @@ needs) and `http.max_concurrent` are served at once; `/health` and `/openapi.jso
 
 Config: v_utils `Settings` (`--config`, else `$XDG_CONFIG_HOME/review_archive.{toml,nix,…}`;
 each key also a flag, e.g. `--schedule-min-interval`) for data dir, bind address, defaults,
-pacing (`[schedule]`, `[worker]`, `[http]`, `[webhooks]`, `[browser]`); every key has a default,
+pacing (`[schedule]`, `[worker]`, `[http]`, `[webhooks]`, `[browser]`, `[tokens]`); every key has a default,
 `review_archive config write-defaults` lists them. Secrets only from env.
 
 ### HTTP API for other services
@@ -234,6 +238,33 @@ Several people track their places here, grouped the way they manage them: by
   Snapshotted (listed, by first sighting), Removed (gone, no open appeal, by `gone_at`),
   Reinstating (gone, open appeal, by `requested_at`).
 
+### Tokens
+
+Every Maps walk runs on the operator's signed-in Google account, and each action is
+exposure for it. Tokens price that, and the members whose places are scanned pay.
+
+- A walk is metered in `maps::cost`: opening the place 7, the Reviews tab 1, sorting 7
+  (each retried click 2), each scroll of the feed 1 — the data requests each sends Google, a
+  scroll's ~9 being the unit. "More" and screenshots send none. An unchanged place costs 8;
+  a rescan 15 and 1 per screen of cards.
+- `token_ledger(id, member_email, at, delta, kind[accrual|grant|purchase|set|charge], run_id, by_email, note)`:
+  append-only; a balance is the sum of its rows. Reading a balance renews it first, a whole
+  day at a time: `tokens.daily` (15) per day while under `tokens.cap` (300); granted or bought
+  tokens above the cap stay. A member seen for the first time starts with a day's worth.
+  `set` writes the difference to the balance asked for.
+- A scheduled scan of a target is paid by the members tracking it (a track on, under a gmail
+  that is on). Its walk may spend their balances together, within what the account has left
+  this hour; the next scroll past that ends the walk (`WalkEnd::Budget`), recording a cut as
+  a limit does — a first scan too — so the next scan goes on from there. Whatever the walk
+  spent is charged with the run's end, in its transaction: equal shares, none past its
+  payer's balance, the rest falling on the others. Places nobody tracks, the operator's jobs
+  and ad-hoc captures are paid by no one and limited by the hour only.
+- `purchase` is recorded by an admin (a payment reference in `note`); nothing is sold here.
+- `GET /me` carries the signed-in person's `tokens {balance, daily, cap}`; `GET /me/tokens` is
+  the member's ledger, each charge with its run and place. `GET /members` gives each member's
+  balance; `POST /members/{email}/tokens` `{set | grant | purchase: n, note?}` is an admin's.
+  A place held for tokens shows "out of tokens" on its card (`held`).
+
 ### Auth
 
 Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
@@ -278,7 +309,7 @@ sends the top window to `sign-in` (`SSO_REFRESH_URL`, the site's `/auth/refresh`
 `return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard",
 on ev_lib's `uikit`. An admin gets tabs: their own dashboard, and one per member opened from
 `GET /members`, acting as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
-`/gmails/{id}/places/{target}`, `/telegram`, under `/members/{email}` for a member's tab —
+`/gmails/{id}/places/{target}`, `/telegram`, `/tokens` (the ledger), under `/members/{email}` for a member's tab —
 which the binary answers with the same page.
 
 ## Library

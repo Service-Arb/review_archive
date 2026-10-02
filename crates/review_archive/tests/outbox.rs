@@ -20,6 +20,7 @@ use review_archive::{
 		Coverage, Known, Observed, ReviewId, Scan, Target, TargetKind,
 		dto::{Event, EventPayload, JobKind, JobStatus, NewTgChannel, NewWebhook, RunStatus},
 		schedule::Schedule,
+		tokens::{Meter, Tokens},
 	},
 	record::Recorder,
 	sources::ReviewSource,
@@ -42,7 +43,7 @@ fn deliverer() -> Deliverer {
 struct Scripted(Mutex<Result<Scan, String>>);
 
 impl ReviewSource for Scripted {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		self.0.lock().unwrap().clone().map_err(|e| eyre::eyre!(e))
 	}
 }
@@ -135,6 +136,7 @@ async fn events_are_queued_with_the_scan_signed_and_retried_across_a_reopen() {
 		blobs: &blobs,
 		now: Timestamp::now,
 		schedule: &Schedule::default(),
+		tokens: &Tokens::default(),
 	};
 
 	// two new reviews, then one of them gone, then a failed run; `changed` is not subscribed
@@ -206,6 +208,7 @@ async fn a_dead_receiver_is_given_up_on_and_a_removed_hook_is_owed_nothing() {
 		blobs: &blobs,
 		now: Timestamp::now,
 		schedule: &Schedule::default(),
+		tokens: &Tokens::default(),
 	}
 	.run(&src, &t)
 	.await
@@ -276,6 +279,7 @@ async fn an_edited_review_that_is_back_sends_changed_and_reappeared() {
 		blobs: &blobs,
 		now: Timestamp::now,
 		schedule: &Schedule::default(),
+		tokens: &Tokens::default(),
 	};
 	let src = Scripted(Mutex::new(complete(vec![review("a", "x"), review("b", "y")])));
 	rec.run(&src, &t).await.unwrap();
@@ -377,6 +381,7 @@ async fn telegram_channels_get_their_members_places_only() {
 		blobs: &blobs,
 		now: Timestamp::now,
 		schedule: &Schedule::default(),
+		tokens: &Tokens::default(),
 	};
 	let mut shot = review("b", "rude");
 	shot.capture = Some(review_archive::core::Capture {

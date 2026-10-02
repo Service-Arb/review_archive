@@ -8,6 +8,7 @@ use review_archive_core::{
 	Rejected, ReviewId, Target, TargetId,
 	dto::{Board, BoardCard, GmailDto, GmailOverview, LocationSummary, NewTgChannel, PostDto, ReinstatementDto, ReviewDto, TgChannelDto},
 	fmt_ts,
+	tokens::Tokens,
 };
 use sqlx::FromRow;
 
@@ -188,7 +189,7 @@ impl Store {
 	}
 
 	/// The member's gmails and each one's places, by screenshots over 7 days, most first.
-	pub async fn overview(&self, member: &str, now: Timestamp) -> eyre::Result<Vec<GmailOverview>> {
+	pub async fn overview(&self, member: &str, now: Timestamp, tokens: &Tokens) -> eyre::Result<Vec<GmailOverview>> {
 		let days_ago = |d: i64| fmt_ts(now - SignedDuration::from_hours(24 * d));
 		// one snapshot: every location row's gmail is among the gmails read
 		let mut tx = self.pool.begin().await.wrap_err("starting a read")?;
@@ -237,6 +238,7 @@ impl Store {
 				.map(str::parse)
 				.transpose()
 				.wrap_err_with(|| format!("target {}'s last run has an unknown status", r.target.id))?;
+			let held = self.held(TargetId(r.target.id), now, tokens).await?;
 			let g = out.iter_mut().find(|g| g.gmail.id == r.gmail_id).expect("read in the same transaction");
 			g.locations.push(LocationSummary {
 				target: Target::try_from(r.target)?.into(),
@@ -261,6 +263,7 @@ impl Store {
 				reinstating: r.reinstating,
 				last_run_at: r.last_run_at,
 				last_run_status: status,
+				held,
 			});
 		}
 		Ok(out)

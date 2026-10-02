@@ -6,7 +6,7 @@ use jiff::{SignedDuration, Timestamp};
 use review_archive::{
 	Archive, Rejected, SessionError,
 	config::Config,
-	core::{Coverage, Known, Scan, Target, TargetId, dto::NewTarget},
+	core::{Coverage, Known, Scan, Target, TargetId, dto::NewTarget, tokens::Meter},
 	sources::ReviewSource,
 };
 
@@ -14,7 +14,7 @@ use review_archive::{
 struct Blocked;
 
 impl ReviewSource for Blocked {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		Err(SessionError::new_blocked("https://www.google.com/sorry/index".to_owned()).into())
 	}
 }
@@ -23,7 +23,7 @@ impl ReviewSource for Blocked {
 struct Served;
 
 impl ReviewSource for Served {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		Ok(Scan {
 			reviews: vec![],
 			coverage: Coverage::Complete,

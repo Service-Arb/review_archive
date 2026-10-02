@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use review_archive_core::{Known, check_lang, schedule::Schedule};
+use review_archive_core::{Known, check_lang, schedule::Schedule, tokens::Tokens};
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
 use v_utils::Timeframe;
@@ -21,6 +21,8 @@ pub struct Config {
 	pub defaults: Defaults,
 	/// How targets are paced.
 	pub schedule: Schedule,
+	/// What members' scans may spend.
+	pub tokens: Tokens,
 	/// Where webhooks may point.
 	pub webhooks: WebhookConfig,
 	/// API keys and tokens.

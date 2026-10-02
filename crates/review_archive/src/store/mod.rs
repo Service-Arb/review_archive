@@ -11,6 +11,7 @@ mod events;
 pub mod export;
 mod jobs;
 mod members;
+mod tokens;
 mod webhooks;
 
 use std::{collections::HashMap, path::Path, time::Duration};
@@ -29,6 +30,7 @@ use sqlx::{
 	FromRow, SqliteConnection, Transaction,
 	sqlite::{Sqlite, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
+pub use tokens::{Bill, Rail};
 use v_utils::Timeframe;
 pub use webhooks::{Delivery, Recipient};
 
@@ -96,6 +98,10 @@ pub struct RunEnd<'a> {
 	pub error: Option<&'a str>,
 	/// The job whose run this is.
 	pub job: Option<i64>,
+	/// What its walk spent; a failed one too, Google saw it all the same.
+	pub tokens: i64,
+	/// Who pays for it: [`Bill::payers`].
+	pub payers: &'a [String],
 }
 
 /// What a scan saw, ready to be written.
@@ -182,9 +188,10 @@ struct RunRow {
 	n_new: i64,
 	n_changed: i64,
 	n_gone: i64,
+	tokens: i64,
 }
 
-const RUN_COLUMNS: &str = "id, target_id, started_at, finished_at, status, error, n_seen, n_new, n_changed, n_gone";
+const RUN_COLUMNS: &str = "id, target_id, started_at, finished_at, status, error, n_seen, n_new, n_changed, n_gone, tokens";
 
 impl TryFrom<RunRow> for RunDto {
 	type Error = eyre::Report;
@@ -203,6 +210,7 @@ impl TryFrom<RunRow> for RunDto {
 				changed: sat_u32(r.n_changed),
 				gone: sat_u32(r.n_gone),
 			},
+			tokens: r.tokens,
 		})
 	}
 }
@@ -891,7 +899,7 @@ async fn run_by_id<'e, E: sqlx::SqliteExecutor<'e>>(db: E, id: RunId) -> eyre::R
 
 /// Ends the run, and its job with it: a failed run fails the job, anything else is done.
 async fn finish(tx: &mut SqliteConnection, end: RunEnd<'_>, counts: Counts, seen: &[ReviewId], now: Timestamp) -> eyre::Result<()> {
-	sqlx::query("UPDATE runs SET finished_at = ?, status = ?, error = ?, n_seen = ?, n_new = ?, n_changed = ?, n_gone = ? WHERE id = ?")
+	sqlx::query("UPDATE runs SET finished_at = ?, status = ?, error = ?, n_seen = ?, n_new = ?, n_changed = ?, n_gone = ?, tokens = ? WHERE id = ?")
 		.bind(fmt_ts(now))
 		.bind(end.status.as_ref())
 		.bind(end.error)
@@ -899,10 +907,12 @@ async fn finish(tx: &mut SqliteConnection, end: RunEnd<'_>, counts: Counts, seen
 		.bind(counts.new)
 		.bind(counts.changed)
 		.bind(counts.gone)
+		.bind(end.tokens)
 		.bind(end.run.0)
 		.execute(&mut *tx)
 		.await
 		.wrap_err("recording run end")?;
+	tokens::charge(tx, end.run, end.tokens, end.payers, now).await?;
 	if let Some(job) = end.job {
 		let failed = end.status == RunStatus::Failed;
 		let status = if failed { JobStatus::Failed } else { JobStatus::Done };

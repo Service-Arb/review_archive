@@ -8,7 +8,10 @@ mod session;
 
 use std::{path::PathBuf, sync::Arc};
 
-use review_archive_core::maps::{WalkEnd, WalkPolicy, Walked};
+use review_archive_core::{
+	maps::{WalkEnd, WalkPolicy, Walked},
+	tokens::Meter,
+};
 
 use self::{profile::ProfileLock, session::Session};
 use crate::{SessionError, config::BrowserConfig};
@@ -67,8 +70,9 @@ impl Browser {
 	}
 
 	/// Opens the place's review list, sorted newest first, and walks it: `policy` says
-	/// which cards to screenshot and when to stop; `max` caps the cards read.
-	pub async fn walk(&self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy, max: usize) -> eyre::Result<Walked> {
+	/// which cards to screenshot and when to stop; `max` caps the cards read, `meter` what
+	/// it spends — failed or not, it holds what Google was sent.
+	pub async fn walk(&self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy, meter: &mut Meter, max: usize) -> eyre::Result<Walked> {
 		let mut state = self.inner.state.lock().await;
 		if state.lock.is_none() {
 			state.lock = Some(ProfileLock::acquire(&self.inner.profile_dir)?);
@@ -79,8 +83,8 @@ impl Browser {
 		let session = state.session.as_ref().expect("launched just above");
 		let (walked, broken) = match session.page().await {
 			Ok(mut page) => {
-				let walked = match page.open_reviews(place_id, lang, &mut *policy).await {
-					Ok(Ok(opened)) => page.walk(policy, max, opened).await,
+				let walked = match page.open_reviews(place_id, lang, &mut *policy, meter).await {
+					Ok(Ok(opened)) => page.walk(policy, meter, max, opened).await,
 					Ok(Err(over)) => Ok(over),
 					Err(e) => Err(e),
 				};

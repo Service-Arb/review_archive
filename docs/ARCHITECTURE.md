@@ -10,6 +10,7 @@ crates/review_archive_core/     no I/O: no browser, database, network or clock
                                 what callers type in (intervals, langs, dates) and Rejected
   src/reconcile.rs              a scan against what is stored → new / changed / unchanged / gone / reappeared
   src/schedule.rs               when a target is next due: interval, jitter, backoff
+  src/tokens.rs                 risk tokens: daily renewal, splitting a charge, the walk's meter
   src/relative_date.rs          "il y a 3 semaines" → an estimated timestamp, and its earliest bound
   src/maps/selectors.rs         every assumption about Google's markup, and the in-page scripts
   src/maps/parse.rs             cards out of HTML (tested on tests/fixtures/, insta snapshots)
@@ -26,6 +27,7 @@ crates/review_archive/          the engine (features: maps, store)
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
   src/store/events.rs           events into the outbox (hooks, members' Telegram channels), in the scan's own transaction
   src/store/members.rs          per-member state: gmails, tracks, reinstatements, Telegram channels
+  src/store/tokens.rs           the token ledger: balances, who pays for a scan, the account's hourly limit
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
   src/failure.rs                the typed errors (miette codes and help), `describe`, and who a failure waits for
     src/webhooks.rs               where a hook may point; delivering the outbox: signature, retries, the Telegram bot
@@ -124,7 +126,7 @@ with its own platform implements `sources::ReviewSource` and records through
   them to 404, 400 and 429, and anything else to a logged 500.
 - **One write lock per transaction.** A write that reads first begins `IMMEDIATE`, so `serve`'s
   worker, its HTTP side and a hand-run `scan` never fail on each other's writes. A scan's
-  reviews, events, cut, run end and job end commit together.
+  reviews, events, cut, run end, job end and token charges commit together.
 - **One browser, one queue.** A single worker uses the browser: queued jobs first
     (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than `worker.jobs_in_a_row`
   while a target is overdue — then the most overdue target, with a `schedule.pause_{min,max}` pause
@@ -138,6 +140,12 @@ with its own platform implements `sources::ReviewSource` and records through
   scanned once. What is a member's — gmails, tracks, reinstatements, Telegram channels —
   points at those facts and never alters them (tracking may put a disabled target back on
   the schedule; a target whose every track is switched off is left off it); every member query is scoped by the member's email in SQL.
+- **Tokens are a ledger; a balance is its sum; members pay for the scans of their places.**
+  `token_ledger` rows are only added (renewal, an admin's set as a difference, charges). A
+  walk is metered by `maps::cost` and stops at what its payers hold and the account's hour
+  (`tokens.per_hour`) leaves; it is charged in the run's end transaction, a failed walk
+  included — Google saw it all the same. A tracked place whose members are out of tokens is
+  not walked.
 - **Events are an outbox.** `review.new/changed/gone/reappeared` and `run.failed` are written
   to `webhook_deliveries` in the same transaction as what they report — a row per hook, and
   per Telegram channel of a member tracking the target — and delivered from there, retried

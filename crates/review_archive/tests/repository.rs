@@ -12,6 +12,7 @@ use review_archive::{
 		Capture, Coverage, Known, Observed, ReviewId, Scan, Target, TargetId, TargetKind,
 		dto::{RunStatus, TargetPatch},
 		schedule::Schedule,
+		tokens::{Meter, Tokens},
 	},
 	record::Recorder,
 	sources::ReviewSource,
@@ -19,6 +20,7 @@ use review_archive::{
 };
 
 static SCHEDULE: LazyLock<Schedule> = LazyLock::new(Schedule::default);
+static TOKENS: LazyLock<Tokens> = LazyLock::new(Tokens::default);
 
 thread_local! {
 	// `#[tokio::test]` runs each test on a thread of its own
@@ -53,7 +55,7 @@ impl Scripted {
 }
 
 impl ReviewSource for Scripted {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		self.0.lock().unwrap().clone().map_err(|e| eyre::eyre!(e))
 	}
 }
@@ -139,6 +141,7 @@ impl Env {
 			blobs: &self.blobs,
 			now,
 			schedule: &SCHEDULE,
+			tokens: &TOKENS,
 		}
 	}
 
@@ -353,8 +356,8 @@ async fn a_gone_day_keeps_its_count_after_the_review_reappears() {
 struct AdHoc<'a>(&'a Scripted);
 
 impl ReviewSource for AdHoc<'_> {
-	async fn scan(&self, t: &Target, k: &Known) -> eyre::Result<Scan> {
-		self.0.scan(t, k).await
+	async fn scan(&self, t: &Target, k: &Known, m: &mut Meter) -> eyre::Result<Scan> {
+		self.0.scan(t, k, m).await
 	}
 
 	fn ad_hoc(&self) -> bool {

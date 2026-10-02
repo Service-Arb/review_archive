@@ -4,7 +4,7 @@
 use jiff::Timestamp;
 use review_archive_core::{
 	GbpLocation, Rejected, ReviewId, TargetId, check_lang,
-	dto::{Board, GmailDto, GmailOverview, NewGmail, NewTgChannel, NewTrack, ReinstatementDto, TargetDto, TargetPatch, TgChannelDto},
+	dto::{Board, GmailDto, GmailOverview, LedgerEntry, NewGmail, NewTgChannel, NewTrack, ReinstatementDto, TargetDto, TargetPatch, TgChannelDto, TokensChange, TokensDto},
 };
 use tg_types::TelegramDestination;
 
@@ -74,7 +74,7 @@ impl Archive {
 
 	/// The member's gmails and each one's places.
 	pub async fn overview(&self, member: &str) -> eyre::Result<Vec<GmailOverview>> {
-		self.store()?.overview(member, Timestamp::now()).await
+		self.store()?.overview(member, Timestamp::now(), &self.inner.tokens).await
 	}
 
 	/// A tracked place's reviews: snapshotted, removed, reinstating.
@@ -136,5 +136,30 @@ impl Archive {
 		let events: Vec<&str> = ch.events.iter().map(AsRef::as_ref).collect();
 		let text = format!("review_archive: this chat gets {} for {member}", events.join(", "));
 		Ok(self.inner.webhooks.test_telegram(&ch.destination, text).await?)
+	}
+
+	/// The member's tokens, renewed up to now.
+	pub async fn tokens(&self, member: &str) -> eyre::Result<TokensDto> {
+		let cfg = &self.inner.tokens;
+		Ok(TokensDto {
+			balance: self.store()?.balance(member, Timestamp::now(), cfg).await?,
+			daily: cfg.daily,
+			cap: cfg.cap,
+		})
+	}
+
+	/// The member's ledger, newest first: 200 rows.
+	pub async fn ledger(&self, member: &str) -> eyre::Result<Vec<LedgerEntry>> {
+		self.store()?.ledger(member, 200).await
+	}
+
+	/// Sets or adds to the member's balance, as admin `by`.
+	pub async fn change_tokens(&self, member: &str, req: &TokensChange, by: &str) -> eyre::Result<TokensDto> {
+		let cfg = &self.inner.tokens;
+		Ok(TokensDto {
+			balance: self.store()?.change_balance(member, req.change, by, req.note.as_deref(), Timestamp::now(), cfg).await?,
+			daily: cfg.daily,
+			cap: cfg.cap,
+		})
 	}
 }

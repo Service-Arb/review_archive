@@ -19,6 +19,23 @@ use crate::{Capture, Coverage, Known, Observed, OwnerPost, Scan, relative_date};
 /// Cards per screen of the feed: a run this long of already-archived cards ends a walk.
 pub const SCREEN: usize = 10;
 
+/// What each action of a walk costs in tokens: the data requests it sends Google, in units of a
+/// feed scroll's ~9. Measured on 18-, 400- and 1000+-review places; "More" and screenshots send none.
+pub mod cost {
+	/// Opening the place's page (and answering the consent page).
+	pub const OPEN: i64 = 7;
+	/// The Reviews tab, and its histogram.
+	pub const REVIEWS: i64 = 1;
+	/// The sort menu and "Newest".
+	pub const SORT: i64 = 7;
+	/// Each click on the sort button past the first.
+	pub const SORT_RETRY: i64 = 2;
+	/// One scroll of the feed, and the screen of cards it loads.
+	pub const STEP: i64 = 1;
+	/// A walk is not started on less: with it, it reads at least the list's first screen.
+	pub const FIRST_SCREEN: i64 = OPEN + REVIEWS + SORT;
+}
+
 /// What a walk needs to know about each card, and when it has seen enough.
 pub trait WalkPolicy: Send {
 	/// Whether to read the list at all, given how many reviews the page says it holds.
@@ -46,12 +63,14 @@ pub enum WalkEnd {
 	Interrupted,
 	/// The policy did not want the list read ([`WalkPolicy::wants_list`]).
 	Unread,
+	/// The next scroll would have spent more tokens than the walk was given.
+	Budget,
 }
 
 impl WalkEnd {
 	/// Stopped before the list ran out or the policy was done.
 	pub fn cut_short(self) -> bool {
-		matches!(self, Self::Cap | Self::Interrupted)
+		matches!(self, Self::Cap | Self::Interrupted | Self::Budget)
 	}
 }
 
@@ -193,6 +212,10 @@ impl<'a> NewestFirst<'a> {
 		if end == WalkEnd::Cap && (self.known.initial || !self.caught_up) {
 			scan.warnings.push(format!("stopped after {max} reviews without reaching archived ones or the end of the list"));
 		}
+		if end == WalkEnd::Budget && cut_after.is_some() {
+			scan.warnings
+				.push("out of tokens before reaching archived reviews or the end of the list; the next scan goes on from there".to_owned());
+		}
 		if end.cut_short() && unreached > 0 && cut_after.is_some() {
 			scan.warnings.push(format!("{unreached} reviews still without a screenshot were not reached"));
 		}
@@ -256,7 +279,7 @@ impl<'a> Requested<'a> {
 	/// the walk never reached.
 	pub fn conclude(&self, walked: Walked, now: Timestamp) -> Scan {
 		let reached_archive = walked.cards.iter().any(|(c, _)| self.known.contains(&c.id));
-		let gap = walked.end == WalkEnd::Interrupted || (walked.end == WalkEnd::Cap && !self.known.initial && !reached_archive);
+		let gap = matches!(walked.end, WalkEnd::Interrupted | WalkEnd::Budget) || (walked.end == WalkEnd::Cap && !self.known.initial && !reached_archive);
 		let cut_after = gap.then(|| walked.last_id()).flatten();
 		Scan { cut_after, ..scan_of(walked, now) }
 	}
@@ -553,6 +576,18 @@ mod tests {
 		p.observe(&card("n2", "a week ago").0);
 		let ended = p.conclude(walked(vec![card("n2", "a week ago")], WalkEnd::ReachedEnd, true, None), 2000, now());
 		assert_eq!(ended.cut_after, None);
+	}
+
+	/// Unlike its limit, a first scan out of tokens is not how deep the archive goes: the
+	/// next scan goes on from its last card.
+	#[test]
+	fn a_first_scan_out_of_tokens_leaves_a_gap() {
+		let first = Known { initial: true, ..Known::default() };
+		let mut p = NewestFirst::new(&first, now());
+		newest_first().iter().for_each(|(c, _)| p.observe(c));
+		let s = p.conclude(walked(newest_first(), WalkEnd::Budget, true, Some(4000)), 2000, now());
+		assert_eq!(s.cut_after.as_deref(), Some("c"));
+		assert_eq!(s.warnings.len(), 1);
 	}
 
 	/// A page that fails after the walk caught up with the archive leaves nothing unread.

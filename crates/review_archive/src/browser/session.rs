@@ -9,9 +9,10 @@ use jiff::Timestamp;
 use review_archive_core::{
 	Capture,
 	maps::{
-		SCREEN, WalkEnd, WalkPolicy, Walked, WalkedCard, parse,
+		SCREEN, WalkEnd, WalkPolicy, Walked, WalkedCard, cost, parse,
 		selectors::{self as sel, js},
 	},
+	tokens::Meter,
 };
 use serde::Serialize;
 
@@ -84,9 +85,10 @@ impl Page<'_> {
 	/// Opens the place, reads the owner's latest post off its overview, and opens its review
 	/// list sorted newest first. `Err`: the walk is already over — the place has no reviews,
 	/// or `policy` does not want them read.
-	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy) -> Result<Result<Opened, Walked>, SessionError> {
+	pub(crate) async fn open_reviews(&mut self, place_id: &str, lang: &str, policy: &mut dyn WalkPolicy, meter: &mut Meter) -> Result<Result<Opened, Walked>, SessionError> {
 		let url = sel::place_url(place_id, lang);
 		self.tab.set_timeout(self.cfg.nav_timeout.duration()).await;
+		meter.spend(cost::OPEN);
 		self.tab.goto(&url).await?;
 		self.handle_interstitials().await?;
 
@@ -111,6 +113,7 @@ impl Page<'_> {
 			}
 			return Err(markup_changed("waiting for the reviews tab", sel::REVIEWS_TAB));
 		}
+		meter.spend(cost::REVIEWS);
 		if !self.click_first(sel::REVIEWS_TAB).await? {
 			return Err(markup_changed("clicking the reviews tab", sel::REVIEWS_TAB));
 		}
@@ -130,7 +133,7 @@ impl Page<'_> {
 		if !self.wait_for_any(sel::SORT_BUTTON).await? {
 			return Err(markup_changed("waiting for the sort button", sel::SORT_BUTTON));
 		}
-		let sorted = match self.open_sort_menu().await? {
+		let sorted = match self.open_sort_menu(meter).await? {
 			SortMenu::Open => self.pick_newest().await?,
 			SortMenu::SignInRequired => return Err(SessionError::new_signed_out()),
 		};
@@ -144,11 +147,12 @@ impl Page<'_> {
 	}
 
 	/// Clicks the sort button until the sort menu or Google's sign-in dialog shows.
-	async fn open_sort_menu(&mut self) -> Result<SortMenu, SessionError> {
+	async fn open_sort_menu(&mut self, meter: &mut Meter) -> Result<SortMenu, SessionError> {
 		let either = [sel::SORT_NEWEST, sel::SIGN_IN_GATE].concat();
 		let mut gated = 0;
 		// A click that lands while the list is still hydrating is swallowed; retry a few times.
-		for _ in 0..4 {
+		for attempt in 0..4 {
+			meter.spend(if attempt == 0 { cost::SORT } else { cost::SORT_RETRY });
 			self.dismiss_promo().await?;
 			if !self.click_first(sel::SORT_BUTTON).await? {
 				return Err(markup_changed("clicking the sort button", sel::SORT_BUTTON));
@@ -212,7 +216,7 @@ impl Page<'_> {
 	/// Walks the open review list, capturing the cards the policy asks for. A page that
 	/// fails once cards were read ends the walk [`WalkEnd::Interrupted`] with what it read
 	/// — unless Google blocked it, which fails the walk.
-	pub(crate) async fn walk(&mut self, policy: &mut dyn WalkPolicy, max: usize, opened: Opened) -> Result<Walked, SessionError> {
+	pub(crate) async fn walk(&mut self, policy: &mut dyn WalkPolicy, meter: &mut Meter, max: usize, opened: Opened) -> Result<Walked, SessionError> {
 		let page_url = opened.page_url.as_str();
 		let mut seen = HashSet::new();
 		let mut cards: Vec<WalkedCard> = Vec::new();
@@ -262,6 +266,9 @@ impl Page<'_> {
 					return Ok(Some(WalkEnd::ReachedEnd));
 				}
 				self.check_not_blocked()?;
+				if !meter.try_spend(cost::STEP) {
+					return Ok(Some(WalkEnd::Budget));
+				}
 				// A list short enough to fit the panel has nothing to scroll and nothing more to load.
 				if !self.eval::<bool>(js::SCROLL_FEED, sel::CARD).await? {
 					return Ok(Some(WalkEnd::ReachedEnd));

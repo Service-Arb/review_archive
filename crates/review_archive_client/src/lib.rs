@@ -30,8 +30,9 @@ use std::fmt;
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 pub use review_archive_core::dto;
 use review_archive_core::dto::{
-	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, MEMBER_HEADER, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
-	NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery, WebhookDto,
+	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, LedgerEntry, MEMBER_HEADER, Me, MemberDto, NewGmail, NewTarget, NewTgChannel,
+	NewTrack, NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, TokensChange,
+	TokensDto, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
@@ -278,6 +279,16 @@ impl Client {
 	/// `GET /members`: everyone in `service-arb`, as valeratrades.com lists them. An admin's.
 	pub async fn members(&self) -> Result<Vec<MemberDto>, Error> {
 		Self::json(self.request(Method::GET, "members")?).await
+	}
+
+	/// `POST /members/{email}/tokens`: sets a member's balance or adds to it. An admin's.
+	pub async fn change_tokens(&self, member: &str, change: &TokensChange) -> Result<TokensDto, Error> {
+		Self::json(self.request(Method::POST, &format!("members/{member}/tokens"))?.json(change)).await
+	}
+
+	/// `GET /me/tokens`: the member's token ledger, newest first.
+	pub async fn ledger(&self) -> Result<Vec<LedgerEntry>, Error> {
+		Self::json(self.request(Method::GET, "me/tokens")?).await
 	}
 
 	/// `GET /me/overview`: the member's gmails, each with its places.

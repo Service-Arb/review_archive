@@ -23,9 +23,9 @@ use review_archive::{Archive, Rejected, store::export::Destination};
 use review_archive_core::{
 	ReviewId, TargetId,
 	dto::{
-		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, Me, MemberDto, NewGmail, NewTarget, NewTgChannel, NewTrack,
-		NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, WaitQuery,
-		WebhookDto, stats_csv,
+		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, LedgerEntry, Me, MemberDto, NewGmail, NewTarget, NewTgChannel,
+		NewTrack, NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto,
+		TokensChange, TokensDto, WaitQuery, WebhookDto, stats_csv,
 	},
 };
 use serde::{Deserialize, Serialize};
@@ -94,9 +94,11 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
 		.route("/members", get(members))
+		.route("/members/{email}/tokens", post(change_tokens))
 		.route_layer(middleware::from_fn(admin_only));
 	let me = Router::new()
 		.route("/me", get(me))
+		.route("/me/tokens", get(ledger))
 		.route("/me/overview", get(overview))
 		.route("/me/gmails", post(add_gmail))
 		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail).patch(set_gmail_enabled))
@@ -133,6 +135,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 			app = app
 				.route("/", get(page.clone()))
 				.route("/telegram", get(page.clone()))
+				.route("/tokens", get(page.clone()))
 				.route("/gmails/{*view}", get(page.clone()))
 				.route("/members/{member}/{*view}", get(page.clone()))
 				.route("/members/{member}/", get(page.clone()))
@@ -358,9 +361,10 @@ async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiRe
 
 /// Who is signed in, whoever `X-Member` names.
 #[utoipa::path(get, path = "/me", tag = "me", responses((status = 200, body = Me), (status = 403, body = ErrorBody)))]
-async fn me(caller: Caller) -> ApiResult<Json<Me>> {
+async fn me(State(s): State<AppState>, caller: Caller) -> ApiResult<Json<Me>> {
 	match (caller.email, caller.username) {
 		(Some(email), Some(username)) => Ok(Json(Me {
+			tokens: s.archive.tokens(&email).await?,
 			email,
 			username,
 			admin: caller.admin,
@@ -389,13 +393,43 @@ async fn members(State(s): State<AppState>, headers: HeaderMap) -> ApiResult<Jso
 		.map_err(|e| bad_gateway(e.into()))?;
 	let status = resp.status();
 	if status.is_success() {
-		return Ok(Json(resp.json().await.map_err(|e| bad_gateway(e.into()))?));
+		#[derive(Deserialize)]
+		struct Listed {
+			email: String,
+			username: Option<String>,
+			display_name: Option<String>,
+		}
+		let listed: Vec<Listed> = resp.json().await.map_err(|e| bad_gateway(e.into()))?;
+		let mut out = Vec::with_capacity(listed.len());
+		for m in listed {
+			out.push(MemberDto {
+				balance: s.archive.tokens(&m.email.to_lowercase()).await?.balance,
+				email: m.email,
+				username: m.username,
+				display_name: m.display_name,
+			});
+		}
+		return Ok(Json(out));
 	}
 	let why = resp.text().await.map_err(|e| bad_gateway(e.into()))?;
 	match status {
 		reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(ApiError(StatusCode::from_u16(status.as_u16()).expect("401 and 403 are statuses"), why)),
 		_ => Err(bad_gateway(eyre::eyre!("{} answered {status}: {why}", sso.members))),
 	}
+}
+
+/// Sets a member's balance, or adds to it (a grant, a purchase); an admin's.
+#[utoipa::path(post, path = "/members/{email}/tokens", tag = "me", params(("email" = String, Path)), request_body = TokensChange,
+	responses((status = 200, body = TokensDto), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+async fn change_tokens(State(s): State<AppState>, caller: Caller, Path(email): Path<String>, JsonBody(req): JsonBody<TokensChange>) -> ApiResult<Json<TokensDto>> {
+	let by = caller.email.as_deref().unwrap_or("operator");
+	Ok(Json(s.archive.change_tokens(&email.trim().to_lowercase(), &req, by).await?))
+}
+
+/// The member's token ledger, newest first; each charge with its run and place.
+#[utoipa::path(get, path = "/me/tokens", tag = "me", responses((status = 200, body = [LedgerEntry])))]
+async fn ledger(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<LedgerEntry>>> {
+	Ok(Json(s.archive.ledger(&m).await?))
 }
 
 /// The member's gmails, each with its places, by screenshots over the last 7 days.

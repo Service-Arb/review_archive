@@ -12,7 +12,8 @@ use review_archive::{
 	config::Config,
 	core::{
 		Coverage, Known, Observed, OwnerPost, Scan, Target,
-		dto::{CaptureRequest, Event, JobStatus, Me, MemberDto, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch},
+		dto::{BalanceChange, CaptureRequest, Event, JobStatus, Me, MemberDto, NewTarget, NewTgChannel, NewTrack, NewWebhook, TargetPatch, TokenKind, TokensChange, TokensDto},
+		tokens::Meter,
 	},
 	sources::ReviewSource,
 };
@@ -106,7 +107,7 @@ impl Env {
 struct Listed(Vec<Observed>);
 
 impl ReviewSource for Listed {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		Ok(Scan {
 			reviews: self.0.clone(),
 			coverage: Coverage::Complete,
@@ -122,7 +123,7 @@ impl ReviewSource for Listed {
 struct Posted(OwnerPost);
 
 impl ReviewSource for Posted {
-	async fn scan(&self, _: &Target, _: &Known) -> eyre::Result<Scan> {
+	async fn scan(&self, _: &Target, _: &Known, _: &mut Meter) -> eyre::Result<Scan> {
 		Ok(Scan {
 			reviews: vec![],
 			coverage: Coverage::DownTo(None),
@@ -734,6 +735,7 @@ async fn an_admin_acts_as_a_member_and_no_one_else_may() {
 		email: "root@x.com".into(),
 		username: "root@x.com".into(),
 		admin: true,
+		tokens: TokensDto { balance: 15, daily: 15, cap: 300 },
 	};
 	assert_eq!(as_alice.me().await.unwrap(), root);
 	assert!(!alice.me().await.unwrap().admin);
@@ -743,10 +745,38 @@ async fn an_admin_acts_as_a_member_and_no_one_else_may() {
 		email: BOB.into(),
 		username: Some("bob".into()),
 		display_name: Some("Bob B".into()),
+		balance: 15,
 	};
 	assert_eq!(admin.members().await.unwrap(), vec![bob]);
 	assert_eq!(alice.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	assert_eq!(e.client.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "no cookie to ask the site with");
+	e.server.abort();
+}
+
+/// A member's balance is an admin's to set, and theirs to read with every change that made it.
+#[tokio::test]
+async fn an_admin_sets_a_members_tokens() {
+	let e = env().await;
+	let alice = e.member(ALICE);
+	assert_eq!(alice.me().await.unwrap().tokens.balance, 15, "a day's worth on first sight");
+	let set = |n| TokensChange {
+		change: BalanceChange::Set(n),
+		note: Some("trial".into()),
+	};
+	assert_eq!(alice.change_tokens(ALICE, &set(1000)).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
+	assert_eq!(admin.change_tokens(ALICE, &set(8)).await.unwrap().balance, 8);
+	assert_eq!(alice.me().await.unwrap().tokens.balance, 8);
+	let ledger = alice.ledger().await.unwrap();
+	assert_eq!(
+		ledger.iter().map(|l| (l.kind, l.delta, l.by.as_deref())).collect::<Vec<_>>(),
+		[(TokenKind::Set, -7, Some("root@x.com")), (TokenKind::Accrual, 15, None)]
+	);
+	let bad = TokensChange {
+		change: BalanceChange::Grant(0),
+		note: None,
+	};
+	assert_eq!(admin.change_tokens(ALICE, &bad).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
 	e.server.abort();
 }
 
@@ -784,6 +814,7 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 	for view in [
 		"/",
 		"/telegram",
+		"/tokens",
 		"/gmails/1",
 		"/gmails/1/places/2",
 		"/members/bob@x.com",
