@@ -14,4 +14,6 @@
   mfe_dir = mfe;
   bind = "0.0.0.0:${toString port}";
   browser.executable = chromium;
+  # members start at 0 and nothing renews: an admin assigns tokens by hand
+  tokens.daily = 0;
 }
