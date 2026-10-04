@@ -21,7 +21,7 @@ use ev_lib::{
 };
 use review_archive_client::{
 	Client,
-	dto::{BalanceChange, GmailOverview, LocationSummary, MemberDto, NewTrack, RunStatus, TokensChange, TokensDto},
+	dto::{BalanceChange, GmailOverview, LocationSummary, Me, MemberDto, NewTrack, RunStatus, TokensChange, TokensDto},
 };
 
 ev_lib::mfe! {
@@ -155,14 +155,7 @@ fn api() -> Client {
 fn shown(e: review_archive_client::Error) -> String {
 	if e.status().map(|s| s.as_u16()) == Some(401) {
 		let window = web_sys::window().expect("a browser");
-		let sign_in = window
-			.document()
-			.expect("a page")
-			.query_selector(TAG)
-			.expect("a valid selector")
-			.expect("mounted inside its element")
-			.get_attribute("sign-in")
-			.expect("the host page names where to sign in");
+		let sign_in = sign_in();
 		let here = window.location().href().expect("a page has a URL");
 		let to = format!("{sign_in}?return_to={}", String::from(js_sys::encode_uri_component(&here)));
 		window
@@ -174,6 +167,40 @@ fn shown(e: review_archive_client::Error) -> String {
 			.expect("navigating the top window");
 	}
 	e.to_string()
+}
+
+/// Where the host page sends a browser to sign in.
+fn sign_in() -> String {
+	web_sys::window()
+		.expect("a browser")
+		.document()
+		.expect("a page")
+		.query_selector(TAG)
+		.expect("a valid selector")
+		.expect("mounted inside its element")
+		.get_attribute("sign-in")
+		.expect("the host page names where to sign in")
+}
+
+/// Who is signed in, top right, linking to their valeratrades.com profile: the account, and
+/// whether it is an admin, are the site's.
+#[component]
+fn Profile(me: Me) -> Element {
+	// a dev member's sign-in is this page itself, with no site behind it
+	let profile = web_sys::Url::new(&sign_in()).ok().map(|u| format!("{}/profile", u.origin()));
+	let class = "fixed right-3 top-1.5 z-10 flex items-center gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-[12px] text-ink font-sans";
+	let body = rsx! {
+		span { title: "{me.email}", "{me.username}" }
+		if me.admin {
+			uikit::Badge { variant: BadgeVariant::Outline, "admin" }
+		}
+	};
+	rsx! {
+		match profile {
+			Some(href) => rsx! { a { class: "{class} hover:bg-hover", href, target: "_top", {body} } },
+			None => rsx! { div { class, {body} } },
+		}
+	}
 }
 
 /// Runs a write against the API, then reads everything again; a failure is shown.
@@ -208,10 +235,17 @@ fn Shell() -> Element {
 		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
 	};
+	let signed_in = match &*me.read() {
+		Some(Ok(me)) => Some(me.clone()),
+		_ => None,
+	};
 	rsx! {
 		div { class: "flex h-dvh flex-col",
 			{body}
 			Outlet::<Route> {}
+			if let Some(me) = signed_in {
+				Profile { me }
+			}
 		}
 	}
 }

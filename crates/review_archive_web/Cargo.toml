@@ -25,7 +25,7 @@ js-sys = "0.3"
 reqwest = { version = "0.13", default-features = false }
 review_archive_client = { path = "../review_archive_client" }
 wasm-bindgen = "=0.2.129" # the flake's wasm-bindgen-cli is this version; a skew is a hard error
-web-sys = { version = "0.3", features = ["DataTransfer", "DragEvent", "Element", "Location", "Window", "Document"] }
+web-sys = { version = "0.3", features = ["DataTransfer", "DragEvent", "Element", "Location", "Url", "Window", "Document"] }
 
 [build-dependencies]
 ev_lib_classes = { workspace = true }

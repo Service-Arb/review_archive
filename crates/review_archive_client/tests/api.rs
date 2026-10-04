@@ -828,6 +828,70 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 	server.abort();
 }
 
+/// Two builds of the bundle share their file names and, from the nix store, their mtime: what a
+/// browser or the edge kept from the first must not pass for the second.
+#[tokio::test]
+async fn a_new_bundle_is_never_answered_from_an_old_ones_cache() {
+	let mfe = tempfile::tempdir().unwrap();
+	let glue = mfe.path().join("review_archive_web.js");
+	let build = |body: &str| {
+		std::fs::write(&glue, body).unwrap();
+		std::fs::File::options()
+			.write(true)
+			.open(&glue)
+			.unwrap()
+			.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+			.unwrap();
+	};
+	let serve = || async {
+		let dir = tempfile::tempdir().unwrap();
+		let archive = Archive::open(Config {
+			data_dir: Some(dir.path().to_owned()),
+			..Config::default()
+		})
+		.await
+		.unwrap();
+		let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
+		let app = router(AppState::new(archive, auth, Arc::new(Signals::default()), HttpConfig::default()), Some(mfe.path()), Some("/"));
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let base = format!("http://{}", listener.local_addr().unwrap());
+		(dir, base, tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }))
+	};
+	let http = reqwest::Client::new();
+
+	build("first");
+	let (_d1, base, server) = serve().await;
+	let first = http.get(format!("{base}/mfe/review_archive_web.js")).send().await.unwrap();
+	let cache_control = first.headers().get("cache-control").map(|v| v.to_str().unwrap().to_owned());
+	assert_eq!(cache_control.as_deref(), Some("no-cache"), "kept only as long as it is asked about again");
+	let validators: Vec<(String, String)> = ["etag", "last-modified"]
+		.into_iter()
+		.filter_map(|h| first.headers().get(h).map(|v| (h.to_owned(), v.to_str().unwrap().to_owned())))
+		.collect();
+	assert_eq!(first.text().await.unwrap(), "first");
+	let again = validators.iter().fold(http.get(format!("{base}/mfe/review_archive_web.js")), |r, (h, v)| match h.as_str() {
+		"etag" => r.header("if-none-match", v),
+		_ => r.header("if-modified-since", v),
+	});
+	assert_eq!(again.send().await.unwrap().status(), StatusCode::NOT_MODIFIED, "the same build is not sent twice");
+	server.abort();
+
+	build("second");
+	let (_d2, base, server) = serve().await;
+	let revalidated = validators
+		.iter()
+		.fold(http.get(format!("{base}/mfe/review_archive_web.js")), |r, (h, v)| match h.as_str() {
+			"etag" => r.header("if-none-match", v),
+			_ => r.header("if-modified-since", v),
+		})
+		.send()
+		.await
+		.unwrap();
+	assert_eq!(revalidated.status(), StatusCode::OK);
+	assert_eq!(revalidated.text().await.unwrap(), "second");
+	server.abort();
+}
+
 /// A sign-in cookie reads from anywhere it is sent, but writes only from the archive's own
 /// pages; one signed by another key, or expired, is no sign-in.
 #[tokio::test]

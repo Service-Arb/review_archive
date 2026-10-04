@@ -124,7 +124,10 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }))
 		.merge(authed);
 	if let Some(dir) = mfe {
-		app = app.nest_service("/mfe", ServeDir::new(dir));
+		let bundle = Router::new()
+			.fallback_service(ServeDir::new(dir))
+			.layer(middleware::from_fn_with_state(bundle_etag(dir), revalidated));
+		app = app.nest_service("/mfe", bundle);
 		if let Some(sign_in) = sign_in {
 			let page = include_str!("../../review_archive_web/index.html").replace("{sign_in}", sign_in);
 			let page = move || {
@@ -143,6 +146,51 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		}
 	}
 	app.with_state(state)
+}
+
+/// The whole bundle's digest, for every file in it: the nix store dates each file 1970, so a
+/// date tells one build from another for none of them.
+fn bundle_etag(dir: &std::path::Path) -> header::HeaderValue {
+	use sha2::{Digest, Sha256};
+	fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+		for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("reading the bundle at {}: {e}", dir.display())) {
+			let path = e.expect("listing the bundle").path();
+			match path.is_dir() {
+				true => walk(&path, files),
+				false => files.push(path),
+			}
+		}
+	}
+	let mut files = vec![];
+	walk(dir, &mut files);
+	files.sort();
+	let mut h = Sha256::new();
+	for f in &files {
+		h.update(f.strip_prefix(dir).expect("walked from it").as_os_str().as_encoded_bytes());
+		h.update([0]);
+		h.update(std::fs::read(f).unwrap_or_else(|e| panic!("reading {}: {e}", f.display())));
+	}
+	let digest: String = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
+	header::HeaderValue::try_from(format!("\"{digest}\"")).expect("hex is a header value")
+}
+
+/// Every bundle file is asked about again on each load, and is the same only while the bundle is.
+async fn revalidated(State(etag): State<header::HeaderValue>, mut req: axum::extract::Request, next: middleware::Next) -> Response {
+	// an edge that compresses weakens the tag it passes on
+	if req
+		.headers()
+		.get(header::IF_NONE_MATCH)
+		.is_some_and(|v| v.as_bytes().strip_prefix(b"W/").unwrap_or(v.as_bytes()) == etag.as_bytes())
+	{
+		return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+	}
+	req.headers_mut().remove(header::IF_MODIFIED_SINCE);
+	let mut res = next.run(req).await;
+	let h = res.headers_mut();
+	h.remove(header::LAST_MODIFIED);
+	h.insert(header::ETAG, etag);
+	h.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
+	res
 }
 
 pub struct ApiError(StatusCode, String);
