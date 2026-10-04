@@ -39,7 +39,7 @@ use utoipa::{
 use v_utils::{Timeframe, macros::SettingsNested};
 
 use crate::{
-	auth::{Auth, Caller, GROUP, Member, admin_only, authenticate, cookie},
+	auth::{Auth, Caller, GROUP, Member, admin_only, authenticate, cookie, not_in},
 	worker::Signals,
 };
 
@@ -94,6 +94,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
 		.route("/members", get(members))
+		.route("/members/{member}", axum::routing::put(add_member).delete(remove_member))
 		.route("/members/{email}/tokens", post(change_tokens))
 		.route_layer(middleware::from_fn(admin_only));
 	let me = Router::new()
@@ -344,7 +345,8 @@ async fn capture_avif(State(s): State<AppState>, caller: Caller, Path(file): Pat
 	let sha = file.strip_suffix(".avif").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
 	let avif = match (caller.admin, caller.email) {
 		(true, _) => s.archive.capture_avif(sha).await?,
-		(false, Some(m)) => s.archive.member_capture_avif(&m, sha).await?,
+		(false, Some(m)) if caller.member => s.archive.member_capture_avif(&m, sha).await?,
+		(false, Some(m)) => return Ok(not_in(&m)),
 		(false, None) => unreachable!("a caller is an admin or signed in"),
 	};
 	// behind auth, so no shared cache may keep it; the name is its hash, so it never changes
@@ -412,10 +414,14 @@ async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiRe
 async fn me(State(s): State<AppState>, caller: Caller) -> ApiResult<Json<Me>> {
 	match (caller.email, caller.username) {
 		(Some(email), Some(username)) => Ok(Json(Me {
-			tokens: s.archive.tokens(&email).await?,
+			tokens: match caller.member {
+				true => Some(s.archive.tokens(&email).await?),
+				false => None,
+			},
 			email,
 			username,
 			admin: caller.admin,
+			member: caller.member,
 		})),
 		_ => Err(ApiError(StatusCode::FORBIDDEN, "the operator's token is no one".into())),
 	}
@@ -424,46 +430,75 @@ async fn me(State(s): State<AppState>, caller: Caller) -> ApiResult<Json<Me>> {
 /// Everyone in `service-arb`, as valeratrades.com lists them, asked with the admin's own sign-in.
 #[utoipa::path(get, path = "/members", tag = "me", responses((status = 200, body = [MemberDto]), (status = 403, body = ErrorBody), (status = 502, body = ErrorBody)))]
 async fn members(State(s): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<MemberDto>>> {
-	let (Some(sso), Some(access)) = (&s.auth.sso, cookie(&headers, va_sso::COOKIE)) else {
-		return Err(ApiError(StatusCode::FORBIDDEN, "the site lists members to a signed-in admin, not to the operator's token".into()));
-	};
-	let bad_gateway = |e: eyre::Report| {
-		crate::report(&e, "listing members");
-		ApiError(StatusCode::BAD_GATEWAY, "valeratrades.com did not list the members".into())
+	#[derive(Deserialize)]
+	struct Listed {
+		email: String,
+		username: Option<String>,
+		display_name: Option<String>,
+	}
+	let resp = site_members(&s, &headers, reqwest::Method::GET, &[]).await?;
+	let listed: Vec<Listed> = resp.json().await.map_err(|e| site_failed(e.into()))?;
+	let mut out = Vec::with_capacity(listed.len());
+	for m in listed {
+		out.push(MemberDto {
+			balance: s.archive.tokens(&m.email.to_lowercase()).await?.balance,
+			email: m.email,
+			username: m.username,
+			display_name: m.display_name,
+		});
+	}
+	Ok(Json(out))
+}
+
+/// Puts someone in `service-arb` on valeratrades.com: signed in there with this email, they are a member.
+#[utoipa::path(put, path = "/members/{member}", tag = "me", params(("member" = String, Path)),
+	responses((status = 204), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn add_member(State(s): State<AppState>, headers: HeaderMap, Path(email): Path<String>) -> ApiResult<StatusCode> {
+	site_members(&s, &headers, reqwest::Method::PUT, &[("email", &email)]).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// Takes someone out of `service-arb`; their sign-in drops it within its 15 minutes.
+#[utoipa::path(delete, path = "/members/{member}", tag = "me", params(("member" = String, Path)),
+	responses((status = 204), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn remove_member(State(s): State<AppState>, headers: HeaderMap, Path(email): Path<String>) -> ApiResult<StatusCode> {
+	site_members(&s, &headers, reqwest::Method::DELETE, &[("email", &email)]).await?;
+	Ok(StatusCode::NO_CONTENT)
+}
+
+/// valeratrades.com's `/auth/members` for `service-arb`, asked with the admin's own sign-in; its
+/// refusals pass through as they are.
+async fn site_members(s: &AppState, headers: &HeaderMap, method: reqwest::Method, query: &[(&str, &str)]) -> ApiResult<reqwest::Response> {
+	let (Some(sso), Some(access)) = (&s.auth.sso, cookie(headers, va_sso::COOKIE)) else {
+		return Err(ApiError(
+			StatusCode::FORBIDDEN,
+			"the site keeps members for a signed-in admin, not for the operator's token".into(),
+		));
 	};
 	let resp = reqwest::Client::new()
-		.get(sso.members.clone())
+		.request(method, sso.members.clone())
 		.query(&[("group", GROUP)])
+		.query(query)
 		.header(header::COOKIE, format!("{}={access}", va_sso::COOKIE))
 		.timeout(Duration::from_secs(10))
 		.send()
 		.await
-		.map_err(|e| bad_gateway(e.into()))?;
+		.map_err(|e| site_failed(e.into()))?;
 	let status = resp.status();
 	if status.is_success() {
-		#[derive(Deserialize)]
-		struct Listed {
-			email: String,
-			username: Option<String>,
-			display_name: Option<String>,
-		}
-		let listed: Vec<Listed> = resp.json().await.map_err(|e| bad_gateway(e.into()))?;
-		let mut out = Vec::with_capacity(listed.len());
-		for m in listed {
-			out.push(MemberDto {
-				balance: s.archive.tokens(&m.email.to_lowercase()).await?.balance,
-				email: m.email,
-				username: m.username,
-				display_name: m.display_name,
-			});
-		}
-		return Ok(Json(out));
+		return Ok(resp);
 	}
-	let why = resp.text().await.map_err(|e| bad_gateway(e.into()))?;
+	let why = resp.text().await.map_err(|e| site_failed(e.into()))?;
 	match status {
-		reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(ApiError(StatusCode::from_u16(status.as_u16()).expect("401 and 403 are statuses"), why)),
-		_ => Err(bad_gateway(eyre::eyre!("{} answered {status}: {why}", sso.members))),
+		reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND =>
+			Err(ApiError(StatusCode::from_u16(status.as_u16()).expect("a reqwest status is an http status"), why)),
+		_ => Err(site_failed(eyre::eyre!("{} answered {status}: {why}", sso.members))),
 	}
+}
+
+fn site_failed(e: eyre::Report) -> ApiError {
+	crate::report(&e, "asking valeratrades.com for members");
+	ApiError(StatusCode::BAD_GATEWAY, "valeratrades.com did not answer for the members".into())
 }
 
 /// Sets a member's balance, or adds to it (a grant, a purchase); an admin's.

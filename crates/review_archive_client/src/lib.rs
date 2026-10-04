@@ -281,6 +281,18 @@ impl Client {
 		Self::json(self.request(Method::GET, "members")?).await
 	}
 
+	/// `PUT /members/{email}`: puts someone in `service-arb` on valeratrades.com. An admin's.
+	pub async fn add_member(&self, email: &str) -> Result<(), Error> {
+		Self::send(self.request(Method::PUT, &format!("members/{email}"))?).await?;
+		Ok(())
+	}
+
+	/// `DELETE /members/{email}`: takes someone out of `service-arb`. An admin's.
+	pub async fn remove_member(&self, email: &str) -> Result<(), Error> {
+		Self::send(self.request(Method::DELETE, &format!("members/{email}"))?).await?;
+		Ok(())
+	}
+
 	/// `POST /members/{email}/tokens`: sets a member's balance or adds to it. An admin's.
 	pub async fn change_tokens(&self, member: &str, change: &TokensChange) -> Result<TokensDto, Error> {
 		Self::json(self.request(Method::POST, &format!("members/{member}/tokens"))?.json(change)).await

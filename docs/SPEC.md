@@ -215,9 +215,11 @@ Several people track their places here, grouped the way they manage them: by
 **managing gmail**, the Google manager account a small group of GBPs is attached to.
 
 - A **member** is a verified email in valeratrades.com's `service-arb` group, as its
-  `va_access` cookie says; there is no member table here. `GET /members` (admins) is the
-  site's list of the group and its admins, with their usernames, from its `/auth/members`
-  (beside `SSO_REFRESH_URL`), asked with the admin's own cookie.
+  `va_access` cookie says; there is no member table here. The site keeps the group, in its
+  database; admins keep it from here, through its `/auth/members` (beside `SSO_REFRESH_URL`),
+  asked with the admin's own cookie: `GET /members` is the group and the admins, with their
+  usernames; `PUT`/`DELETE /members/{email}` puts someone in or takes them out. Someone
+  signed in outside the group sees who they are signed in as, and that an admin adds them.
 - `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
   not a credential: an address, or any alias for one without spaces (`tg:@owner`), lowercased. GBP reads keep the service's one grant: a client adds the service's
   Google account as a manager of their GBP.
@@ -278,8 +280,8 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
   site's public key (`SSO_PUBLIC_KEY`; issuer and audience pinned, `va_sso`). `admin`
   opens the operator's routes; `service-arb` in `groups`, or `admin`, opens `/me` and
   `GET /captures/{sha}.avif` of the places the member's gmails track. Anyone else signed in
-  gets 403.
-- `GET /me` is who signed in: email, username, admin. On every other `/me` route an admin —
+  gets `GET /me` only, and 403 elsewhere.
+- `GET /me` is who signed in: email, username, admin, member, and a member's tokens. On every other `/me` route an admin —
   the operator's token too — acts as the member `X-Member` names: their gmails, boards and
   channels, their writes. Anyone else sending it gets 403.
 - A cookie-authenticated request other than GET/HEAD must carry

@@ -51,13 +51,55 @@ async fn env() -> Env {
 	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
 	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
-	// valeratrades.com's `/auth/members`, as far as the archive sees it: answers whoever forwards a cookie
+	// valeratrades.com's `/auth/members`, as far as the archive sees it: keeps `service-arb` for whoever forwards a cookie
+	#[derive(serde::Deserialize)]
+	struct Change {
+		group: String,
+		email: String,
+	}
+	let group = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([BOB.to_owned()])));
+	let signed = |headers: &axum::http::HeaderMap| headers.get("cookie").is_some_and(|c| c.to_str().unwrap().starts_with("va_access="));
 	let site = axum::Router::new().route(
 		"/auth/members",
-		axum::routing::get(|headers: axum::http::HeaderMap| async move {
-			match headers.get("cookie").is_some_and(|c| c.to_str().unwrap().starts_with("va_access=")) {
-				true => axum::Json(serde_json::json!([{"email": BOB, "username": "bob", "display_name": "Bob B"}])).into_response(),
-				false => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+		axum::routing::get({
+			let group = group.clone();
+			move |headers: axum::http::HeaderMap| async move {
+				match signed(&headers) {
+					true => axum::Json(
+						group
+							.lock()
+							.unwrap()
+							.iter()
+							.map(|e| match e.as_str() {
+								BOB => serde_json::json!({"email": BOB, "username": "bob", "display_name": "Bob B"}),
+								e => serde_json::json!({"email": e, "username": null, "display_name": null}),
+							})
+							.collect::<Vec<_>>(),
+					)
+					.into_response(),
+					false => StatusCode::UNAUTHORIZED.into_response(),
+				}
+			}
+		})
+		.put({
+			let group = group.clone();
+			move |headers: axum::http::HeaderMap, axum::extract::Query(c): axum::extract::Query<Change>| async move {
+				assert_eq!(c.group, "service-arb");
+				match signed(&headers) {
+					true => {
+						group.lock().unwrap().insert(c.email.to_lowercase());
+						StatusCode::NO_CONTENT
+					}
+					false => StatusCode::UNAUTHORIZED,
+				}
+			}
+		})
+		.delete(move |headers: axum::http::HeaderMap, axum::extract::Query(c): axum::extract::Query<Change>| async move {
+			assert_eq!(c.group, "service-arb");
+			match (signed(&headers), group.lock().unwrap().remove(&c.email.to_lowercase())) {
+				(false, _) => StatusCode::UNAUTHORIZED,
+				(true, true) => StatusCode::NO_CONTENT,
+				(true, false) => StatusCode::NOT_FOUND,
 			}
 		}),
 	);
@@ -735,7 +777,8 @@ async fn an_admin_acts_as_a_member_and_no_one_else_may() {
 		email: "root@x.com".into(),
 		username: "root@x.com".into(),
 		admin: true,
-		tokens: TokensDto { balance: 15, daily: 15, cap: 300 },
+		member: true,
+		tokens: Some(TokensDto { balance: 15, daily: 15, cap: 300 }),
 	};
 	assert_eq!(as_alice.me().await.unwrap(), root);
 	assert!(!alice.me().await.unwrap().admin);
@@ -753,12 +796,43 @@ async fn an_admin_acts_as_a_member_and_no_one_else_may() {
 	e.server.abort();
 }
 
+/// Someone signed in outside `service-arb` learns who they are signed in as, and nothing else;
+/// an admin puts them in the group through valeratrades.com, and takes them out.
+#[tokio::test]
+async fn an_admin_lets_someone_signed_in_into_the_group() {
+	let e = env().await;
+	let newcomer = e.signed_in("New@x.com", false, &[], "same-origin");
+	let me = newcomer.me().await.unwrap();
+	assert_eq!(
+		(me.email.as_str(), me.admin, me.member, me.tokens),
+		("new@x.com", false, false, None),
+		"no tokens accrue to someone not in"
+	);
+	assert_eq!(newcomer.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(newcomer.add_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(e.member(ALICE).add_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	assert_eq!(
+		e.client.add_member("new@x.com").await.unwrap_err().status(),
+		Some(StatusCode::FORBIDDEN),
+		"no cookie to ask the site with"
+	);
+
+	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
+	admin.add_member("New@x.com").await.unwrap();
+	let emails = |ms: Vec<MemberDto>| ms.into_iter().map(|m| m.email).collect::<Vec<_>>();
+	assert_eq!(emails(admin.members().await.unwrap()), vec![BOB, "new@x.com"]);
+	admin.remove_member("new@x.com").await.unwrap();
+	assert_eq!(emails(admin.members().await.unwrap()), vec![BOB]);
+	assert_eq!(admin.remove_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	e.server.abort();
+}
+
 /// A member's balance is an admin's to set, and theirs to read with every change that made it.
 #[tokio::test]
 async fn an_admin_sets_a_members_tokens() {
 	let e = env().await;
 	let alice = e.member(ALICE);
-	assert_eq!(alice.me().await.unwrap().tokens.balance, 15, "a day's worth on first sight");
+	assert_eq!(alice.me().await.unwrap().tokens.unwrap().balance, 15, "a day's worth on first sight");
 	let set = |n| TokensChange {
 		change: BalanceChange::Set(n),
 		note: Some("trial".into()),
@@ -766,7 +840,7 @@ async fn an_admin_sets_a_members_tokens() {
 	assert_eq!(alice.change_tokens(ALICE, &set(1000)).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
 	assert_eq!(admin.change_tokens(ALICE, &set(8)).await.unwrap().balance, 8);
-	assert_eq!(alice.me().await.unwrap().tokens.balance, 8);
+	assert_eq!(alice.me().await.unwrap().tokens.unwrap().balance, 8);
 	let ledger = alice.ledger().await.unwrap();
 	assert_eq!(
 		ledger.iter().map(|l| (l.kind, l.delta, l.by.as_deref())).collect::<Vec<_>>(),

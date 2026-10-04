@@ -154,19 +154,22 @@ fn api() -> Client {
 /// page goes to the element's `sign-in` URL, which sends the browser back here signed in.
 fn shown(e: review_archive_client::Error) -> String {
 	if e.status().map(|s| s.as_u16()) == Some(401) {
-		let window = web_sys::window().expect("a browser");
-		let sign_in = sign_in();
-		let here = window.location().href().expect("a page has a URL");
-		let to = format!("{sign_in}?return_to={}", String::from(js_sys::encode_uri_component(&here)));
-		window
+		web_sys::window()
+			.expect("a browser")
 			.top()
 			.expect("a browsing context")
 			.expect("a top window")
 			.location()
-			.set_href(&to)
+			.set_href(&signed_in_again())
 			.expect("navigating the top window");
 	}
 	e.to_string()
+}
+
+/// The sign-in, coming back to this page with a fresh cookie.
+fn signed_in_again() -> String {
+	let here = web_sys::window().expect("a browser").location().href().expect("a page has a URL");
+	format!("{}?return_to={}", sign_in(), String::from(js_sys::encode_uri_component(&here)))
 }
 
 /// Where the host page sends a browser to sign in.
@@ -180,6 +183,20 @@ fn sign_in() -> String {
 		.expect("mounted inside its element")
 		.get_attribute("sign-in")
 		.expect("the host page names where to sign in")
+}
+
+/// Signed in, but not in `service-arb`: what to ask an admin for.
+#[component]
+fn NotIn(email: String) -> Element {
+	rsx! {
+		div { class: "{SHELL} flex-col items-start gap-3 p-6",
+			p { "You are signed in as " span { class: "font-mono", "{email}" } ", which is not a member yet." }
+			p { class: "text-ink-soft", "Ask an admin to add this email, then check again." }
+			a { href: signed_in_again(), target: "_top",
+				Button { variant: ButtonVariant::Outline, size: Size::Sm, r#type: "button", "Check again" }
+			}
+		}
+	}
 }
 
 /// Who is signed in, top right, linking to their valeratrades.com profile: the account, and
@@ -231,6 +248,7 @@ fn Shell() -> Element {
 	let me = use_resource(|| async { api().me().await.map_err(shown) });
 	let body = match &*me.read() {
 		Some(Ok(me)) if me.admin => rsx! { Admin { email: me.email.clone() } },
+		Some(Ok(me)) if !me.member => rsx! { NotIn { email: me.email.clone() } },
 		Some(Ok(_)) => rsx! { Workspace { view: route } },
 		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
@@ -351,10 +369,23 @@ fn Admin(email: String) -> Element {
 	}
 }
 
-/// fzf over the members valeratrades.com lists: name and email.
+/// fzf over the members valeratrades.com lists: name and email. Who is in is kept here too.
 #[component]
 fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Element {
-	let members = use_resource(|| async { api().members().await.map_err(shown) });
+	let mut members = use_resource(|| async { api().members().await.map_err(shown) });
+	let mut newcomer = use_signal(String::new);
+	let mut failure = use_signal(|| None::<String>);
+	let keep = move |f: std::pin::Pin<Box<dyn Future<Output = Result<(), review_archive_client::Error>>>>| {
+		spawn(async move {
+			match f.await {
+				Ok(()) => {
+					failure.set(None);
+					members.restart();
+				}
+				Err(e) => failure.set(Some(shown(e))),
+			}
+		});
+	};
 	rsx! {
 		CommandDialog {
 			open: true,
@@ -381,12 +412,46 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 								}
 								span { class: "flex-1 truncate text-ink-soft", "{m.email}" }
 								Balance { member: m.email.clone(), balance: m.balance }
+								Button {
+									variant: ButtonVariant::Ghost,
+									size: Size::Xs,
+									r#type: "button",
+									onclick: {
+										let email = m.email.clone();
+										move |e: MouseEvent| {
+											e.stop_propagation();
+											let email = email.clone();
+											keep(Box::pin(async move { api().remove_member(&email).await }));
+										}
+									},
+									"remove"
+								}
 							}
 						}
 						CommandEmpty { "No member matches." }
 					},
 					Some(Err(e)) => rsx! { div { class: "p-3 text-accent-error", "{e}" } },
 					None => rsx! { div { class: "p-3 text-ink-soft", "Loading…" } },
+				}
+			}
+			form {
+				class: "flex items-center gap-1 border-t border-border p-2",
+				onsubmit: move |e: FormEvent| {
+					e.prevent_default();
+					let email = newcomer().trim().to_owned();
+					newcomer.set(String::new());
+					keep(Box::pin(async move { api().add_member(&email).await }));
+				},
+				Input {
+					class: "flex-1",
+					size: Size::Xs,
+					placeholder: "Email to add, as they sign in to valeratrades.com",
+					value: newcomer(),
+					oninput: move |e: FormEvent| newcomer.set(e.value()),
+				}
+				Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "submit", "add" }
+				if let Some(e) = failure() {
+					span { class: "max-w-60 truncate text-[11px] text-accent-error", title: "{e}", "{e}" }
 				}
 			}
 		}
@@ -463,9 +528,9 @@ fn Workspace(view: Route) -> Element {
 		let member = acting.clone();
 		async move {
 			refresh.0();
-			let me = api().me().await.map_err(shown)?;
+			let mine = api().me().await.map_err(shown)?.tokens.expect("only a member gets a workspace");
 			let balance = match member {
-				None => me.tokens.balance,
+				None => mine.balance,
 				Some(m) =>
 					api()
 						.members()
@@ -476,7 +541,7 @@ fn Workspace(view: Route) -> Element {
 						.ok_or_else(|| format!("{m} is not a member"))?
 						.balance,
 			};
-			Ok::<_, String>(TokensDto { balance, ..me.tokens })
+			Ok::<_, String>(TokensDto { balance, ..mine })
 		}
 	});
 

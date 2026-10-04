@@ -1,8 +1,8 @@
 //! Who is calling. The static `REVIEW_ARCHIVE_TOKEN` bearer is the operator (and the services
 //! using the client crate). A browser comes with valeratrades.com's `va_access` cookie
 //! ([`va_sso`]), verified here with the site's public key: its admins are operators too,
-//! and members of `service-arb` get `/me`. On `/me` routes an admin acts as any member, named
-//! by `X-Member`.
+//! and members of `service-arb` get `/me`; anyone else signed in gets only `GET /me`, to see
+//! they are not in. On `/me` routes an admin acts as any member, named by `X-Member`.
 
 use axum::{
 	Json,
@@ -18,12 +18,14 @@ use crate::http::AppState;
 
 pub(crate) const GROUP: &str = "service-arb";
 
-/// Who a request is from: `email` is a signed-in person, `admin` may use the operator's routes.
+/// Who a request is from: `email` is a signed-in person, `admin` may use the operator's routes,
+/// `member` is in `service-arb` (admins are).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Caller {
 	pub email: Option<String>,
 	pub username: Option<String>,
 	pub admin: bool,
+	pub member: bool,
 }
 
 /// valeratrades.com, the sign-in: its public key, and its routes a browser or this server goes to.
@@ -74,6 +76,7 @@ impl Auth {
 					email: None,
 					username: None,
 					admin: true,
+					member: false,
 				}),
 				false => Err(unauthorized()),
 			};
@@ -84,6 +87,7 @@ impl Auth {
 					email: Some(m.clone()),
 					username: Some(m.clone()),
 					admin: false,
+					member: true,
 				}),
 				None => Err(unauthorized()),
 			};
@@ -93,10 +97,8 @@ impl Auth {
 		if !matches!(*method, Method::GET | Method::HEAD) && headers.get("sec-fetch-site").is_none_or(|v| v != "same-origin") {
 			return Err(refuse(StatusCode::FORBIDDEN, "a signed-in write must come from this site's own pages"));
 		}
-		if !claims.member_of(GROUP) {
-			return Err(refuse(StatusCode::FORBIDDEN, &format!("{} is not a {GROUP} member", claims.email)));
-		}
 		Ok(Caller {
+			member: claims.member_of(GROUP),
 			email: Some(claims.email.to_lowercase()),
 			username: Some(claims.username),
 			admin: claims.admin,
@@ -111,6 +113,10 @@ pub(crate) fn cookie<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> 
 		.filter_map(|v| v.to_str().ok())
 		.flat_map(|v| v.split(';'))
 		.find_map(|c| c.trim().strip_prefix(name)?.strip_prefix('='))
+}
+
+pub(crate) fn not_in(email: &str) -> Response {
+	refuse(StatusCode::FORBIDDEN, &format!("{email} is not a {GROUP} member"))
 }
 
 fn refuse(status: StatusCode, why: &str) -> Response {
@@ -156,7 +162,8 @@ impl<S: Send + Sync> FromRequestParts<S> for Member {
 				_ => Err(refuse(StatusCode::BAD_REQUEST, "X-Member is not an email")),
 			},
 			(Some(_), _) => Err(refuse(StatusCode::FORBIDDEN, "only an admin acts as another member")),
-			(None, Some(email)) => Ok(Self(email.clone())),
+			(None, Some(email)) if caller.member => Ok(Self(email.clone())),
+			(None, Some(email)) => Err(not_in(email)),
 			(None, None) => Err(refuse(StatusCode::FORBIDDEN, "/me routes are a signed-in member's, not the operator token's")),
 		}
 	}

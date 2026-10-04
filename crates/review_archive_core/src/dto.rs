@@ -749,8 +749,10 @@ pub struct Me {
 	pub username: String,
 	/// May act as any member (`X-Member`).
 	pub admin: bool,
-	/// Their tokens.
-	pub tokens: TokensDto,
+	/// In `service-arb` (admins are); not, `/me` is all they may see, until an admin adds them.
+	pub member: bool,
+	/// Their tokens, if a member.
+	pub tokens: Option<TokensDto>,
 }
 
 /// A member's tokens: what their places' scans are paid with.
