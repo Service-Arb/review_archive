@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use crate::{config::AppConfig, settings::Settings};
 
 #[derive(Parser)]
-#[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics")]
+#[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: an AVIF screenshot of every review as it first appears, plus data for statistics")]
 struct Cli {
 	#[clap(flatten)]
 	settings_flags: config::SettingsFlags,
@@ -48,7 +48,7 @@ enum Cmd {
 	Gmail(GmailCmd),
 	/// Put a target under a managing gmail, for the member who owns it.
 	Track { gmail: i64, target: i64 },
-	/// PNGs + manifest.json of one target, to a directory or a .zip.
+	/// Captures + manifest.json of one target, to a directory or a .zip.
 	Export {
 		#[arg(long)]
 		target: i64,
@@ -226,7 +226,7 @@ async fn run(cli: Cli, config: AppConfig, settings: Settings) -> eyre::Result<()
 		Cmd::Track { gmail, target } => archive.assign(gmail, TargetId(target)).await,
 		Cmd::Export { target, since, out } => {
 			let done = archive.export(TargetId(target), &ExportQuery { since }, Destination::Path(out.clone())).await?;
-			println!("{} reviews, {} PNGs → {}", done.reviews, done.pngs, out.display());
+			println!("{} reviews, {} captures → {}", done.reviews, done.captures, out.display());
 			Ok(())
 		}
 		Cmd::Stats { target, from, to, csv } => {

@@ -92,13 +92,13 @@ pub struct ReviewDto {
 	pub capture_sha256: Option<String>,
 	/// When that capture was taken.
 	pub captured_at: Option<String>,
-	/// Where the API serves that capture: `/captures/<sha256>.png`.
+	/// Where the API serves that capture: `/captures/<sha256>.avif`.
 	pub capture_url: Option<String>,
 }
 
 /// Where the API serves a capture.
 pub fn capture_url(sha256: &str) -> String {
-	format!("/captures/{sha256}.png")
+	format!("/captures/{sha256}.avif")
 }
 
 /// One target's activity on one UTC day.
@@ -402,7 +402,7 @@ pub struct CaptureDto {
 	pub page_url: String,
 	/// What took it.
 	pub scanner_version: String,
-	/// `/captures/<sha256>.png`.
+	/// `/captures/<sha256>.avif`.
 	pub url: String,
 }
 

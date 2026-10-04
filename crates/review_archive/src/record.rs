@@ -14,7 +14,7 @@ use review_archive_core::{
 };
 
 use crate::{
-	SCANNER_VERSION, png_meta,
+	SCANNER_VERSION, avif,
 	sources::ReviewSource,
 	store::{RunEnd, RunId, ScanWrite, Store, StoredCapture, blobs::BlobStore, sat_u32},
 };
@@ -37,7 +37,7 @@ pub struct Recorded {
 pub struct Recorder<'a> {
 	/// Where the rows go.
 	pub store: &'a Store,
-	/// Where the PNGs go.
+	/// Where the captures go.
 	pub blobs: &'a BlobStore,
 	/// What dates the run: [`Timestamp::now`], or a pinned clock in tests (time is I/O).
 	pub now: fn() -> Timestamp,
@@ -169,13 +169,12 @@ impl Recorder<'_> {
 	}
 
 	async fn store_capture(&self, target: &Target, source_review_id: &str, c: &Capture) -> eyre::Result<StoredCapture> {
-		let tagged = png_meta::provenance(c, &target.label, source_review_id)?;
-		let (width, height) = png_meta::dimensions(&tagged)?;
-		let sha256 = self.blobs.put(&tagged).await?;
+		let avif = avif::provenance(c, &target.label, source_review_id).await?;
+		let sha256 = self.blobs.put(&avif.bytes).await?;
 		Ok(StoredCapture {
 			sha256,
-			width,
-			height,
+			width: avif.width,
+			height: avif.height,
 			captured_at: c.captured_at,
 			page_url: c.page_url.clone(),
 		})

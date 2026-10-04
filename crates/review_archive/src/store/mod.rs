@@ -1,5 +1,5 @@
 //! SQLite (runtime `sqlx` queries, embedded migrations): targets, reviews and their
-//! history, captures, runs. PNGs live beside it in [`blobs`].
+//! history, captures, runs. Captures live beside it in [`blobs`].
 //!
 //! Every write that reads first takes the database's write lock up front (`BEGIN
 //! IMMEDIATE`): `serve`'s worker, its HTTP side and a hand-run `scan` write at once, and a
@@ -11,6 +11,7 @@ mod events;
 pub mod export;
 mod jobs;
 mod members;
+mod png_blobs;
 mod tokens;
 mod webhooks;
 

@@ -1,6 +1,6 @@
 [package]
 name = "review_archive"
-description = "Archive of public place reviews: a PNG of every review as it first appears, plus structured data for statistics"
+description = "Archive of public place reviews: an AVIF screenshot of every review as it first appears, plus structured data for statistics"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -18,10 +18,11 @@ default = ["maps", "store"]
 maps = ["dep:browser_manipulation"]
 # the config sections as v_utils `Settings` sections
 settings = ["dep:clap", "dep:schemars", "v_utils/cli", "review_archive_core/settings"]
-# SQLite + content-addressed PNGs under a data dir, runs, stats, export, webhooks.
+# SQLite + content-addressed AVIFs under a data dir, runs, stats, export, webhooks.
 store = [
     "dep:futures",
     "dep:hmac",
+    "dep:png",
     "dep:sqlx",
     "dep:tempfile",
     "dep:tg_types",
@@ -31,12 +32,15 @@ store = [
 [dependencies]
 browser_manipulation = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
-crc32fast.workspace = true
 eyre.workspace = true
 futures = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
+image.workspace = true
 jiff.workspace = true
+kamadak-exif.workspace = true
 miette.workspace = true
+png = { workspace = true, optional = true }
+ravif.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 review_archive_core.workspace = true
 schemars = { workspace = true, optional = true }

@@ -35,7 +35,7 @@ impl Config {
 		self.data_dir.as_ref().map(|d| d.join("review_archive.db"))
 	}
 
-	/// The PNG store, under the data dir.
+	/// The capture store, under the data dir.
 	pub fn blob_dir(&self) -> Option<PathBuf> {
 		self.data_dir.as_ref().map(|d| d.join("blobs"))
 	}

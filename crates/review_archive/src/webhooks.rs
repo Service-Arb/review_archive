@@ -235,7 +235,8 @@ impl Deliverer {
 		let photo = match payload.review.as_ref().and_then(|r| r.capture_sha256.as_deref()).filter(|_| payload.event == Event::ReviewGone) {
 			Some(sha) => {
 				let path = tg.blobs.path_of(sha).ok_or_else(|| eyre::eyre!("capture {sha:?} is not a blob name"))?;
-				Some(tokio::fs::read(&path).await.map_err(|e| eyre::eyre!("reading {}: {e}", path.display()))?)
+				let avif = tokio::fs::read(&path).await.map_err(|e| eyre::eyre!("reading {}: {e}", path.display()))?;
+				Some(crate::avif::to_png(&avif)?) // Telegram does not take AVIF photos
 			}
 			None => None,
 		};

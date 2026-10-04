@@ -1,4 +1,4 @@
-//! Content-addressed PNGs: `<root>/<sha256[0..2]>/<sha256>.png`.
+//! Content-addressed captures: `<root>/<sha256[0..2]>/<sha256>.avif`.
 
 use std::{
 	io::Write,
@@ -9,7 +9,7 @@ use eyre::WrapErr;
 use review_archive_core::hex;
 use sha2::{Digest, Sha256};
 
-/// PNGs on disk, named by their SHA-256.
+/// Captures on disk, named by their SHA-256.
 #[derive(Clone, Debug)]
 pub struct BlobStore {
 	root: PathBuf,
@@ -41,7 +41,7 @@ impl BlobStore {
 	/// `None` unless `sha` is 64 lowercase hex digits — it arrives from URLs.
 	pub fn path_of(&self, sha: &str) -> Option<PathBuf> {
 		let valid = sha.len() == 64 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-		valid.then(|| self.root.join(&sha[..2]).join(format!("{sha}.png")))
+		valid.then(|| self.root.join(&sha[..2]).join(format!("{sha}.avif")))
 	}
 
 	/// Where it lives.

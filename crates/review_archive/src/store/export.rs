@@ -29,8 +29,8 @@ struct TargetInfo {
 struct Entry {
 	#[serde(flatten)]
 	review: ReviewDto,
-	/// Path of the PNG inside the export, when there is one.
-	png: Option<String>,
+	/// Path of the capture inside the export, when there is one.
+	capture: Option<String>,
 }
 
 /// What an export wrote.
@@ -38,8 +38,8 @@ struct Entry {
 pub struct Exported {
 	/// Reviews in `manifest.json`.
 	pub reviews: usize,
-	/// PNGs beside it.
-	pub pngs: usize,
+	/// Captures beside it.
+	pub captures: usize,
 }
 
 /// Where an export is written.
@@ -52,22 +52,22 @@ pub enum Destination {
 }
 
 /// A target's reviews (first seen at or after `since`) and their first screenshots:
-/// `manifest.json` + `captures/*.png`.
+/// `manifest.json` + `captures/*.avif`.
 pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: Option<Timestamp>, out: Destination, now: Timestamp) -> eyre::Result<Exported> {
 	let t = store.target(target).await?;
 	let rows = store.reviews(target, since, None).await?;
 	let mut files: Vec<(String, PathBuf)> = Vec::new();
 	let mut entries = Vec::with_capacity(rows.len());
 	for review in rows {
-		let png = match review.capture_sha256.as_deref().and_then(|sha| blobs.path_of(sha).map(|p| (sha.to_owned(), p))) {
+		let capture = match review.capture_sha256.as_deref().and_then(|sha| blobs.path_of(sha).map(|p| (sha.to_owned(), p))) {
 			Some((sha, path)) => {
-				let name = format!("captures/{}_{}.png", review.id, &sha[..12]);
+				let name = format!("captures/{}_{}.avif", review.id, &sha[..12]);
 				files.push((name.clone(), path));
 				Some(name)
 			}
 			None => None,
 		};
-		entries.push(Entry { review, png });
+		entries.push(Entry { review, capture });
 	}
 	let manifest = Manifest {
 		exported_at: fmt_ts(now),
@@ -83,7 +83,7 @@ pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: O
 	let json = serde_json::to_vec_pretty(&manifest)?;
 	let result = Exported {
 		reviews: manifest.reviews.len(),
-		pngs: files.len(),
+		captures: files.len(),
 	};
 	// zip and the copies are synchronous file work
 	tokio::task::spawn_blocking(move || write_out(out, &json, &files)).await??;
@@ -113,7 +113,7 @@ fn write_out(out: Destination, manifest: &[u8], files: &[(String, PathBuf)]) -> 
 fn write_zip(file: File, manifest: &[u8], files: &[(String, PathBuf)]) -> eyre::Result<()> {
 	let mut zip = zip::ZipWriter::new(file);
 	let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-	// PNGs are already compressed
+	// AVIFs are already compressed
 	let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 	zip.start_file("manifest.json", deflated)?;
 	zip.write_all(manifest)?;
