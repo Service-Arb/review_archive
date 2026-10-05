@@ -92,12 +92,12 @@ impl Archive {
 		self.store()?.withdraw_reinstatement(member, gmail, review, Timestamp::now()).await
 	}
 
-	/// A capture's AVIF, if it shows a review of a place the member tracks.
-	pub async fn member_capture_avif(&self, member: &str, sha256: &str) -> eyre::Result<Vec<u8>> {
+	/// A capture's PNG, if it shows a review of a place the member tracks.
+	pub async fn member_capture_png(&self, member: &str, sha256: &str) -> eyre::Result<Vec<u8>> {
 		if !self.store()?.member_sees_capture(member, sha256).await? {
 			return Err(Rejected::not_found("no such capture").into());
 		}
-		self.capture_avif(sha256).await
+		self.capture_png(sha256).await
 	}
 
 	/// Adds a Telegram channel: a destination the archive's bot can post to, and at least

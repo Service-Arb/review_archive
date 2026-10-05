@@ -68,20 +68,6 @@ fn png() -> Vec<u8> {
 	out
 }
 
-/// The stored capture's Exif text fields, by tag name.
-fn exif_texts(blobs: &BlobStore, sha: &str) -> HashMap<String, String> {
-	let bytes = std::fs::read(blobs.path_of(sha).unwrap()).unwrap();
-	let exif = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)).unwrap();
-	exif.fields()
-		.filter_map(|f| match &f.value {
-			// kamadak-exif names no DocumentName
-			exif::Value::Ascii(v) if f.tag == exif::Tag(exif::Context::Tiff, 0x010d) => Some(("DocumentName".into(), String::from_utf8(v[0].clone()).unwrap())),
-			exif::Value::Ascii(v) => Some((f.tag.to_string(), String::from_utf8(v[0].clone()).unwrap())),
-			_ => None,
-		})
-		.collect()
-}
-
 fn review(id: &str, rating: u8, text: &str, est: Option<&str>, capture: bool) -> Observed {
 	Observed {
 		source_review_id: id.into(),
@@ -111,7 +97,7 @@ fn scan(reviews: Vec<Observed>, coverage: Coverage) -> Result<Scan, String> {
 }
 
 struct Env {
-	dir: tempfile::TempDir,
+	_dir: tempfile::TempDir,
 	store: Store,
 	blobs: BlobStore,
 	clock: FixedClock,
@@ -120,8 +106,7 @@ struct Env {
 
 async fn env() -> Env {
 	let dir = tempfile::tempdir().unwrap();
-	// laid out as a data dir, so an `Archive` can open it
-	let store = Store::open(&dir.path().join("review_archive.db")).await.unwrap();
+	let store = Store::open(&dir.path().join("db.sqlite")).await.unwrap();
 	let blobs = BlobStore::new(dir.path().join("blobs"));
 	let clock = FixedClock::at("2026-09-01T10:00:00Z");
 	let id = store
@@ -140,7 +125,13 @@ async fn env() -> Env {
 		.await
 		.unwrap();
 	let target = store.target(id).await.unwrap();
-	Env { dir, store, blobs, clock, target }
+	Env {
+		_dir: dir,
+		store,
+		blobs,
+		clock,
+		target,
+	}
 }
 
 impl Env {
@@ -183,10 +174,12 @@ async fn new_changed_gone_reappeared() {
 	let rows = e.by_source_id().await;
 	assert!(!rows["a"].capture_pending && rows["b"].capture_pending);
 	let sha = rows["a"].capture_sha256.clone().unwrap();
-	let texts = exif_texts(&e.blobs, &sha);
-	assert_eq!(texts["DateTimeOriginal"], "2026:09:01 10:00:00");
-	assert_eq!(texts["ImageUniqueID"], "a");
-	assert_eq!(texts["ImageDescription"], "Café test");
+	let stored = std::fs::read(e.blobs.path_of(&sha).unwrap()).unwrap();
+	let info = png::Decoder::new(std::io::Cursor::new(stored)).read_info().unwrap();
+	let texts: HashMap<String, String> = info.info().uncompressed_latin1_text.iter().map(|t| (t.keyword.clone(), t.text.clone())).collect();
+	assert_eq!(texts["Creation Time"], "2026-09-01T10:00:00Z");
+	assert_eq!(texts["Review ID"], "a");
+	assert_eq!(texts["Title"], "Café test");
 	assert!(e.store.capture_exists(&sha).await.unwrap());
 
 	// 2. b is edited and finally captured; a is not listed on a complete scan → gone
@@ -507,88 +500,4 @@ async fn a_scan_the_store_refuses_is_a_failed_run() {
 	let last = e.store.last_run(e.target.id).await.unwrap().expect("the run is finished");
 	assert_eq!(last.consecutive_failures, 1);
 	assert!(e.by_source_id().await.is_empty(), "nothing of it was stored");
-}
-
-/// Captures stored as PNG, from before AVIF: converted when the archive opens, keeping the
-/// provenance their `tEXt` chunks carry, and the outbox's payloads follow them.
-#[tokio::test]
-async fn png_captures_become_avif_on_open() {
-	use review_archive::core::dto::{Event, NewWebhook};
-	use sha2::Digest;
-
-	let e = env().await;
-	e.store
-		.add_webhook(
-			&NewWebhook {
-				url: "https://hooks.example/x".into(),
-				events: vec![Event::ReviewNew],
-				secret: "0123456789abcdef-shh".into(),
-			},
-			now(),
-		)
-		.await
-		.unwrap();
-	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "Great", None, true)], Coverage::DownTo(None))));
-	e.archive().run(&src, &e.target).await.unwrap();
-	let avif = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
-
-	// back to how a capture was stored before
-	let mut old_png = Vec::new();
-	let mut enc = png::Encoder::new(&mut old_png, 4, 3);
-	enc.set_color(png::ColorType::Rgb);
-	for (k, v) in [
-		("Creation Time", "2026-08-31T09:00:00Z"),
-		("Source", "https://www.google.com/maps/place/x"),
-		("Title", "Café test"),
-		("Review ID", "a"),
-		("Software", "review_archive 0.1.0+old"),
-	] {
-		enc.add_text_chunk(k.into(), v.into()).unwrap();
-	}
-	enc.write_header().unwrap().write_image_data(&[90; 36]).unwrap();
-	let old = review_archive::core::hex(&sha2::Sha256::digest(&old_png));
-	let png_path = e.blobs.path_of(&old).unwrap().with_extension("png");
-	std::fs::create_dir_all(png_path.parent().unwrap()).unwrap();
-	std::fs::write(&png_path, &old_png).unwrap();
-	std::fs::remove_file(e.blobs.path_of(&avif).unwrap()).unwrap();
-	let db = sqlx::SqlitePool::connect(&format!("sqlite://{}", e.dir.path().join("review_archive.db").display()))
-		.await
-		.unwrap();
-	sqlx::query("UPDATE captures SET sha256 = ?2 WHERE sha256 = ?1")
-		.bind(&avif)
-		.bind(&old)
-		.execute(&db)
-		.await
-		.unwrap();
-	sqlx::query("UPDATE webhook_deliveries SET payload = REPLACE(REPLACE(payload, '/captures/' || ?1 || '.avif', '/captures/' || ?2 || '.png'), ?1, ?2)")
-		.bind(&avif)
-		.bind(&old)
-		.execute(&db)
-		.await
-		.unwrap();
-	db.close().await;
-
-	let open = || async {
-		let config = review_archive::config::Config {
-			data_dir: Some(e.dir.path().to_owned()),
-			..Default::default()
-		};
-		review_archive::Archive::open(config).await.unwrap().close().await;
-	};
-	open().await;
-	let new = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
-	assert_ne!(new, old);
-	assert!(!png_path.exists(), "the PNG is gone");
-	let texts = exif_texts(&e.blobs, &new);
-	assert_eq!(texts["DateTimeOriginal"], "2026:08:31 09:00:00");
-	assert_eq!(texts["DocumentName"], "https://www.google.com/maps/place/x");
-	assert_eq!(texts["ImageDescription"], "Café test");
-	assert_eq!(texts["ImageUniqueID"], "a");
-	assert_eq!(texts["Software"], "review_archive 0.1.0+old");
-	let payloads: Vec<String> = e.store.due_deliveries(Timestamp::MAX, 10).await.unwrap().into_iter().map(|d| d.payload).collect();
-	assert_eq!(payloads.len(), 1);
-	assert!(payloads[0].contains(&format!("\"/captures/{new}.avif\"")) && !payloads[0].contains(&old), "{}", payloads[0]);
-
-	open().await;
-	assert_eq!(e.by_source_id().await["a"].capture_sha256.as_deref(), Some(new.as_str()), "a second open does nothing");
 }

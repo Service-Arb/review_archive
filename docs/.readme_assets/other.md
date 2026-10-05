@@ -5,7 +5,7 @@
 | `GET /health` | no auth |
 | `GET /targets` | |
 | `GET /targets/{id}/reviews?since=&gone=` | `since`: date or RFC 3339, on first sighting |
-| `GET /captures/{sha256}.avif` | only hashes the archive recorded |
+| `GET /captures/{sha256}.png` | only hashes the archive recorded |
 | `GET /stats?target=&from=&to=` | per target and day; `Accept: text/csv` for CSV |
 
 ## When Maps changes

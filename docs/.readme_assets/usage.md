@@ -1,5 +1,5 @@
 ```sh
-# Everything lives under one data dir: `review_archive.db`, `blobs/` with the AVIFs, and the
+# Everything lives under one data dir: `review_archive.db`, `blobs/` with the PNGs, and the
 # browser profile that remembers the consent answer. Set it, the bind address and the defaults in
 # a TOML file passed as `--config`; secrets only ever come from the environment.
 review_archive --config config.toml target add 'https://www.google.com/maps/place/?q=place_id:ChIJ...' --label cafe --lang fr
@@ -19,7 +19,7 @@ review_archive scan --all
 # $REVIEW_ARCHIVE_TOKEN`, or a browser's valeratrades.com sign-in (docs/SPEC.md, Auth).
 review_archive serve
 
-# AVIF captures + manifest.json, to a directory or a .zip
+# PNGs + manifest.json, to a directory or a .zip
 review_archive export --target 1 --since 2026-01-01 --out cafe.zip
 ```
 

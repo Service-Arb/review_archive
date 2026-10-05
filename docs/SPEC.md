@@ -1,6 +1,6 @@
 # review_archive — spec
 
-Archive of public place reviews: an AVIF screenshot of every review as it first
+Archive of public place reviews: a PNG screenshot of every review as it first
 appears, plus structured data for statistics. Google first; the source layer is a
 trait so other platforms slot in later.
 
@@ -11,7 +11,7 @@ Replaces a person manually checking places and saving screenshots.
 In:
 
 - Watch a list of **targets** (places) on an interval (hours, not seconds).
-- On each scan: detect reviews not seen before, store their data, take an AVIF
+- On each scan: detect reviews not seen before, store their data, take a PNG
   screenshot of the review card, keep edit history, note reviews that are no
   longer listed.
 - Statistics and export over what was stored.
@@ -57,7 +57,7 @@ Out — do not build, even as an option:
   keeps them (the run is `partial`); a block by Google still fails the run.
 - Per card (`[data-review-id]`): click *More* to expand, extract review id,
   author name, author profile URL, star rating (from `aria-label`), relative
-  date text, text, owner reply, photo count; element screenshot → PNG, kept as AVIF.
+  date text, text, owner reply, photo count; element screenshot → PNG.
 - Selectors live in one module with HTML fixtures under `tests/fixtures/` and
   parser tests on them — the page changes, and the fix must be one file.
 
@@ -103,10 +103,8 @@ blob dir. Everything under one data dir (`/data` in the container).
   failed ("interrupted") on the next start of `serve` — a hand-run `scan` still going at
   that moment included; its run is marked ended again, with its real outcome, when it
   finishes.
-- Blobs: `<data>/blobs/<sha256[0..2]>/<sha256>.avif`, lossy. Exif carries the provenance:
-  capture time (`DateTimeOriginal`, `OffsetTimeOriginal` `+00:00`), page URL (`DocumentName`),
-  target label (`ImageDescription`), source review id (`ImageUniqueID`), scanner version
-  (`Software`); text as UTF-8.
+- Blobs: `<data>/blobs/<sha256[0..2]>/<sha256>.png`. PNG gets `tEXt` chunks:
+  capture time (UTC, RFC 3339), page URL, target label, source review id.
 
 `gone`: set when a review is absent from a scan that covered its position
 (`gbp`: always complete; `maps`: only if the scan walked past its
@@ -137,7 +135,7 @@ CLI (`clap`):
 - `review_archive target list | disable <id> | enable <id>`
 - `review_archive scan <target-id|--all>` — one pass now, prints a summary.
 - `review_archive serve` — scheduler + HTTP.
-- `review_archive export --target <id> [--since <date>] --out <dir|file.zip>` — captures (AVIF) + `manifest.json`.
+- `review_archive export --target <id> [--since <date>] --out <dir|file.zip>` — PNGs + `manifest.json`.
 
 HTTP (axum), the operator's bearer `REVIEW_ARCHIVE_TOKEN` or a browser's sign-in cookie
 (see Auth), binds `127.0.0.1` unless configured:
@@ -145,7 +143,7 @@ HTTP (axum), the operator's bearer `REVIEW_ARCHIVE_TOKEN` or a browser's sign-in
 - `GET /health` (no auth)
 - `GET /targets`
 - `GET /targets/{id}/reviews?since=&gone=`
-- `GET /captures/{sha256}.avif`
+- `GET /captures/{sha256}.png`
 - `GET /stats?target=&from=&to=` — per target and per day: new, changed, gone,
   mean rating, rating histogram. `Accept: text/csv` → CSV. `gone` counts what the runs
   of that day marked gone, whether or not it came back later.
@@ -226,7 +224,7 @@ Several people track their places here, grouped the way they manage them: by
 - `tracks(managing_gmail_id, target_id, created_at)`. Tracking a place finds the target on
   that place, language and source, or makes one (enabling a disabled one): targets,
   reviews, captures and blobs stay shared, so two members on one place cost one scan and
-  one capture. Scheduling stays per target. The operator assigns existing targets with
+  one PNG. Scheduling stays per target. The operator assigns existing targets with
   `gmail add <member> <gmail>` and `track <gmail-id> <target-id>`.
 - Gmails and tracks are switched on or off by their member (`enabled`, on when added;
   `PATCH /me/gmails/{id}`, `PATCH /me/gmails/{id}/tracks/{target}`). A target someone
@@ -279,7 +277,7 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
   JWT `{sub, email, username, admin, groups, exp}` of 15 minutes, verified here with the
   site's public key (`SSO_PUBLIC_KEY`; issuer and audience pinned, `va_sso`). `admin`
   opens the operator's routes; `service-arb` in `groups`, or `admin`, opens `/me` and
-  `GET /captures/{sha}.avif` of the places the member's gmails track. Anyone else signed in
+  `GET /captures/{sha}.png` of the places the member's gmails track. Anyone else signed in
   gets `GET /me` only, and 403 elsewhere.
 - `GET /me` is who signed in: email, username, admin, member, and a member's tokens. On every other `/me` route an admin —
   the operator's token too — acts as the member `X-Member` names: their gmails, boards and
@@ -300,7 +298,7 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
   channel), fanned out in the scan's transaction to the channels whose member tracks the
   target (under the channel's gmail, if it names one). Same retries as hooks.
 - One service bot (`TELEGRAM_BOT_TOKEN`) sends through the Bot API (`webhooks.telegram_api`):
-  `review.gone` as `sendPhoto` with the review's first capture (as PNG: Telegram does not take AVIF), the rest as text. The
+  `review.gone` as `sendPhoto` with the review's first capture, the rest as text. The
   member adds the bot to the chat; `POST /me/tg-channels/{id}/test` answers with
   Telegram's refusal, if any. Ops alerts stay on Discord.
 
@@ -330,7 +328,7 @@ The crate is usable without the server, inside other systems, at the low level:
     `add_target(..)`, `stats(..)`, `export(..)`. Features: `maps` (the browser, and the
   `maps` and `gbp` sources), `store`.
   A caller can also run `capture_place` with no store at all and get the reviews
-  and AVIF bytes back in memory.
+  and PNG bytes back in memory.
 - `review_archive_server` — binary: CLI, scheduler, HTTP, webhooks. Thin over
   the facade; no logic that the library does not also expose.
 - `review_archive_client` — typed async HTTP client over the same DTOs, for

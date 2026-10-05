@@ -112,7 +112,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/me/tg-channels/{id}/test", post(test_tg_channel));
 	let timed = admin
 		.merge(me)
-		.route("/captures/{file}", get(capture_avif))
+		.route("/captures/{file}", get(capture_png))
 		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, state.cfg.request_timeout.duration()));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
@@ -337,27 +337,27 @@ async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Jso
 	Ok(Json(s.archive.review(ReviewId(id)).await?))
 }
 
-/// A capture's AVIF, provenance in its Exif. Only what the archive recorded; for a
+/// A capture's PNG, provenance in its `tEXt` chunks. Only what the archive recorded; for a
 /// member, only what shows a review of a place they track.
-#[utoipa::path(get, path = "/captures/{sha256}.avif", tag = "reviews", params(("sha256" = String, Path)),
-	responses((status = 200, content_type = "image/avif"), (status = 404, body = ErrorBody)))]
-async fn capture_avif(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
-	let sha = file.strip_suffix(".avif").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
-	let avif = match (caller.admin, caller.email) {
-		(true, _) => s.archive.capture_avif(sha).await?,
-		(false, Some(m)) if caller.member => s.archive.member_capture_avif(&m, sha).await?,
+#[utoipa::path(get, path = "/captures/{sha256}.png", tag = "reviews", params(("sha256" = String, Path)),
+	responses((status = 200, content_type = "image/png"), (status = 404, body = ErrorBody)))]
+async fn capture_png(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
+	let sha = file.strip_suffix(".png").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
+	let png = match (caller.admin, caller.email) {
+		(true, _) => s.archive.capture_png(sha).await?,
+		(false, Some(m)) if caller.member => s.archive.member_capture_png(&m, sha).await?,
 		(false, Some(m)) => return Ok(not_in(&m)),
 		(false, None) => unreachable!("a caller is an admin or signed in"),
 	};
 	// behind auth, so no shared cache may keep it; the name is its hash, so it never changes
-	Ok(([(header::CONTENT_TYPE, "image/avif"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], avif).into_response())
+	Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], png).into_response())
 }
 
 /// The same archive as `export`: `manifest.json` and the first capture of each review.
 #[utoipa::path(get, path = "/targets/{id}/export.zip", tag = "reviews", params(("id" = i64, Path), ExportQuery),
 	responses((status = 200, content_type = "application/zip"), (status = 404, body = ErrorBody)))]
 async fn export_zip(State(s): State<AppState>, Path(id): Path<i64>, Query(q): Query<ExportQuery>) -> ApiResult<Response> {
-	// An archive of thousands of captures does not belong in memory: it is written to a temp file
+	// An archive of thousands of PNGs does not belong in memory: it is written to a temp file
 	// with no name, which goes away with its last handle whatever happens to the request.
 	let mut file = tempfile::tempfile().map_err(eyre::Report::new)?;
 	s.archive.export(TargetId(id), &q, Destination::Zip(file.try_clone().map_err(eyre::Report::new)?)).await?;
@@ -618,9 +618,9 @@ async fn test_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id):
 
 #[derive(OpenApi)]
 #[openapi(
-	info(title = "review_archive", description = "Archive of public place reviews: an AVIF screenshot of every review as it first appears, plus data for statistics."),
+	info(title = "review_archive", description = "Archive of public place reviews: a PNG of every review as it first appears, plus data for statistics."),
 	paths(
-		targets, add_target, target, patch_target, delete_target, reviews, runs, scan, capture, job, review, capture_avif, export_zip, stats, add_webhook,
+		targets, add_target, target, patch_target, delete_target, reviews, runs, scan, capture, job, review, capture_png, export_zip, stats, add_webhook,
 		webhooks, delete_webhook
 	),
 	// what no path returns: the body of a webhook delivery

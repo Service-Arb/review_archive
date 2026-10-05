@@ -1,4 +1,4 @@
-//! A review archive: an AVIF screenshot of every review of a place as it first appears, plus the data
+//! A review archive: a PNG of every review of a place as it first appears, plus the data
 //! behind it — new, edited, gone — for statistics.
 //!
 //! The pure parts (parsing Maps HTML, deciding what is new or gone, relative dates, the
@@ -10,7 +10,7 @@
 //!   and share.
 //! - [`sources::ReviewSource`] — the port every platform implements; `maps` and `gbp` are
 //!   the two Google ones.
-//! - [`store::Store`] (feature `store`) — SQLite plus content-addressed AVIFs.
+//! - [`store::Store`] (feature `store`) — SQLite plus content-addressed PNGs.
 //!
 //! Features: `maps` (the browser, and both Google sources), `store`; both on by default.
 //!
@@ -35,12 +35,12 @@
 #![warn(missing_docs)]
 
 mod archive;
-pub mod avif;
 #[cfg(feature = "maps")]
 pub mod browser;
 pub mod config;
 mod failure;
 pub mod places;
+pub mod png_meta;
 #[cfg(feature = "store")]
 pub mod record;
 pub mod sources;
@@ -58,5 +58,5 @@ pub use failure::{PlacesError, Remedy, describe, remedy};
 pub use review_archive_core as core;
 pub use review_archive_core::Rejected;
 
-/// What wrote a capture: this crate's version and commit, recorded with every capture.
+/// What wrote a capture: this crate's version and commit, recorded with every PNG.
 pub const SCANNER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("GIT_HASH"));

@@ -62,11 +62,12 @@ async fn live_scan_of_a_real_place() {
 	assert!(summary.captured >= summary.counts.new * 5 / 6, "{summary}");
 	let reviews = archive.reviews(id, &ReviewsQuery::default()).await.unwrap();
 	assert!(reviews.iter().all(|r| r.rating.is_some() && r.published_est.is_some()));
-	let captured = reviews.iter().find(|r| r.capture_sha256.is_some()).unwrap();
-	assert!(archive.review(review_archive::core::ReviewId(captured.id)).await.unwrap().captures[0].width >= 600);
+	let sha = reviews.iter().find_map(|r| r.capture_sha256.clone()).unwrap();
+	let png = archive.capture_png(&sha).await.unwrap();
+	assert!(review_archive::png_meta::dimensions(&png).unwrap().0 >= 600);
 }
 
-/// The library without a store: reviews and AVIFs in memory.
+/// The library without a store: reviews and PNGs in memory.
 #[tokio::test]
 #[ignore = "live: needs Chrome and the network"]
 async fn live_capture_without_a_store() {
@@ -92,7 +93,7 @@ async fn live_capture_without_a_store() {
 		}
 	};
 	assert_eq!(got.scan.reviews.len(), 5, "{:?}", got.scan.warnings);
-	assert!(got.scan.reviews.iter().all(|r| r.capture.is_none()), "taken out into avifs");
-	assert!(got.avifs.values().next().unwrap().width >= 600);
+	let png = got.scan.reviews.iter().find_map(|r| r.capture.as_ref()).unwrap();
+	assert!(review_archive::png_meta::dimensions(&png.png).unwrap().0 >= 600);
 	assert!(archive.store().is_err());
 }

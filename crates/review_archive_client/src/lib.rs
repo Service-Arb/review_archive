@@ -230,8 +230,8 @@ impl Client {
 		Self::json(self.request(Method::GET, &format!("reviews/{id}"))?).await
 	}
 
-	/// A capture's AVIF, by the `capture_url` (or `url`) the archive gave for it.
-	pub async fn capture_avif(&self, capture_url: &str) -> Result<Vec<u8>, Error> {
+	/// A capture's PNG, by the `capture_url` (or `url`) the archive gave for it.
+	pub async fn capture_png(&self, capture_url: &str) -> Result<Vec<u8>, Error> {
 		Ok(Self::send(self.request(Method::GET, capture_url)?).await?.bytes().await?.to_vec())
 	}
 
@@ -389,8 +389,8 @@ mod tests {
 	fn the_token_stays_on_the_archive() {
 		let c = Client::new("http://archive:59110/api", "secret-token-0123456789").unwrap();
 		assert!(!format!("{c:?}").contains("secret-token"));
-		assert!(c.request(Method::GET, "/captures/x.avif").is_ok());
-		for elsewhere in ["https://evil.example/x.avif", "http://archive:59111/x"] {
+		assert!(c.request(Method::GET, "/captures/x.png").is_ok());
+		for elsewhere in ["https://evil.example/x.png", "http://archive:59111/x"] {
 			assert!(matches!(c.request(Method::GET, elsewhere), Err(Error::Url(_))), "{elsewhere}");
 		}
 	}
