@@ -25,7 +25,7 @@ use review_archive_core::{
 	dto::{
 		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, LedgerEntry, Me, MemberDto, NewGmail, NewTarget, NewTgChannel,
 		NewTrack, NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto,
-		TokensChange, TokensDto, WaitQuery, WebhookDto, stats_csv,
+		TokensChange, TokensDto, Usage, WaitQuery, WebhookDto, stats_csv,
 	},
 };
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 	let me = Router::new()
 		.route("/me", get(me))
 		.route("/me/tokens", get(ledger))
+		.route("/me/usage", get(usage))
 		.route("/me/overview", get(overview))
 		.route("/me/gmails", post(add_gmail))
 		.route("/me/gmails/{gmail}", axum::routing::delete(delete_gmail).patch(set_gmail_enabled))
@@ -120,7 +121,11 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, state.cfg.request_timeout.duration()));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
-		.merge(Router::new().route("/targets/{id}/export.zip", get(export_zip)).route_layer(middleware::from_fn(operates_archive)))
+		.merge(
+			Router::new()
+				.route("/targets/{id}/export.zip", get(export_zip))
+				.route_layer(middleware::from_fn(operates_archive)),
+		)
 		.layer(GlobalConcurrencyLimitLayer::new(state.cfg.max_concurrent))
 		.route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 	// the probes answer whatever load the API is under
@@ -443,6 +448,12 @@ async fn change_tokens(State(s): State<AppState>, caller: Caller, Path(id): Path
 #[utoipa::path(get, path = "/me/tokens", tag = "me", responses((status = 200, body = [LedgerEntry])))]
 async fn ledger(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<LedgerEntry>>> {
 	Ok(Json(s.archive.ledger(m).await?))
+}
+
+/// The member's charges a day at a time over the last 30 days, and the places they track now.
+#[utoipa::path(get, path = "/me/usage", tag = "me", responses((status = 200, body = Usage)))]
+async fn usage(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Usage>> {
+	Ok(Json(s.archive.usage(m).await?))
 }
 
 /// The member's gmails, each with its places, by screenshots over the last 7 days.

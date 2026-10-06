@@ -32,7 +32,7 @@ pub use review_archive_core::dto;
 use review_archive_core::dto::{
 	Board, CaptureRequest, DayStats, ErrorBody, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, LedgerEntry, MEMBER_HEADER, Me, MemberDto, NewGmail, NewTarget, NewTgChannel,
 	NewTrack, NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto, TokensChange,
-	TokensDto, WaitQuery, WebhookDto,
+	TokensDto, Usage, WaitQuery, WebhookDto,
 };
 use serde::de::DeserializeOwned;
 
@@ -99,20 +99,13 @@ impl Client {
 			let path = format!("{}/", base.path());
 			base.set_path(&path);
 		}
-		Ok(Self {
-			http,
-			base,
-			member: None,
-		})
+		Ok(Self { http, base, member: None })
 	}
 
 	/// The same caller, acting as person `member` on `/me` routes: what one holding
 	/// `sa:review_archive:members:act_as` sees and does on their behalf. Anyone else is refused (403).
 	pub fn as_member(self, member: i64) -> Self {
-		Self {
-			member: Some(member),
-			..self
-		}
+		Self { member: Some(member), ..self }
 	}
 
 	/// A path that resolves to another origin (an absolute URL, `//host/…`) is refused.
@@ -268,6 +261,11 @@ impl Client {
 	/// `GET /me/tokens`: the member's token ledger, newest first.
 	pub async fn ledger(&self) -> Result<Vec<LedgerEntry>, Error> {
 		Self::json(self.request(Method::GET, "me/tokens")?).await
+	}
+
+	/// `GET /me/usage`: the member's charges by day, and what they track.
+	pub async fn usage(&self) -> Result<Usage, Error> {
+		Self::json(self.request(Method::GET, "me/usage")?).await
 	}
 
 	/// `GET /me/overview`: the member's gmails, each with its places.

@@ -1,6 +1,6 @@
 //! Members pay for the walks of the places they track: a ledger renewed daily up to a cap,
 //! charges split across trackers with the run's end, and no walk for a place whose trackers
-//! are out of tokens, nor past the account's hourly limit.
+//! are out of tokens, nor past the account's hourly limit. What a member paid adds up by day.
 
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use review_archive::{
 	config::Config,
 	core::{
 		Coverage, Known, PersonId, Scan, Target, TargetId,
-		dto::{BalanceChange, NewGmail, NewTarget, TokenKind},
+		dto::{BalanceChange, NewGmail, NewTarget, TokenKind, UsageDay},
 		schedule::Schedule,
 		tokens::{Meter, Tokens},
 	},
@@ -172,4 +172,70 @@ async fn the_hour_closes_maps_whoever_pays() {
 	assert!(archive.enqueue_scan(waiting.id).await.is_err());
 	let reopens = archive.next_due(now).await.unwrap().unwrap();
 	assert!(reopens > now + SignedDuration::from_mins(59), "{reopens}");
+}
+
+#[tokio::test]
+async fn usage_sums_a_members_own_charges_by_utc_day() {
+	let dir = tempfile::tempdir().unwrap();
+	let archive = open(dir.path()).await;
+	let store = archive.store().unwrap();
+	let shared = target(&archive, "ChIJtokenstest000usage01").await;
+	let own = target(&archive, "ChIJtokenstest000usage02").await;
+	let me = person(store, "me").await;
+	let other = person(store, "other").await;
+	let g = archive.add_gmail(me, &NewGmail { gmail: "me.ops".into() }).await.unwrap();
+	archive.assign(g.id, shared.id).await.unwrap();
+	archive.assign(g.id, own.id).await.unwrap();
+	tracks(&archive, other, shared.id).await;
+	set(&archive, me, 1000).await;
+	set(&archive, other, 1000).await;
+
+	let blobs = BlobStore::new(dir.path().join("blobs"));
+	let walk = |now: fn() -> Timestamp, t: Target, cost: i64| {
+		let (archive, blobs) = (&archive, &blobs);
+		async move {
+			let rec = Recorder {
+				store: archive.store().unwrap(),
+				blobs,
+				now,
+				schedule: &Schedule::default(),
+				tokens: &Tokens::default(),
+			};
+			rec.record(&Spends(cost), &t, None).await.unwrap();
+		}
+	};
+	walk(|| "2026-10-04T23:30:00Z".parse().unwrap(), own.clone(), 7).await;
+	walk(|| "2026-10-05T00:30:00Z".parse().unwrap(), shared.clone(), 10).await; // split with `other`
+	walk(|| "2026-10-05T02:00:00Z".parse().unwrap(), own.clone(), 3).await;
+	walk(|| "2026-08-01T12:00:00Z".parse().unwrap(), own.clone(), 50).await; // past the window
+
+	let usage = store.usage(me, "2026-10-06T08:00:00Z".parse().unwrap()).await.unwrap();
+	assert_eq!(usage.days.len(), 30);
+	assert_eq!(usage.days[0].day, "2026-09-07");
+	let charged: Vec<&UsageDay> = usage.days.iter().filter(|d| d.walks > 0).collect();
+	assert_eq!(
+		charged,
+		[
+			&UsageDay {
+				day: "2026-10-04".into(),
+				walks: 1,
+				tokens: 7
+			},
+			&UsageDay {
+				day: "2026-10-05".into(),
+				walks: 2,
+				tokens: 8
+			},
+		]
+	);
+	assert_eq!(
+		usage.days.last().unwrap(),
+		&UsageDay {
+			day: "2026-10-06".into(),
+			walks: 0,
+			tokens: 0
+		}
+	);
+	assert_eq!(usage.places_tracked, 2);
+	assert_eq!(store.usage(other, "2026-10-06T08:00:00Z".parse().unwrap()).await.unwrap().places_tracked, 1);
 }
