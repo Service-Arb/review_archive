@@ -27,6 +27,7 @@ crates/review_archive/          the engine (features: maps, store)
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
   src/store/events.rs           events into the outbox (hooks, members' Telegram channels), in the scan's own transaction
   src/store/members.rs          per-member state: gmails, tracks, reinstatements, Telegram channels
+  src/store/people.rs           people by concierge `sub`; claiming an address's rows from before
   src/store/tokens.rs           the token ledger: balances, who pays for a scan, the account's hourly limit
   src/record.rs                 one scan of one target into the store: run row, source, blobs, reconcile, write
   src/failure.rs                the typed errors (miette codes and help), `describe`, and who a failure waits for
@@ -34,12 +35,12 @@ crates/review_archive/          the engine (features: maps, store)
   src/places.rs                 Places API search for URLs without an id
 crates/review_archive_server/   the `review_archive` binary: CLI, HTTP, background loops; thin over `Archive`
   src/http.rs                   the API and its OpenAPI document (utoipa, `GET /openapi.json`), `/mfe/`, the page at `/`
-  src/auth.rs                   who is calling: the operator's token, or valeratrades.com's sign-in cookie (`va_sso`);
-                                whose `/me` it is (`X-Member`, admins only)
+  src/auth.rs                   who is calling: the panel's assertion (`sa_auth`), a person by `sub`; the
+                                permission guards; whose `/me` it is (`X-Member`)
   src/worker.rs                 the browser's worker (queued jobs, then due targets) and the deliverer
   src/settings.rs               the environment (ev_lib `settings!`): secrets, APP_ENV
   src/config.rs                 the config (v_utils `Settings`): data dir, bind, and every library and server section
-crates/review_archive_client/   typed async client of the HTTP API, on the core's DTOs; native and wasm
+crates/review_archive_client/   typed async client of the HTTP API through the panel, on the core's DTOs; native and wasm
 crates/review_archive_web/      the dashboard MFE (dioxus, wasm), over the client; `package.sh` lays out /mfe/, `index.html` is `/`
 ```
 
@@ -139,7 +140,7 @@ with its own platform implements `sources::ReviewSource` and records through
   captures and blobs belong to no one: a place tracked by several members is one target,
   scanned once. What is a member's — gmails, tracks, reinstatements, Telegram channels —
   points at those facts and never alters them (tracking may put a disabled target back on
-  the schedule; a target whose every track is switched off is left off it); every member query is scoped by the member's email in SQL.
+  the schedule; a target whose every track is switched off is left off it); every member query is scoped by the member's person id in SQL.
 - **Tokens are a ledger; a balance is its sum; members pay for the scans of their places.**
   `token_ledger` rows are only added (renewal, an admin's set as a difference, charges). A
   walk is metered by `maps::cost` and stops at what its payers hold and the account's hour
@@ -156,11 +157,11 @@ with its own platform implements `sources::ReviewSource` and records through
   sent; with it set, only the hosts it lists (private addresses allowed), nowhere else.
   Redirects are not followed.
 - **Secrets come from the environment only**, through `ev_lib::settings` in the server
-  (`REVIEW_ARCHIVE_TOKEN`, `GOOGLE_MAPS_KEY`, `GBP_*`, `SSO_PUBLIC_KEY` +
-  `SSO_REFRESH_URL`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`, `ALERT_WEBHOOK_*`); the
+  (`PANEL_ASSERTION_KEYS`, `GOOGLE_MAPS_KEY`, `GBP_*`, `TELEGRAM_BOT_TOKEN`, `SENTRY_DSN`,
+  `ALERT_WEBHOOK_*`); the
   library takes them as `config::Secrets` and never reads the environment. Each is required
   only by what uses it and a missing one fails that with its name — except
-  `REVIEW_ARCHIVE_TOKEN`, required at boot when `APP_ENV=production`
+  `PANEL_ASSERTION_KEYS`, required at boot when `APP_ENV=production`
   (`review_archive --print-required-vars` lists what a profile needs).
 - **A capture is the review as it first appeared.** Cards are screenshotted when new (or while
   `capture_pending`), after "More" is expanded. It is kept as AVIF, its provenance in Exif,

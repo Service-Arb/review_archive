@@ -21,10 +21,12 @@ path = "src/main.rs"
 axum = { workspace = true, features = ["macros"] }
 clap.workspace = true
 color-eyre.workspace = true
+concierge_iam = { workspace = true, features = ["catalog"] }
 ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel", "alerts"] }
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
+sa_auth = { workspace = true, features = ["catalog"] }
 reqwest.workspace = true
 review_archive = { workspace = true, features = ["maps", "settings", "store"] }
 review_archive_core = { workspace = true, features = ["openapi"] }
@@ -43,7 +45,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
 v_utils = { workspace = true, features = ["cli", "xdg"] }
-va_sso.workspace = true
 
 [lints]
 workspace = true

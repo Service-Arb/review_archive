@@ -1,7 +1,7 @@
-//! The dashboard: a member's managing gmails, the places each tracks, and per place a board
-//! of its reviews — snapshotted, removed, reinstating. Served by the archive under `/mfe/`,
-//! so the API is the bundle's own origin, and the browser's `va_access` cookie signs its calls.
-//! An admin gets tabs: their own dashboard, and any member's, acting as them.
+//! The dashboard: a person's managing gmails, the places each tracks, and per place a board
+//! of its reviews — snapshotted, removed, reinstating. The Service-Arb panel mounts it and
+//! forwards its calls to the archive: the panel's session cookie and CSRF header sign them.
+//! One who may act as others gets tabs: their own dashboard, and any member's, acting as them.
 
 #![cfg(target_arch = "wasm32")]
 #![allow(clippy::useless_format)] // rsx! lowers every "{x}" to a format!
@@ -10,10 +10,12 @@ mod board;
 mod telegram;
 mod tokens;
 
+use std::sync::OnceLock;
+
 use dioxus::prelude::*;
 use ev_lib::{
-	i18n::Messages,
-	mfe::bundle_origin,
+	i18n::{Locale, Messages, Translator},
+	t,
 	uikit::{
 		self, BadgeVariant, Button, ButtonVariant, Card, CommandDialog, CommandEmpty, CommandInput, CommandItem, CommandList, InfoTip, InfoTipContent, InfoTipTrigger, Input, Size, Switch,
 		Tabs, TabsList, TabsTrigger,
@@ -23,21 +25,82 @@ use review_archive_client::{
 	Client,
 	dto::{BalanceChange, GmailOverview, LocationSummary, Me, MemberDto, NewTrack, RunStatus, TokensChange, TokensDto},
 };
-
-ev_lib::mfe! {
-	service: "review-archive", name: "dashboard", kind: page,
-	root: crate::Dashboard, stylesheet: "mfe.css",
-	messages: crate::catalogue
-}
-
-/// English only, for now: the copy is written where it renders.
-fn catalogue(_: ev_lib::i18n::Locale) -> Messages {
-	Messages::new()
-}
+use sa_auth::{Members, Permission, PermissionSet, Tokens};
+use wasm_bindgen::{JsCast, prelude::*};
 
 const TAG: &str = "mfe-review-archive-dashboard";
 
-/// The API as this tab's member: the caller, or the member an admin's tab acts as.
+/// English only, for now: each key's English is written where it renders.
+fn catalogue(_: Locale) -> Messages {
+	Messages::new()
+}
+
+/// The element's attributes, all required.
+struct Host {
+	/// The API's base URL, resolved against the page.
+	api: String,
+	/// Where a browser signs in; it comes back to the same-origin path in `return_to`.
+	sign_in: String,
+	/// The cookie whose value every request carries as `x-sa-csrf`.
+	csrf_cookie: String,
+	/// The path the page is served at; the element's views are paths under it.
+	base: String,
+}
+
+/// The entry module's URL: every file of the bundle sits next to it.
+static BUNDLE: OnceLock<String> = OnceLock::new();
+/// The host page's language, and its attributes or the names of those it left out.
+static MOUNT: OnceLock<(Locale, Result<Host, Vec<&'static str>>)> = OnceLock::new();
+
+/// Called by the entry module with its own URL; registers the element.
+#[wasm_bindgen]
+pub fn define(bundle: String) {
+	BUNDLE.set(bundle).expect("the entry module runs once");
+	let mount = Closure::<dyn Fn(web_sys::Element)>::new(mount);
+	ev_lib::mfe::register(TAG, &mount);
+	mount.forget(); // the element can mount at any time after registration
+}
+
+fn mount(el: web_sys::Element) {
+	let attr = |name| el.get_attribute(name);
+	let host = match (attr("api"), attr("sign-in"), attr("csrf-cookie"), attr("base")) {
+		(Some(api), Some(sign_in), Some(csrf_cookie), Some(base)) => Ok(Host { api, sign_in, csrf_cookie, base }),
+		_ => Err(["api", "sign-in", "csrf-cookie", "base"].into_iter().filter(|a| !el.has_attribute(a)).collect()),
+	};
+	let mut cfg = dioxus::web::Config::new().rootelement(el.clone());
+	if let Ok(host) = &host {
+		cfg = cfg.history(std::rc::Rc::new(dioxus::web::WebHistory::new(Some(host.base.clone()), true)));
+	}
+	assert!(MOUNT.set((ev_lib::mfe::host_locale(&el), host)).is_ok(), "one dashboard per page");
+	dioxus::LaunchBuilder::new().with_cfg(cfg).launch(root);
+}
+
+fn root() -> Element {
+	let (locale, host) = MOUNT.get().expect("set before launch");
+	let tr = use_context_provider(|| Translator::new(catalogue(*locale), *locale));
+	let bundle = BUNDLE.get().expect("defined before any mount");
+	let stylesheet = reqwest::Url::parse(bundle).and_then(|b| b.join("mfe.css")).expect("the entry module's URL is a URL");
+	rsx! {
+		document::Stylesheet { href: stylesheet.to_string() }
+		match host {
+			Ok(_) => rsx! { Router::<Route> {} },
+			Err(missing) => rsx! {
+				div { class: "p-6 text-accent-error text-[13px] font-sans",
+					{t!(tr, "host.missing", "<{tag}> is missing its attributes: {missing}", tag = TAG, missing = missing.join(", "))}
+				}
+			},
+		}
+	}
+}
+
+fn host() -> &'static Host {
+	MOUNT
+		.get()
+		.and_then(|(_, h)| h.as_ref().ok())
+		.expect("only the router asks, and it renders once the attributes are read")
+}
+
+/// The API as this tab's member: the caller, or the member their tab acts as.
 #[derive(Clone)]
 struct Api(Client);
 
@@ -48,6 +111,15 @@ struct Refresh(Signal<u32>);
 /// The last action that failed, shown until the next one.
 #[derive(Clone, Copy)]
 struct Failure(Signal<Option<String>>);
+
+/// What the signed-in person may do here.
+#[derive(Clone)]
+struct Held(PermissionSet);
+
+fn may(p: impl Permission) -> bool {
+	let Held(held) = consume_context();
+	held.may(p)
+}
 
 /// What a tab shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,29 +159,29 @@ impl dioxus::router::FromRouteSegments for View {
 	}
 }
 
-/// Where the dashboard is, as its URL says: a view of the caller's own, or of the member an
-/// admin's tab acts as.
+/// Where the dashboard is, as its URL under the host's `base` says: a view of the caller's
+/// own, or of the member their tab acts as.
 #[derive(Clone, Debug, PartialEq, Routable)]
 #[rustfmt::skip]
 enum Route {
 	#[layout(Shell)]
 		#[route("/members/:member/:..view", TheirView)]
-		Theirs { member: String, view: View },
+		Theirs { member: i64, view: View },
 		#[route("/:..view", MyView)]
 		Mine { view: View },
 }
 
 impl Route {
-	fn at(member: Option<String>, view: View) -> Self {
+	fn at(member: Option<i64>, view: View) -> Self {
 		match member {
 			Some(member) => Self::Theirs { member, view },
 			None => Self::Mine { view },
 		}
 	}
 
-	fn member(&self) -> Option<&str> {
+	fn member(&self) -> Option<i64> {
 		match self {
-			Self::Theirs { member, .. } => Some(member),
+			Self::Theirs { member, .. } => Some(*member),
 			Self::Mine { .. } => None,
 		}
 	}
@@ -124,14 +196,14 @@ impl Route {
 /// Each tab's last route, by its member: what a hidden tab keeps showing, and where going
 /// back to it lands.
 #[derive(Clone, Copy)]
-struct Views(Signal<std::collections::HashMap<Option<String>, Route>>);
+struct Views(Signal<std::collections::HashMap<Option<i64>, Route>>);
 
 /// The routes render nothing themselves — every tab stays mounted under [`Shell`] — they
 /// only note where their tab is.
 fn remember(route: Route) -> Element {
 	let Views(mut views) = use_context();
 	use_effect(use_reactive!(|route| {
-		views.write().insert(route.member().map(str::to_owned), route);
+		views.write().insert(route.member(), route);
 	}));
 	rsx! {}
 }
@@ -142,82 +214,49 @@ fn MyView(view: View) -> Element {
 }
 
 #[component]
-fn TheirView(member: String, view: View) -> Element {
+fn TheirView(member: i64, view: View) -> Element {
 	remember(Route::Theirs { member, view })
 }
 
 fn api() -> Client {
-	Client::ambient(reqwest::Client::new(), &bundle_origin()).expect("the bundle's origin is a URL")
-}
-
-/// A failed call, as shown. A 401 means the sign-in cookie is gone or expired: the whole
-/// page goes to the element's `sign-in` URL, which sends the browser back here signed in.
-fn shown(e: review_archive_client::Error) -> String {
-	if e.status().map(|s| s.as_u16()) == Some(401) {
-		web_sys::window()
-			.expect("a browser")
-			.top()
-			.expect("a browsing context")
-			.expect("a top window")
-			.location()
-			.set_href(&signed_in_again())
-			.expect("navigating the top window");
-	}
-	e.to_string()
-}
-
-/// The sign-in, coming back to this page with a fresh cookie.
-fn signed_in_again() -> String {
-	let here = web_sys::window().expect("a browser").location().href().expect("a page has a URL");
-	format!("{}?return_to={}", sign_in(), String::from(js_sys::encode_uri_component(&here)))
-}
-
-/// Where the host page sends a browser to sign in.
-fn sign_in() -> String {
-	web_sys::window()
-		.expect("a browser")
+	let Host { api, csrf_cookie, .. } = host();
+	let window = web_sys::window().expect("a browser");
+	let page = window.location().href().expect("a page has a URL");
+	let base = reqwest::Url::parse(&page).and_then(|p| p.join(api)).expect("`api` resolves against the page");
+	let cookies = window
 		.document()
 		.expect("a page")
-		.query_selector(TAG)
-		.expect("a valid selector")
-		.expect("mounted inside its element")
-		.get_attribute("sign-in")
-		.expect("the host page names where to sign in")
+		.dyn_into::<web_sys::HtmlDocument>()
+		.expect("an HTML page")
+		.cookie()
+		.expect("the page's cookies are readable");
+	let mut headers = reqwest::header::HeaderMap::new();
+	// absent, the panel refuses a write with its own answer
+	if let Some(token) = cookies.split("; ").find_map(|c| c.strip_prefix(csrf_cookie.as_str())?.strip_prefix('=')) {
+		headers.insert("x-sa-csrf", reqwest::header::HeaderValue::from_str(token).expect("a cookie value is a valid header value"));
+	}
+	let http = reqwest::Client::builder()
+		.default_headers(headers)
+		.build()
+		.expect("a browser client takes no setup that can fail");
+	Client::ambient(http, base.as_str()).expect("resolved to an absolute URL")
 }
 
-/// Signed in, but not in `service-arb`: what to ask an admin for.
-#[component]
-fn NotIn(email: String) -> Element {
-	rsx! {
-		div { class: "{SHELL} flex-col items-start gap-3 p-6",
-			p { "You are signed in as " span { class: "font-mono", "{email}" } ", which is not a member yet." }
-			p { class: "text-ink-soft", "Ask an admin to add this email, then check again." }
-			a { href: signed_in_again(), target: "_top",
-				Button { variant: ButtonVariant::Outline, size: Size::Sm, r#type: "button", "Check again" }
-			}
-		}
+/// A failed call, as shown. A 401 means the panel's session is gone: the whole page goes to
+/// the element's `sign-in`, which brings the browser back here signed in.
+fn shown(e: review_archive_client::Error) -> String {
+	if e.status().map(|s| s.as_u16()) == Some(401) {
+		let location = web_sys::window().expect("a browser").location();
+		let here = format!(
+			"{}{}{}",
+			location.pathname().expect("a page has a path"),
+			location.search().expect("a page has a query"),
+			location.hash().expect("a page has a fragment")
+		);
+		let to = format!("{}?return_to={}", host().sign_in, String::from(js_sys::encode_uri_component(&here)));
+		location.set_href(&to).expect("navigating the page");
 	}
-}
-
-/// Who is signed in, top right, linking to their valeratrades.com profile: the account, and
-/// whether it is an admin, are the site's.
-#[component]
-fn Profile(me: Me) -> Element {
-	// a dev member's sign-in is this page itself, with no site behind it
-	let profile = web_sys::Url::new(&sign_in()).ok().map(|u| format!("{}/profile", u.origin()));
-	let class = "fixed right-3 top-1.5 z-10 flex items-center gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-[12px] text-ink font-sans";
-	let body = rsx! {
-		span { title: "{me.email}", "{me.username}" }
-		if me.admin {
-			uikit::Badge { variant: BadgeVariant::Outline, "admin" }
-		}
-	};
-	rsx! {
-		match profile {
-			Some(href) => rsx! { a { class: "{class} hover:bg-hover", href, target: "_top", {body} } },
-			None => rsx! { div { class, {body} } },
-		}
-	}
+	e.to_string()
 }
 
 /// Runs a write against the API, then reads everything again; a failure is shown.
@@ -237,46 +276,43 @@ fn act<F: Future<Output = Result<(), review_archive_client::Error>> + 'static>(f
 const SHELL: &str = "flex min-h-0 flex-1 bg-background text-ink text-[13px] font-sans";
 
 #[component]
-fn Dashboard() -> Element {
-	rsx! { Router::<Route> {} }
-}
-
-#[component]
 fn Shell() -> Element {
 	use_context_provider(|| Views(Signal::new(Default::default())));
 	let route = use_route::<Route>();
 	let me = use_resource(|| async { api().me().await.map_err(shown) });
 	let body = match &*me.read() {
-		Some(Ok(me)) if me.admin => rsx! { Admin { email: me.email.clone() } },
-		Some(Ok(me)) if !me.member => rsx! { NotIn { email: me.email.clone() } },
-		Some(Ok(_)) => rsx! { Workspace { view: route } },
+		Some(Ok(me)) => rsx! { Signed { me: me.clone(), view: route } },
 		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
 	};
-	let signed_in = match &*me.read() {
-		Some(Ok(me)) => Some(me.clone()),
-		_ => None,
-	};
 	rsx! {
-		div { class: "flex h-dvh flex-col",
+		div { class: "flex h-full flex-col",
 			{body}
 			Outlet::<Route> {}
-			if let Some(me) = signed_in {
-				Profile { me }
-			}
 		}
+	}
+}
+
+#[component]
+fn Signed(me: Me, view: Route) -> Element {
+	use_context_provider(|| Held(me.permissions.iter().cloned().collect()));
+	match may(Members::ActAs) || may(Tokens::Grant) {
+		true => rsx! { Admin { me: me.id } },
+		false => rsx! { Workspace { view } },
 	}
 }
 
 /// "You", then a tab per member opened; every tab stays mounted, so switching keeps where
 /// each one was. The active tab is the URL's `member`.
 #[component]
-fn Admin(email: String) -> Element {
+fn Admin(me: i64) -> Element {
 	let route = use_route::<Route>();
 	let Views(mut views) = use_context();
-	let active = route.member().map(str::to_owned);
-	let mut opened = use_signal(Vec::<String>::new);
-	let mut labels = use_signal(std::collections::HashMap::<String, String>::new);
+	let active = route.member();
+	let acts = may(Members::ActAs);
+	let grants = may(Tokens::Grant);
+	let mut opened = use_signal(Vec::<i64>::new);
+	let mut labels = use_signal(std::collections::HashMap::<i64, String>::new);
 	let mut picking = use_signal(|| false);
 	// a link to a member's view opens their tab
 	use_effect(use_reactive!(|active| {
@@ -287,27 +323,27 @@ fn Admin(email: String) -> Element {
 		}
 	}));
 	let mut tabs = opened();
-	if let Some(m) = &active
-		&& !tabs.contains(m)
+	if let Some(m) = active
+		&& !tabs.contains(&m)
 	{
-		tabs.push(m.clone());
+		tabs.push(m);
 	}
 	// where a tab is: the URL for the active one, else where it was left; a tab never visited starts at its home
-	let view_of = move |m: Option<String>| match views.read().get(&m) {
+	let view_of = move |m: Option<i64>| match views.read().get(&m) {
 		Some(r) => r.clone(),
 		None => Route::at(m, View::Home),
 	};
-	let shown = |m: Option<&str>| match active.as_deref() == m {
+	let shown = |m: Option<i64>| match active == m {
 		true => "flex min-h-0 flex-1",
 		false => "hidden",
 	};
 	rsx! {
 		div { class: "flex min-h-0 flex-1 flex-col bg-background text-ink text-[13px] font-sans",
 			Tabs {
-				// the kit's tabs are keyed by string: "" is the admin's own
-				value: active.clone().unwrap_or_default(),
+				// the kit's tabs are keyed by string: "" is the caller's own
+				value: active.map(|m| m.to_string()).unwrap_or_default(),
 				on_value_change: move |m: String| {
-					navigator().push(view_of((!m.is_empty()).then_some(m)));
+					navigator().push(view_of((!m.is_empty()).then(|| m.parse().expect("a tab's value is its member's id"))));
 				},
 				class: "border-b border-border bg-secondary px-2 py-1.5",
 				div { class: "flex items-center gap-1",
@@ -315,7 +351,7 @@ fn Admin(email: String) -> Element {
 						TabsTrigger { value: "", "You" }
 						for m in tabs.clone() {
 							div { key: "{m}", class: "flex items-center",
-								TabsTrigger { value: m.clone(), {labels.read().get(&m).cloned().unwrap_or_else(|| m.clone())} }
+								TabsTrigger { value: m.to_string(), {labels.read().get(&m).cloned().unwrap_or_else(|| format!("#{m}"))} }
 								Button {
 									variant: ButtonVariant::Ghost,
 									size: Size::Xs,
@@ -323,8 +359,8 @@ fn Admin(email: String) -> Element {
 									r#type: "button",
 									onclick: move |_| {
 										opened.write().retain(|t| *t != m);
-										views.write().remove(&Some(m.clone()));
-										if router().current::<Route>().member() == Some(m.as_str()) {
+										views.write().remove(&Some(m));
+										if router().current::<Route>().member() == Some(m) {
 											navigator().push(view_of(None));
 										}
 									},
@@ -333,14 +369,16 @@ fn Admin(email: String) -> Element {
 							}
 						}
 					}
-					Button {
-						variant: ButtonVariant::Ghost,
-						size: Size::Xs,
-						icon: true,
-						r#type: "button",
-						class: "text-ink-soft text-base",
-						onclick: move |_| picking.set(true),
-						"+"
+					if grants {
+						Button {
+							variant: ButtonVariant::Ghost,
+							size: Size::Xs,
+							icon: true,
+							r#type: "button",
+							class: "text-ink-soft text-base",
+							onclick: move |_| picking.set(true),
+							"+"
+						}
 					}
 				}
 			}
@@ -348,17 +386,20 @@ fn Admin(email: String) -> Element {
 				Workspace { view: if active.is_none() { route.clone() } else { view_of(None) } }
 			}
 			for m in tabs {
-				div { key: "{m}", class: shown(Some(&m)),
-					Workspace { view: if active.as_ref() == Some(&m) { route.clone() } else { view_of(Some(m.clone())) } }
+				div { key: "{m}", class: shown(Some(m)),
+					Workspace { view: if active == Some(m) { route.clone() } else { view_of(Some(m)) } }
 				}
 			}
 			if picking() {
 				Picker {
 					on_pick: move |m: MemberDto| {
+						if !acts {
+							return;
+						}
 						picking.set(false);
-						let tab = (m.email != email).then(|| m.email.clone());
-						if let Some(name) = m.username {
-							labels.write().insert(m.email, name);
+						let tab = (m.id != me).then_some(m.id);
+						if !m.name.is_empty() {
+							labels.write().insert(m.id, m.name);
 						}
 						navigator().push(view_of(tab));
 					},
@@ -369,23 +410,11 @@ fn Admin(email: String) -> Element {
 	}
 }
 
-/// fzf over the members valeratrades.com lists: name and email. Who is in is kept here too.
+/// fzf over everyone who signed in here: name and email, and their balance.
 #[component]
 fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Element {
-	let mut members = use_resource(|| async { api().members().await.map_err(shown) });
-	let mut newcomer = use_signal(String::new);
-	let mut failure = use_signal(|| None::<String>);
-	let keep = move |f: std::pin::Pin<Box<dyn Future<Output = Result<(), review_archive_client::Error>>>>| {
-		spawn(async move {
-			match f.await {
-				Ok(()) => {
-					failure.set(None);
-					members.restart();
-				}
-				Err(e) => failure.set(Some(shown(e))),
-			}
-		});
-	};
+	let tr: Translator = use_context();
+	let members = use_resource(|| async { api().members().await.map_err(shown) });
 	rsx! {
 		CommandDialog {
 			open: true,
@@ -400,32 +429,18 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 					Some(Ok(members)) => rsx! {
 						for m in members.clone() {
 							CommandItem {
-								key: "{m.email}",
-								value: format!("{} {}", m.username.as_deref().unwrap_or_default(), m.email),
+								key: "{m.id}",
+								value: format!("{} {}", m.name, m.email),
 								on_select: {
 									let m = m.clone();
 									move |_| on_pick.call(m.clone())
 								},
-								match &m.username {
-									Some(name) => rsx! { span { "{name}" } },
-									None => rsx! { uikit::Badge { variant: BadgeVariant::Outline, "not signed up" } },
+								if !m.claimed {
+									uikit::Badge { variant: BadgeVariant::Outline, {t!(tr, "picker.unclaimed", "never signed in")} }
 								}
+								span { "{m.name}" }
 								span { class: "flex-1 truncate text-ink-soft", "{m.email}" }
-								Balance { member: m.email.clone(), balance: m.balance }
-								Button {
-									variant: ButtonVariant::Ghost,
-									size: Size::Xs,
-									r#type: "button",
-									onclick: {
-										let email = m.email.clone();
-										move |e: MouseEvent| {
-											e.stop_propagation();
-											let email = email.clone();
-											keep(Box::pin(async move { api().remove_member(&email).await }));
-										}
-									},
-									"remove"
-								}
+								Balance { member: m.id, balance: m.balance }
 							}
 						}
 						CommandEmpty { "No member matches." }
@@ -434,33 +449,13 @@ fn Picker(on_pick: EventHandler<MemberDto>, on_close: EventHandler<()>) -> Eleme
 					None => rsx! { div { class: "p-3 text-ink-soft", "Loading…" } },
 				}
 			}
-			form {
-				class: "flex items-center gap-1 border-t border-border p-2",
-				onsubmit: move |e: FormEvent| {
-					e.prevent_default();
-					let email = newcomer().trim().to_owned();
-					newcomer.set(String::new());
-					keep(Box::pin(async move { api().add_member(&email).await }));
-				},
-				Input {
-					class: "flex-1",
-					size: Size::Xs,
-					placeholder: "Email to add, as they sign in to valeratrades.com",
-					value: newcomer(),
-					oninput: move |e: FormEvent| newcomer.set(e.value()),
-				}
-				Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "submit", "add" }
-				if let Some(e) = failure() {
-					span { class: "max-w-60 truncate text-[11px] text-accent-error", title: "{e}", "{e}" }
-				}
-			}
 		}
 	}
 }
 
-/// A member's balance in the picker, and an admin's change of it.
+/// A member's balance in the picker, and a change of it.
 #[component]
-fn Balance(member: String, balance: i64) -> Element {
+fn Balance(member: i64, balance: i64) -> Element {
 	let mut balance = use_signal(|| balance);
 	let mut amount = use_signal(String::new);
 	let mut failure = use_signal(|| None::<String>);
@@ -469,9 +464,8 @@ fn Balance(member: String, balance: i64) -> Element {
 			Ok(n) => n,
 			Err(e) => return failure.set(Some(format!("{:?}: {e}", amount()))),
 		};
-		let member = member.clone();
 		spawn(async move {
-			match api().change_tokens(&member, &TokensChange { change: to(n), note: None }).await {
+			match api().change_tokens(member, &TokensChange { change: to(n), note: None }).await {
 				Ok(t) => {
 					balance.set(t.balance);
 					amount.set(String::new());
@@ -481,7 +475,7 @@ fn Balance(member: String, balance: i64) -> Element {
 			}
 		});
 	};
-	let mut set = change.clone();
+	let mut set = change;
 	rsx! {
 		// the row's click picks the member: these are not that
 		div { class: "flex shrink-0 items-center gap-1", onclick: |e| e.stop_propagation(),
@@ -501,15 +495,15 @@ fn Balance(member: String, balance: i64) -> Element {
 	}
 }
 
-/// One tab's dashboard at `view`: the signed-in person's own, or (its `member`) the one an
-/// admin acts as.
+/// One tab's dashboard at `view`: the signed-in person's own, or (its `member`) the one they
+/// act as.
 #[component]
 fn Workspace(view: Route) -> Element {
-	let tab = view.member().map(str::to_owned);
-	let member = tab.clone();
+	let tr: Translator = use_context();
+	let tab = view.member();
 	let Api(client) = use_context_provider(|| {
-		Api(match &member {
-			Some(m) => api().as_member(m.clone()),
+		Api(match tab {
+			Some(m) => api().as_member(m),
 			None => api(),
 		})
 	});
@@ -522,26 +516,28 @@ fn Workspace(view: Route) -> Element {
 			client.overview().await.map_err(shown)
 		}
 	});
-	// `/me` is the caller whoever they act as: a member tab's balance is read off the members list
-	let acting = tab.clone();
+	// `/me` is the caller whoever they act as: who a member tab is, and their balance, are read
+	// off the members list, which only one who grants tokens may read
+	let grants = may(Tokens::Grant);
+	let unknown = tr.clone();
 	let tokens = use_resource(move || {
-		let member = acting.clone();
+		let unknown = unknown.clone();
 		async move {
 			refresh.0();
-			let mine = api().me().await.map_err(shown)?.tokens.expect("only a member gets a workspace");
-			let balance = match member {
-				None => mine.balance,
-				Some(m) =>
+			let mine = api().me().await.map_err(shown)?.tokens;
+			let whom = match tab.filter(|_| grants) {
+				Some(m) => Some(
 					api()
 						.members()
 						.await
 						.map_err(shown)?
 						.into_iter()
-						.find(|x| x.email == m)
-						.ok_or_else(|| format!("{m} is not a member"))?
-						.balance,
+						.find(|x| x.id == m)
+						.ok_or_else(|| t!(unknown, "workspace.no_member", "There is no member #{member}", member = m))?,
+				),
+				None => None,
 			};
-			Ok::<_, String>(TokensDto { balance, ..mine })
+			Ok::<_, String>((mine, whom))
 		}
 	});
 
@@ -551,10 +547,17 @@ fn Workspace(view: Route) -> Element {
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
 		_ => return rsx! { div { class: "{shell} p-6 text-ink-soft", "Loading…" } },
 	};
-	let tokens = match &*tokens.read() {
-		Some(Ok(t)) => Some(*t),
+	let (tokens, whom) = match &*tokens.read() {
+		Some(Ok((mine, whom))) => (
+			match (tab, whom) {
+				(None, _) => Some(*mine),
+				(Some(_), Some(w)) => Some(TokensDto { balance: w.balance, ..*mine }),
+				(Some(_), None) => None,
+			},
+			whom.clone(),
+		),
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
-		None => None,
+		None => (None, None),
 	};
 	let at = view.view().clone();
 	let (picked, target) = match at {
@@ -565,13 +568,21 @@ fn Workspace(view: Route) -> Element {
 	// the first gmail until one is picked; a removed one falls back the same way
 	let current = picked.filter(|id| gmails.iter().any(|g| g.gmail.id == *id)).or_else(|| gmails.first().map(|g| g.gmail.id));
 	let scope = current.and_then(|id| gmails.iter().find(|g| g.gmail.id == id)).cloned();
+	let acting = tab.map(|m| {
+		let who = match whom {
+			Some(w) if !w.name.is_empty() => format!("{} <{}>", w.name, w.email),
+			Some(w) => w.email,
+			None => format!("#{m}"),
+		};
+		t!(tr, "workspace.acting", "Viewing as {member} — actions apply to their account", member = who)
+	});
 
 	rsx! {
 		div { class: "{shell}",
-			Rail { gmails: gmails.clone(), current, at: at.clone(), tokens, tab: tab.clone() }
+			Rail { gmails: gmails.clone(), current, at: at.clone(), tokens, tab }
 			div { class: "flex min-h-0 min-w-0 flex-1 flex-col",
-				if let Some(m) = &member {
-					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "Viewing as {m} — actions apply to their account" }
+				if let Some(acting) = acting {
+					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "{acting}" }
 				}
 				if let Some(e) = failure.0() {
 					div { class: "border-b border-border bg-accent-error/15 px-6 py-2 text-accent-error", "{e}" }
@@ -581,16 +592,16 @@ fn Workspace(view: Route) -> Element {
 						telegram::Channels { gmails: gmails.iter().map(|g| g.gmail.clone()).collect::<Vec<_>>() }
 					},
 					(View::Tokens, _) => rsx! {
-						tokens::Ledger { gmails: gmails.clone(), tokens, tab: tab.clone() }
+						tokens::Ledger { gmails: gmails.clone(), tokens, tab }
 					},
 					(_, None) => rsx! {
 						div { class: "p-6 text-ink-soft", "Add the gmail your places are managed from, on the left." }
 					},
 					(_, Some(g)) => match target.and_then(|t| g.locations.iter().find(|l| l.target.id == t)) {
 						Some(loc) => rsx! {
-							board::Board { gmail: g.gmail.clone(), location: loc.clone(), tab: tab.clone() }
+							board::Board { gmail: g.gmail.clone(), location: loc.clone(), tab }
 						},
-						None => rsx! { Places { scope: g, tab: tab.clone() } },
+						None => rsx! { Places { scope: g, tab } },
 					},
 				}
 			}
@@ -599,7 +610,7 @@ fn Workspace(view: Route) -> Element {
 }
 
 #[component]
-fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Option<TokensDto>, tab: Option<String>) -> Element {
+fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Option<TokensDto>, tab: Option<i64>) -> Element {
 	let telegram = at == View::Telegram;
 	let aside = telegram || at == View::Tokens;
 	let mut adding = use_signal(String::new);
@@ -613,7 +624,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Opti
 				if let Some(t) = tokens {
 					Link {
 						class: if at == View::Tokens { "rounded-md px-2 py-0.5 bg-hover text-ink" } else { "rounded-md px-2 py-0.5 text-ink-soft hover:bg-hover" },
-						to: Route::at(tab.clone(), View::Tokens),
+						to: Route::at(tab, View::Tokens),
 						span { title: "+{t.daily}/day up to {t.cap}", "{t.balance} tokens" }
 					}
 				}
@@ -651,7 +662,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Opti
 								if current == Some(g.gmail.id) && !aside { "bg-hover text-ink" } else { "text-ink-soft" },
 								if g.gmail.enabled { "" } else { "opacity-50" }
 							),
-							to: Route::at(tab.clone(), View::Gmail(g.gmail.id)),
+							to: Route::at(tab, View::Gmail(g.gmail.id)),
 							span { class: "truncate flex-1", "{g.gmail.gmail}" }
 							uikit::Badge { variant: BadgeVariant::Secondary, "{g.locations.len()}" }
 						}
@@ -692,7 +703,7 @@ fn Rail(gmails: Vec<GmailOverview>, current: Option<i64>, at: View, tokens: Opti
 
 /// The gmail's places as cards, most screenshots over the last week first.
 #[component]
-fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
+fn Places(scope: GmailOverview, tab: Option<i64>) -> Element {
 	let mut place = use_signal(String::new);
 	let gmail = scope.gmail.id;
 	rsx! {
@@ -729,7 +740,7 @@ fn Places(scope: GmailOverview, tab: Option<String>) -> Element {
 						gmail,
 						gmail_on: scope.gmail.enabled,
 						loc: loc.clone(),
-						to: Route::at(tab.clone(), View::Place { gmail, target: loc.target.id }),
+						to: Route::at(tab, View::Place { gmail, target: loc.target.id }),
 					}
 				}
 			}

@@ -25,6 +25,7 @@ axum = "0.8"
 browser_manipulation = { git = "https://github.com/valeratrades/browser_manipulation", tag = "v0.2.1" }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
+concierge_iam = "0.1.0"
 crc32fast = "1"
 csv = "1"
 ev_lib = { version = "0.22", default-features = false }
@@ -36,6 +37,7 @@ jiff = { version = "0.2", features = ["serde"] }
 kamadak-exif = "0.6"
 miette = "7"
 rand = "0.10"
+sa_auth = { git = "https://github.com/Service-Arb/panel", rev = "08ef71573c1c3eddaece8f5327cb3e76cbe7b761" }
 ravif = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
 schemars = "1"
@@ -60,7 +62,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = "5"
 v_utils = { version = "2.19", default-features = false, features = ["macros"] }
-va_sso = "0.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 ev_lib_classes = "0.11"

@@ -88,6 +88,7 @@
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes."browser_manipulation-0.2.1" = "sha256-3Je1LiU6dYg0+Vpw2N+rHN/K47oKMfEf12JAncHc5eM=";
+          outputHashes."sa_auth-0.1.0" = "sha256-hxDAZwZNpOA3C5OqY5rcuStGTKG9gsCDMdpipWQNQu8=";
           outputHashes."ev_lib_classes-0.11.0" = "sha256-rwSUyYzP8pWGn7BMBOwsF2XcAB8Y/1POZC0OBkyvI2I=";
         };
         bin = rustPlatform.buildRustPackage {
@@ -148,15 +149,15 @@
           auditable = false;
         };
 
-        # `nix run .#dev-mfe [-- <member email>]`: the dashboard built (debug) into tmp/mfe-dev and
-        # served by a local `serve` at `/`, on the repo's `data/`, signed in as that member
-        # (`--dev-member`: no valeratrades.com needed). Scans run in a Chromium window: a
+        # `nix run .#dev-mfe [-- <held>]`: the dashboard built (debug) into tmp/mfe-dev and
+        # served by a local `serve` at `/`, on the repo's `data/`, signed in holding `<held>`
+        # (`--dev-member`: an alias, permissions comma-separated, or `none`; no panel needed). Scans run in a Chromium window: a
         # headless one gets Maps' limited view (#9).
         devMfe = pkgs.writeShellApplication {
           name = "dev-mfe";
           runtimeInputs = [ pkgs.git ];
           text = ''
-            member="''${1:-test@valeratrades.com}"
+            member="''${1:-sa:admin}"
             repo="$(git rev-parse --show-toplevel)"
             cd "$repo"
             out="$repo/tmp/mfe-dev"
@@ -171,9 +172,6 @@
             executable = "${pkgs.chromium}/bin/chromium"
             headful = true
             EOF
-            # serve wants an operator token; the dashboard never uses it
-            REVIEW_ARCHIVE_TOKEN="$(head -c 24 /dev/urandom | base64)"
-            export REVIEW_ARCHIVE_TOKEN
             exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve --dev-member "$member"
           '';
         };
@@ -223,7 +221,7 @@
             nix build                         the review_archive binary
             nix build .#${pname}-container    OCI image with chromium (Linux only)
             nix build .#mfe                   the dashboard bundle (served under /mfe/)
-            nix run .#dev-mfe [-- <email>]    the dashboard, built and served locally at / as that member
+            nix run .#dev-mfe [-- <held>]     the dashboard, built and served locally at /, holding those permissions
             nix run .#help                    this
             cargo test                        parser snapshots, repository, scheduler, gbp stub
             cargo test -- --ignored live      one real scan; needs a browser and the network

@@ -56,6 +56,16 @@ impl fmt::Display for TargetId {
 	}
 }
 
+/// A person's id in the archive: a concierge account, or an address of one not yet claimed.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PersonId(pub i64);
+
+impl fmt::Display for PersonId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.0.fmt(f)
+	}
+}
+
 /// A review's id in the archive (not the source's id for it).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReviewId(pub i64);

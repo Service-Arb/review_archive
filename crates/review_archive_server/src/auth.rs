@@ -1,122 +1,69 @@
-//! Who is calling. The static `REVIEW_ARCHIVE_TOKEN` bearer is the operator (and the services
-//! using the client crate). A browser comes with valeratrades.com's `va_access` cookie
-//! ([`va_sso`]), verified here with the site's public key: its admins are operators too,
-//! and members of `service-arb` get `/me`; anyone else signed in gets only `GET /me`, to see
-//! they are not in. On `/me` routes an admin acts as any member, named by `X-Member`.
+//! Who is calling: the person the Service-Arb panel vouches for, in the assertion it signs on
+//! every request it forwards ([`sa_auth`]), checked with its public keys
+//! (`PANEL_ASSERTION_KEYS`). What they may do is its `sa:review_archive:*` permissions; who
+//! they are here is a person found or made by its `sub`.
+
+use std::{
+	collections::HashMap,
+	sync::Mutex,
+	time::{Duration, Instant},
+};
 
 use axum::{
 	Json,
 	extract::{FromRequestParts, Request, State},
-	http::{HeaderMap, Method, StatusCode, header, request::Parts},
+	http::{StatusCode, request::Parts},
 	middleware::Next,
 	response::{IntoResponse, Response},
 };
-use review_archive_core::dto::{ErrorBody, MEMBER_HEADER};
-use sha2::{Digest, Sha256};
+use review_archive::store::people::{Claim, Seen};
+use review_archive_core::{
+	PersonId,
+	dto::{ErrorBody, MEMBER_HEADER},
+};
+use sa_auth::{Permission, PermissionSet, Service};
 
 use crate::http::AppState;
 
-pub(crate) const GROUP: &str = "service-arb";
-
-/// Who a request is from: `email` is a signed-in person, `admin` may use the operator's routes,
-/// `member` is in `service-arb` (admins are).
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Who a request is from.
+#[derive(Clone, Debug)]
 pub struct Caller {
-	pub email: Option<String>,
-	pub username: Option<String>,
-	pub admin: bool,
-	pub member: bool,
+	pub person: PersonId,
+	pub email: String,
+	pub permissions: PermissionSet,
 }
 
-/// valeratrades.com, the sign-in: its public key, and its routes a browser or this server goes to.
-pub struct SsoSite {
-	verifier: va_sso::Verifier,
-	/// `/auth/refresh`: where a browser without a live cookie is sent
-	pub refresh: String,
-	/// `/auth/members`, beside it
-	pub(crate) members: reqwest::Url,
+/// Whose word a caller is taken on.
+pub enum Auth {
+	/// The panel's.
+	Panel(sa_auth::Keys),
+	/// `serve --dev-member`: every request is this one person, for a local dashboard.
+	Dev { sub: String, permissions: PermissionSet },
 }
 
-impl SsoSite {
-	pub fn new(verifier: va_sso::Verifier, refresh: &str) -> eyre::Result<Self> {
-		let url: reqwest::Url = refresh.parse().map_err(|e| eyre::eyre!("SSO_REFRESH_URL is not a URL: {refresh}: {e}"))?;
-		eyre::ensure!(matches!(url.scheme(), "https" | "http"), "SSO_REFRESH_URL is not an http(s) URL: {refresh}");
-		Ok(Self {
-			verifier,
-			refresh: refresh.to_owned(),
-			members: url.join("members").expect("a relative path joins any http(s) URL"),
-		})
-	}
-}
+/// Test-posts to Telegram, one per person per [`TEST_GAP`].
+pub struct TestPosts(Mutex<HashMap<PersonId, Instant>>);
 
-pub struct Auth {
-	/// SHA-256 of the admin token: compared as digests, so the comparison time says nothing about it.
-	admin_digest: [u8; 32],
-	pub(crate) sso: Option<SsoSite>,
-	/// Who a request without a token or cookie is: `serve --dev-member`, for a local dashboard.
-	dev_member: Option<String>,
-}
+const TEST_GAP: Duration = Duration::from_secs(60);
 
-impl Auth {
-	/// `sso`: `None` takes only the operator's token.
-	pub fn new(admin_token: &str, sso: Option<SsoSite>, dev_member: Option<String>) -> Self {
-		Self {
-			admin_digest: Sha256::digest(admin_token.as_bytes()).into(),
-			sso,
-			dev_member: dev_member.map(|m| m.to_lowercase()),
-		}
+impl TestPosts {
+	pub fn new() -> Self {
+		Self(Mutex::new(HashMap::new()))
 	}
 
-	fn caller(&self, headers: &HeaderMap, method: &Method) -> Result<Caller, Response> {
-		if let Some(auth) = headers.get(header::AUTHORIZATION) {
-			let token = auth.to_str().ok().and_then(|v| v.strip_prefix("Bearer ")).ok_or_else(unauthorized)?;
-			let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-			return match digest.iter().zip(self.admin_digest.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0 {
-				true => Ok(Caller {
-					email: None,
-					username: None,
-					admin: true,
-					member: false,
-				}),
-				false => Err(unauthorized()),
-			};
+	/// Whether `person` may test-post now; if so, the next waits [`TEST_GAP`].
+	pub fn take(&self, person: PersonId) -> bool {
+		let mut last = self.0.lock().expect("held for a lookup only, never across a panic");
+		let now = Instant::now();
+		last.retain(|_, at| now.duration_since(*at) < TEST_GAP);
+		match last.contains_key(&person) {
+			true => false,
+			false => {
+				last.insert(person, now);
+				true
+			}
 		}
-		let (Some(sso), Some(cookie)) = (&self.sso, cookie(headers, va_sso::COOKIE)) else {
-			return match &self.dev_member {
-				Some(m) => Ok(Caller {
-					email: Some(m.clone()),
-					username: Some(m.clone()),
-					admin: false,
-					member: true,
-				}),
-				None => Err(unauthorized()),
-			};
-		};
-		let claims = sso.verifier.verify(cookie).map_err(|_| unauthorized())?;
-		// a cookie rides along on requests other sites start; only this origin's own may write
-		if !matches!(*method, Method::GET | Method::HEAD) && headers.get("sec-fetch-site").is_none_or(|v| v != "same-origin") {
-			return Err(refuse(StatusCode::FORBIDDEN, "a signed-in write must come from this site's own pages"));
-		}
-		Ok(Caller {
-			member: claims.member_of(GROUP),
-			email: Some(claims.email.to_lowercase()),
-			username: Some(claims.username),
-			admin: claims.admin,
-		})
 	}
-}
-
-pub(crate) fn cookie<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
-	headers
-		.get_all(header::COOKIE)
-		.iter()
-		.filter_map(|v| v.to_str().ok())
-		.flat_map(|v| v.split(';'))
-		.find_map(|c| c.trim().strip_prefix(name)?.strip_prefix('='))
-}
-
-pub(crate) fn not_in(email: &str) -> Response {
-	refuse(StatusCode::FORBIDDEN, &format!("{email} is not a {GROUP} member"))
 }
 
 fn refuse(status: StatusCode, why: &str) -> Response {
@@ -124,48 +71,104 @@ fn refuse(status: StatusCode, why: &str) -> Response {
 }
 
 fn unauthorized() -> Response {
-	let mut r = refuse(StatusCode::UNAUTHORIZED, "unauthorized");
-	r.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
-	r
+	refuse(StatusCode::UNAUTHORIZED, "unauthorized")
 }
 
 /// Every authenticated route: puts the [`Caller`] in the request.
 pub async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-	match state.auth.caller(req.headers(), req.method()) {
-		Ok(caller) => {
-			req.extensions_mut().insert(caller);
-			next.run(req).await
+	let seen = match &*state.auth {
+		Auth::Panel(keys) => {
+			let Some(token) = req.headers().get(sa_auth::HEADER).and_then(|v| v.to_str().ok()) else {
+				return unauthorized();
+			};
+			let now = jiff::Timestamp::now().as_second();
+			match sa_auth::verify(keys, token, Service::ReviewArchive, req.method().as_str(), req.uri().path(), now) {
+				Ok(a) => a,
+				Err(e) => {
+					tracing::warn!(%e, "an assertion refused");
+					return unauthorized();
+				}
+			}
 		}
-		Err(r) => r,
-	}
+		Auth::Dev { sub, permissions } => sa_auth::Assertion {
+			aud: Service::ReviewArchive,
+			sub: sub.clone(),
+			email: format!("{sub}@localhost"),
+			email_verified: true,
+			name: sub.clone(),
+			permissions: permissions.clone(),
+			method: req.method().to_string(),
+			path: req.uri().path().to_owned(),
+			exp: 0,
+		},
+	};
+	let claim = state
+		.archive
+		.person(&Seen {
+			sub: &seen.sub,
+			email: &seen.email,
+			email_verified: seen.email_verified,
+			name: &seen.name,
+		})
+		.await;
+	let person = match claim {
+		Ok(Claim::Person(p)) => p,
+		Ok(Claim::Refused(why)) => {
+			tracing::error!(email = seen.email, sub = seen.sub, %why, "a sign-in matches an address's rows it may not claim");
+			return refuse(
+				StatusCode::FORBIDDEN,
+				&format!("records under {} wait for their owner, and this sign-in cannot claim them: {why}. Ask an admin.", seen.email),
+			);
+		}
+		Err(e) => return crate::http::ApiError::from(e).into_response(),
+	};
+	req.extensions_mut().insert(Caller {
+		person,
+		email: seen.email,
+		permissions: seen.permissions,
+	});
+	next.run(req).await
 }
 
-/// The operator's routes.
-pub async fn admin_only(req: Request, next: Next) -> Response {
-	match req.extensions().get::<Caller>().expect("layered under authenticate").admin {
+async fn require(p: impl Permission, req: Request, next: Next) -> Response {
+	match req.extensions().get::<Caller>().expect("layered under authenticate").permissions.may(p) {
 		true => next.run(req).await,
-		false => refuse(StatusCode::FORBIDDEN, "this route is the operator's"),
+		false => refuse(StatusCode::FORBIDDEN, &format!("this route needs {}", p.as_str())),
 	}
 }
 
-/// Whose `/me` this is: the signed-in person, or the member an admin names in `X-Member`.
-pub struct Member(pub String);
+/// The archive's own routes: targets, scans, captures, hooks, stats, export.
+pub async fn operates_archive(req: Request, next: Next) -> Response {
+	require(sa_auth::Archive::Operate, req, next).await
+}
 
-impl<S: Send + Sync> FromRequestParts<S> for Member {
+/// The members' list and their balances.
+pub async fn grants_tokens(req: Request, next: Next) -> Response {
+	require(sa_auth::Tokens::Grant, req, next).await
+}
+
+/// Whose `/me` this is: the caller, or the person `X-Member` names for one who may act as others.
+pub struct Member(pub PersonId);
+
+impl FromRequestParts<AppState> for Member {
 	type Rejection = Response;
 
-	async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Response> {
+	async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
 		let caller = parts.extensions.get::<Caller>().expect("layered under authenticate");
-		match (parts.headers.get(MEMBER_HEADER), &caller.email) {
-			(Some(m), _) if caller.admin => match m.to_str() {
-				Ok(m) if !m.trim().is_empty() => Ok(Self(m.trim().to_lowercase())),
-				_ => Err(refuse(StatusCode::BAD_REQUEST, "X-Member is not an email")),
-			},
-			(Some(_), _) => Err(refuse(StatusCode::FORBIDDEN, "only an admin acts as another member")),
-			(None, Some(email)) if caller.member => Ok(Self(email.clone())),
-			(None, Some(email)) => Err(not_in(email)),
-			(None, None) => Err(refuse(StatusCode::FORBIDDEN, "/me routes are a signed-in member's, not the operator token's")),
+		let Some(named) = parts.headers.get(MEMBER_HEADER) else {
+			return Ok(Self(caller.person));
+		};
+		if !caller.permissions.may(sa_auth::Members::ActAs) {
+			return Err(refuse(StatusCode::FORBIDDEN, "acting as another member needs sa:review_archive:members:act_as"));
 		}
+		let id = named
+			.to_str()
+			.ok()
+			.and_then(|v| v.trim().parse::<i64>().ok())
+			.map(PersonId)
+			.ok_or_else(|| refuse(StatusCode::BAD_REQUEST, "X-Member is not a person id"))?;
+		state.archive.check_person(id).await.map_err(|e| crate::http::ApiError::from(e).into_response())?;
+		Ok(Self(id))
 	}
 }
 

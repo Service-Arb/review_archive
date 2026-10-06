@@ -2,17 +2,16 @@
 //! address, browser, defaults — is the TOML config (`--config`).
 
 use review_archive::{config::Secrets, sources::gbp::Credentials};
-use review_archive_server::auth::SsoSite;
 
 ev_lib::settings! {
 	/// Each secret is needed only by what uses it; a missing one fails that, with an error
-	/// naming it, rather than the boot. The exception is the API token in production, where
+	/// naming it, rather than the boot. The exception is the panel's keys in production, where
 	/// the only thing this binary runs is `serve`.
 	pub struct Settings {
-		/// Bearer token of the HTTP API, 16+ characters. `serve` refuses to start without it.
-		#[secret]
+		/// The Service-Arb panel's public keys, `<kid>:<base64>` comma-separated: whose
+		/// assertion names the caller ([`sa_auth`]). `serve` refuses to start without them.
 		#[required_in("production")]
-		review_archive_token: Option<String>,
+		panel_assertion_keys: Option<String>,
 		/// Places API key: resolving a Maps URL that carries no place id.
 		#[secret]
 		google_maps_key: Option<String>,
@@ -22,11 +21,6 @@ ev_lib::settings! {
 		gbp_client_secret: Option<String>,
 		#[secret]
 		gbp_refresh_token: Option<String>,
-		/// valeratrades.com's public key (PEM) for the `va_access` sign-in cookie, and its
-		/// `/auth/refresh`, where a browser without a live cookie is sent (`/auth/members` is
-		/// its sibling). Both or neither; unset, only the operator's token works.
-		sso_public_key: Option<String>,
-		sso_refresh_url: Option<String>,
 		/// The bot members' Telegram channels are posted by.
 		#[secret]
 		telegram_bot_token: Option<String>,
@@ -60,18 +54,6 @@ impl Settings {
 		}
 	}
 
-	/// valeratrades.com as the sign-in: `None` takes only the operator's token.
-	pub fn sso(&self) -> eyre::Result<Option<SsoSite>> {
-		match (&self.sso_public_key, &self.sso_refresh_url) {
-			(Some(key), Some(url)) => {
-				let verifier = va_sso::Verifier::try_new(key).map_err(|e| eyre::eyre!("SSO_PUBLIC_KEY is not an Ed25519 public key PEM: {e}"))?;
-				Ok(Some(SsoSite::new(verifier, url)?))
-			}
-			(None, None) => Ok(None),
-			_ => eyre::bail!("SSO_PUBLIC_KEY and SSO_REFRESH_URL go together: set both, or neither"),
-		}
-	}
-
 	/// Where alerts go: `None` sends none.
 	pub fn alert_webhooks(&self) -> eyre::Result<Option<ev_lib::alerts::Webhooks>> {
 		match (&self.alert_webhook_error, &self.alert_webhook_warn) {
@@ -84,11 +66,10 @@ impl Settings {
 		}
 	}
 
-	/// The API token, checked; the error says what `serve` needs.
-	pub fn api_token(&self) -> eyre::Result<&str> {
-		let token = self.review_archive_token.as_deref().ok_or_else(|| eyre::eyre!("REVIEW_ARCHIVE_TOKEN must be set for serve"))?;
-		eyre::ensure!(token.len() >= 16, "REVIEW_ARCHIVE_TOKEN is too short to be a secret (16+ characters)");
-		Ok(token)
+	/// The panel's keys, checked; the error says what `serve` needs.
+	pub fn panel_keys(&self) -> eyre::Result<sa_auth::Keys> {
+		let keys = self.panel_assertion_keys.as_deref().ok_or_else(|| eyre::eyre!("PANEL_ASSERTION_KEYS must be set for serve"))?;
+		keys.parse().map_err(|e| eyre::eyre!("PANEL_ASSERTION_KEYS: {e}"))
 	}
 }
 
@@ -120,13 +101,11 @@ mod tests {
 		assert_eq!(
 			Settings::var_names(),
 			[
-				"REVIEW_ARCHIVE_TOKEN",
+				"PANEL_ASSERTION_KEYS",
 				"GOOGLE_MAPS_KEY",
 				"GBP_CLIENT_ID",
 				"GBP_CLIENT_SECRET",
 				"GBP_REFRESH_TOKEN",
-				"SSO_PUBLIC_KEY",
-				"SSO_REFRESH_URL",
 				"TELEGRAM_BOT_TOKEN",
 				"SENTRY_DSN",
 				"ALERT_WEBHOOK_ERROR",
@@ -134,7 +113,7 @@ mod tests {
 				"APP_ENV"
 			]
 		);
-		assert_eq!(Settings::required_var_names("production"), ["REVIEW_ARCHIVE_TOKEN"]);
+		assert_eq!(Settings::required_var_names("production"), ["PANEL_ASSERTION_KEYS"]);
 		assert!(Settings::required_var_names("development").is_empty());
 	}
 
@@ -147,13 +126,13 @@ mod tests {
 	fn secrets_are_lazy_and_named_when_missing() {
 		let s = from(&[("GBP_CLIENT_ID", "id")]).unwrap();
 		assert!(s.secrets().gbp.is_none(), "a partial GBP triple is none of it");
-		assert_eq!(format!("{:#}", s.api_token().unwrap_err()), "REVIEW_ARCHIVE_TOKEN must be set for serve");
-		assert!(from(&[("REVIEW_ARCHIVE_TOKEN", "short")]).unwrap().api_token().is_err());
+		assert_eq!(format!("{:#}", s.panel_keys().unwrap_err()), "PANEL_ASSERTION_KEYS must be set for serve");
+		assert!(from(&[("PANEL_ASSERTION_KEYS", "k1:short")]).unwrap().panel_keys().is_err());
 
 		let err = from(&[("APP_ENV", "production")]).unwrap_err();
-		assert!(err.to_string().contains("REVIEW_ARCHIVE_TOKEN"), "{err}");
+		assert!(err.to_string().contains("PANEL_ASSERTION_KEYS"), "{err}");
 		// secrets never print
-		let s = from(&[("REVIEW_ARCHIVE_TOKEN", "0123456789abcdef-xyzzy")]).unwrap();
+		let s = from(&[("TELEGRAM_BOT_TOKEN", "0123456789abcdef-xyzzy")]).unwrap();
 		assert!(!format!("{s:?}").contains("xyzzy"));
 	}
 }

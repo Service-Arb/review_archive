@@ -11,6 +11,7 @@ mod events;
 pub mod export;
 mod jobs;
 mod members;
+pub mod people;
 mod png_blobs;
 mod tokens;
 mod webhooks;
@@ -21,7 +22,7 @@ use eyre::WrapErr;
 use jiff::{Timestamp, civil::Date};
 pub use jobs::ClaimedJob;
 use review_archive_core::{
-	GbpLocation, Known, KnownReview, Observed, OwnerPost, Rejected, ReviewId, Target, TargetId, TargetKind, check_lang, content_hash,
+	GbpLocation, Known, KnownReview, Observed, OwnerPost, PersonId, Rejected, ReviewId, Target, TargetId, TargetKind, check_lang, content_hash,
 	dto::{CaptureDto, Counts, DayStats, Event, JobStatus, ReviewDetail, ReviewDto, RunDto, RunStatus, TargetPatch, VersionDto, capture_url},
 	fmt_ts, parse_interval,
 	reconcile::Plan,
@@ -102,7 +103,7 @@ pub struct RunEnd<'a> {
 	/// What its walk spent; a failed one too, Google saw it all the same.
 	pub tokens: i64,
 	/// Who pays for it: [`Bill::payers`].
-	pub payers: &'a [String],
+	pub payers: &'a [PersonId],
 }
 
 /// What a scan saw, ready to be written.

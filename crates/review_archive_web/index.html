@@ -3,6 +3,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>review_archive</title>
 <body style="margin: 0; background: var(--background)">
-	<mfe-review-archive-dashboard sign-in="{sign_in}"></mfe-review-archive-dashboard>
+	<div style="height: 100dvh">
+		<mfe-review-archive-dashboard api="/" sign-in="{sign_in}" csrf-cookie="review_archive_dev_csrf" base=""></mfe-review-archive-dashboard>
+	</div>
 	<script type="module" src="/mfe/mfe-review-archive-dashboard.js"></script>
 </body>
