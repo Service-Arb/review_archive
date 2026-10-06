@@ -418,7 +418,7 @@ async fn me(State(s): State<AppState>, caller: Caller) -> ApiResult<Json<Me>> {
 	let mine = s.archive.store()?.person_by_id(caller.person).await?.expect("authenticate found or made them");
 	Ok(Json(Me {
 		id: caller.person.0,
-		email: caller.email,
+		email: mine.email,
 		name: mine.name,
 		permissions: caller.permissions.iter().map(str::to_owned).collect(),
 		tokens: s.archive.tokens(caller.person).await?,
