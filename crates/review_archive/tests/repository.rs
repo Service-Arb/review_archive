@@ -509,10 +509,10 @@ async fn a_scan_the_store_refuses_is_a_failed_run() {
 	assert!(e.by_source_id().await.is_empty(), "nothing of it was stored");
 }
 
-/// Captures stored as PNG, from before AVIF: converted when the archive opens, keeping the
-/// provenance their `tEXt` chunks carry, and the outbox's payloads follow them.
+/// Captures stored as PNG, from before AVIF: converted (`serve` does it beside its worker),
+/// keeping the provenance their `tEXt` chunks carry, and the outbox's payloads follow them.
 #[tokio::test]
-async fn png_captures_become_avif_on_open() {
+async fn png_captures_become_avif() {
 	use review_archive::core::dto::{Event, NewWebhook};
 	use sha2::Digest;
 
@@ -573,7 +573,9 @@ async fn png_captures_become_avif_on_open() {
 			data_dir: Some(e.dir.path().to_owned()),
 			..Default::default()
 		};
-		review_archive::Archive::open(config).await.unwrap().close().await;
+		let archive = review_archive::Archive::open(config).await.unwrap();
+		archive.convert_png_blobs().await.unwrap();
+		archive.close().await;
 	};
 	open().await;
 	let new = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
@@ -590,5 +592,5 @@ async fn png_captures_become_avif_on_open() {
 	assert!(payloads[0].contains(&format!("\"/captures/{new}.avif\"")) && !payloads[0].contains(&old), "{}", payloads[0]);
 
 	open().await;
-	assert_eq!(e.by_source_id().await["a"].capture_sha256.as_deref(), Some(new.as_str()), "a second open does nothing");
+	assert_eq!(e.by_source_id().await["a"].capture_sha256.as_deref(), Some(new.as_str()), "a second pass does nothing");
 }
