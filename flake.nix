@@ -171,9 +171,6 @@
             executable = "${pkgs.chromium}/bin/chromium"
             headful = true
             EOF
-            # serve wants an operator token; the dashboard never uses it
-            REVIEW_ARCHIVE_TOKEN="$(head -c 24 /dev/urandom | base64)"
-            export REVIEW_ARCHIVE_TOKEN
             exec nix develop "$repo" --command cargo r -p review_archive_server -- --config "$out/config.toml" serve --dev-member "$member"
           '';
         };
