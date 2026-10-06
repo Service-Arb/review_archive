@@ -196,6 +196,14 @@ impl Archive {
 		Self::open_inner(config, browser).await
 	}
 
+	/// The PNG captures from before AVIF, converted one by one; `serve` runs it beside its
+	/// worker, so a large backlog never holds up the boot.
+	#[cfg(feature = "store")]
+	pub async fn convert_png_blobs(&self) -> eyre::Result<()> {
+		let stored = self.stored()?;
+		stored.store.convert_png_blobs(&stored.blobs).await
+	}
+
 	async fn open_inner(config: Config, #[cfg(feature = "maps")] browser: Browser) -> eyre::Result<Self> {
 		#[cfg(feature = "store")]
 		let store = match (config.db_path(), config.blob_dir()) {
@@ -204,7 +212,6 @@ impl Archive {
 					store: Store::open(&db).await?,
 					blobs: BlobStore::new(blobs),
 				};
-				stored.store.convert_png_blobs(&stored.blobs).await?;
 				Some(stored)
 			}
 			_ => None,

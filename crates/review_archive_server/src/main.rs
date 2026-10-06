@@ -386,12 +386,20 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 		Ok::<_, eyre::Report>(())
 	};
 	let deliver = worker::deliver(&archive, &config.worker, rx.clone());
+	let mut stop = rx.clone();
 	let work = async {
 		let r = worker::run(&archive, &signals, &config.worker, &config.schedule, rx).await;
 		archive.close().await;
 		r
 	};
-	tokio::try_join!(http, work, deliver, signal)?;
+	// resumable per blob: a shutdown midway leaves the rest for the next boot
+	let convert = async {
+		tokio::select! {
+			r = archive.convert_png_blobs() => r,
+			_ = stop.wait_for(|stopped| *stopped) => Ok(()),
+		}
+	};
+	tokio::try_join!(http, work, deliver, convert, signal)?;
 	Ok(())
 }
 

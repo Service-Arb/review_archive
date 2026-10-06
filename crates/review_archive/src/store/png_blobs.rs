@@ -18,12 +18,10 @@ impl Store {
 			return Ok(());
 		}
 		tracing::info!(count = pngs.len(), "converting PNG captures to AVIF");
-		// one encode keeps ~2 cores busy
-		let parallel = std::thread::available_parallelism()?.get();
 		let mut done = 0;
+		// one at a time: an encode's buffers are the pod's memory budget, and nobody waits on this
 		futures::stream::iter(&pngs)
-			.map(|path| async move { self.convert(blobs, path).await.wrap_err_with(|| format!("converting {}", path.display())) })
-			.buffer_unordered(parallel)
+			.then(|path| async move { self.convert(blobs, path).await.wrap_err_with(|| format!("converting {}", path.display())) })
 			.try_for_each(|()| {
 				done += 1;
 				if done % 500 == 0 {
