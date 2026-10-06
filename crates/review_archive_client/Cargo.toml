@@ -28,9 +28,9 @@ eyre.workspace = true
 jiff.workspace = true
 review_archive = { workspace = true, features = ["maps", "store"] }
 review_archive_server.workspace = true
-tempfile.workspace = true
 sa_auth.workspace = true
 sqlx.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
 zip.workspace = true
 

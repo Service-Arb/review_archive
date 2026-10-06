@@ -26,10 +26,10 @@ ev_lib = { workspace = true, features = ["settings", "error_monitoring", "otel",
 eyre.workspace = true
 jiff.workspace = true
 rand.workspace = true
-sa_auth = { workspace = true, features = ["catalog"] }
 reqwest.workspace = true
 review_archive = { workspace = true, features = ["maps", "settings", "store"] }
 review_archive_core = { workspace = true, features = ["openapi"] }
+sa_auth = { workspace = true, features = ["catalog"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

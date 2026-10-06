@@ -37,9 +37,9 @@ jiff = { version = "0.2", features = ["serde"] }
 kamadak-exif = "0.6"
 miette = "7"
 rand = "0.10"
-sa_auth = { git = "https://github.com/Service-Arb/panel", rev = "08ef71573c1c3eddaece8f5327cb3e76cbe7b761" }
 ravif = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
+sa_auth = { git = "https://github.com/Service-Arb/panel", rev = "08ef71573c1c3eddaece8f5327cb3e76cbe7b761" }
 schemars = "1"
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
