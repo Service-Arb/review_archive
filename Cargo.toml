@@ -25,7 +25,7 @@ axum = "0.8"
 browser_manipulation = { git = "https://github.com/valeratrades/browser_manipulation", tag = "v0.2.1" }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
-concierge_iam = { git = "https://github.com/EV-invest/concierge", rev = "7930abfe66b6370d40f75d480ceed4f1b418f406" }
+concierge_iam = "0.1.0"
 crc32fast = "1"
 csv = "1"
 ev_lib = { version = "0.22", default-features = false }
@@ -37,7 +37,7 @@ jiff = { version = "0.2", features = ["serde"] }
 kamadak-exif = "0.6"
 miette = "7"
 rand = "0.10"
-sa_auth = { path = "/home/v/s/ev_invest/_service_arb/panel/tmp/wt/v-iam/crates/sa_auth" }
+sa_auth = { git = "https://github.com/Service-Arb/panel", rev = "08ef71573c1c3eddaece8f5327cb3e76cbe7b761" }
 ravif = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
 schemars = "1"

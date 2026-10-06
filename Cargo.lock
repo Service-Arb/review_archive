@@ -945,7 +945,8 @@ dependencies = [
 [[package]]
 name = "concierge_iam"
 version = "0.1.0"
-source = "git+https://github.com/EV-invest/concierge?rev=7930abfe66b6370d40f75d480ceed4f1b418f406#7930abfe66b6370d40f75d480ceed4f1b418f406"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a20dc8e022fa9b2342f6d6021debbde4891a0c4563d020dee4c25b16f1fd3fd"
 dependencies = [
  "concierge_iam_derive",
  "inventory",
@@ -955,7 +956,8 @@ dependencies = [
 [[package]]
 name = "concierge_iam_derive"
 version = "0.1.0"
-source = "git+https://github.com/EV-invest/concierge?rev=7930abfe66b6370d40f75d480ceed4f1b418f406#7930abfe66b6370d40f75d480ceed4f1b418f406"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c476924abf60e075153c756af3b9b86cbdce1c54f5a82754d8d0787983e2f8"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -5787,6 +5789,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "sa_auth"
 version = "0.1.0"
+source = "git+https://github.com/Service-Arb/panel?rev=08ef71573c1c3eddaece8f5327cb3e76cbe7b761#08ef71573c1c3eddaece8f5327cb3e76cbe7b761"
 dependencies = [
  "base64 0.22.1",
  "concierge_iam",
