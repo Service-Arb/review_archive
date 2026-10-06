@@ -21,7 +21,7 @@ use axum::{
 };
 use review_archive::{Archive, Rejected, store::export::Destination};
 use review_archive_core::{
-	ReviewId, TargetId,
+	PersonId, ReviewId, TargetId,
 	dto::{
 		Board, CaptureRequest, DayStats, ErrorBody, EventPayload, ExportQuery, GmailDto, GmailOverview, JobAccepted, JobDto, LedgerEntry, Me, MemberDto, NewGmail, NewTarget, NewTgChannel,
 		NewTrack, NewWebhook, ReinstatementDto, ReviewDetail, ReviewDto, ReviewsQuery, RunDto, RunsQuery, StatsQuery, Switch, TargetDetail, TargetDto, TargetPatch, TgChannelDto,
@@ -34,12 +34,12 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::{services::ServeDir, timeout::TimeoutLayer};
 use utoipa::{
 	OpenApi,
-	openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+	openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
 };
 use v_utils::{Timeframe, macros::SettingsNested};
 
 use crate::{
-	auth::{Auth, Caller, GROUP, Member, admin_only, authenticate, cookie, not_in},
+	auth::{Auth, Caller, Member, TestPosts, authenticate, grants_tokens, operates_archive},
 	worker::Signals,
 };
 
@@ -63,6 +63,7 @@ pub struct HttpConfig {
 pub struct AppState {
 	pub archive: Archive,
 	pub auth: Arc<Auth>,
+	pub test_posts: Arc<TestPosts>,
 	pub signals: Arc<Signals>,
 	pub cfg: Arc<HttpConfig>,
 }
@@ -72,6 +73,7 @@ impl AppState {
 		Self {
 			archive,
 			auth: Arc::new(auth),
+			test_posts: Arc::new(TestPosts::new()),
 			signals,
 			cfg: Arc::new(cfg),
 		}
@@ -93,10 +95,11 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/stats", get(stats))
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
+		.route_layer(middleware::from_fn(operates_archive));
+	let tokens = Router::new()
 		.route("/members", get(members))
-		.route("/members/{member}", axum::routing::put(add_member).delete(remove_member))
-		.route("/members/{email}/tokens", post(change_tokens))
-		.route_layer(middleware::from_fn(admin_only));
+		.route("/members/{id}/tokens", post(change_tokens))
+		.route_layer(middleware::from_fn(grants_tokens));
 	let me = Router::new()
 		.route("/me", get(me))
 		.route("/me/tokens", get(ledger))
@@ -111,12 +114,13 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/me/tg-channels/{id}", axum::routing::delete(delete_tg_channel))
 		.route("/me/tg-channels/{id}/test", post(test_tg_channel));
 	let timed = admin
+		.merge(tokens)
 		.merge(me)
 		.route("/captures/{file}", get(capture_avif))
 		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, state.cfg.request_timeout.duration()));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
-		.merge(Router::new().route("/targets/{id}/export.zip", get(export_zip)).route_layer(middleware::from_fn(admin_only)))
+		.merge(Router::new().route("/targets/{id}/export.zip", get(export_zip)).route_layer(middleware::from_fn(operates_archive)))
 		.layer(GlobalConcurrencyLimitLayer::new(state.cfg.max_concurrent))
 		.route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 	// the probes answer whatever load the API is under
@@ -343,11 +347,9 @@ async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Jso
 	responses((status = 200, content_type = "image/avif"), (status = 404, body = ErrorBody)))]
 async fn capture_avif(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
 	let sha = file.strip_suffix(".avif").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
-	let avif = match (caller.admin, caller.email) {
-		(true, _) => s.archive.capture_avif(sha).await?,
-		(false, Some(m)) if caller.member => s.archive.member_capture_avif(&m, sha).await?,
-		(false, Some(m)) => return Ok(not_in(&m)),
-		(false, None) => unreachable!("a caller is an admin or signed in"),
+	let avif = match caller.permissions.may(sa_auth::Archive::Operate) {
+		true => s.archive.capture_avif(sha).await?,
+		false => s.archive.member_capture_avif(caller.person, sha).await?,
 	};
 	// behind auth, so no shared cache may keep it; the name is its hash, so it never changes
 	Ok(([(header::CONTENT_TYPE, "image/avif"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], avif).into_response())
@@ -409,136 +411,63 @@ async fn delete_webhook(State(s): State<AppState>, Path(id): Path<i64>) -> ApiRe
 	Ok(StatusCode::NO_CONTENT)
 }
 
-/// Who is signed in, whoever `X-Member` names.
-#[utoipa::path(get, path = "/me", tag = "me", responses((status = 200, body = Me), (status = 403, body = ErrorBody)))]
+/// Who is signed in.
+#[utoipa::path(get, path = "/me", tag = "me", responses((status = 200, body = Me)))]
 async fn me(State(s): State<AppState>, caller: Caller) -> ApiResult<Json<Me>> {
-	match (caller.email, caller.username) {
-		(Some(email), Some(username)) => Ok(Json(Me {
-			tokens: match caller.member {
-				true => Some(s.archive.tokens(&email).await?),
-				false => None,
-			},
-			email,
-			username,
-			admin: caller.admin,
-			member: caller.member,
-		})),
-		_ => Err(ApiError(StatusCode::FORBIDDEN, "the operator's token is no one".into())),
-	}
+	let mine = s.archive.store()?.person_by_id(caller.person).await?.expect("authenticate found or made them");
+	Ok(Json(Me {
+		id: caller.person.0,
+		email: caller.email,
+		name: mine.name,
+		permissions: caller.permissions.iter().map(str::to_owned).collect(),
+		tokens: s.archive.tokens(caller.person).await?,
+	}))
 }
 
-/// Everyone in `service-arb`, as valeratrades.com lists them, asked with the admin's own sign-in.
-#[utoipa::path(get, path = "/members", tag = "me", responses((status = 200, body = [MemberDto]), (status = 403, body = ErrorBody), (status = 502, body = ErrorBody)))]
-async fn members(State(s): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<MemberDto>>> {
-	#[derive(Deserialize)]
-	struct Listed {
-		email: String,
-		username: Option<String>,
-		display_name: Option<String>,
-	}
-	let resp = site_members(&s, &headers, reqwest::Method::GET, &[]).await?;
-	let listed: Vec<Listed> = resp.json().await.map_err(|e| site_failed(e.into()))?;
-	let mut out = Vec::with_capacity(listed.len());
-	for m in listed {
-		out.push(MemberDto {
-			balance: s.archive.tokens(&m.email.to_lowercase()).await?.balance,
-			email: m.email,
-			username: m.username,
-			display_name: m.display_name,
-		});
-	}
-	Ok(Json(out))
+/// Everyone who signed in here, and the addresses from before people had ids, with their balances.
+#[utoipa::path(get, path = "/members", tag = "me", responses((status = 200, body = [MemberDto]), (status = 403, body = ErrorBody)))]
+async fn members(State(s): State<AppState>) -> ApiResult<Json<Vec<MemberDto>>> {
+	Ok(Json(s.archive.members().await?))
 }
 
-/// Puts someone in `service-arb` on valeratrades.com: signed in there with this email, they are a member.
-#[utoipa::path(put, path = "/members/{member}", tag = "me", params(("member" = String, Path)),
-	responses((status = 204), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 502, body = ErrorBody)))]
-async fn add_member(State(s): State<AppState>, headers: HeaderMap, Path(email): Path<String>) -> ApiResult<StatusCode> {
-	site_members(&s, &headers, reqwest::Method::PUT, &[("email", &email)]).await?;
-	Ok(StatusCode::NO_CONTENT)
-}
-
-/// Takes someone out of `service-arb`; their sign-in drops it within its 15 minutes.
-#[utoipa::path(delete, path = "/members/{member}", tag = "me", params(("member" = String, Path)),
-	responses((status = 204), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody), (status = 502, body = ErrorBody)))]
-async fn remove_member(State(s): State<AppState>, headers: HeaderMap, Path(email): Path<String>) -> ApiResult<StatusCode> {
-	site_members(&s, &headers, reqwest::Method::DELETE, &[("email", &email)]).await?;
-	Ok(StatusCode::NO_CONTENT)
-}
-
-/// valeratrades.com's `/auth/members` for `service-arb`, asked with the admin's own sign-in; its
-/// refusals pass through as they are.
-async fn site_members(s: &AppState, headers: &HeaderMap, method: reqwest::Method, query: &[(&str, &str)]) -> ApiResult<reqwest::Response> {
-	let (Some(sso), Some(access)) = (&s.auth.sso, cookie(headers, va_sso::COOKIE)) else {
-		return Err(ApiError(
-			StatusCode::FORBIDDEN,
-			"the site keeps members for a signed-in admin, not for the operator's token".into(),
-		));
-	};
-	let resp = reqwest::Client::new()
-		.request(method, sso.members.clone())
-		.query(&[("group", GROUP)])
-		.query(query)
-		.header(header::COOKIE, format!("{}={access}", va_sso::COOKIE))
-		.timeout(Duration::from_secs(10))
-		.send()
-		.await
-		.map_err(|e| site_failed(e.into()))?;
-	let status = resp.status();
-	if status.is_success() {
-		return Ok(resp);
-	}
-	let why = resp.text().await.map_err(|e| site_failed(e.into()))?;
-	match status {
-		reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND =>
-			Err(ApiError(StatusCode::from_u16(status.as_u16()).expect("a reqwest status is an http status"), why)),
-		_ => Err(site_failed(eyre::eyre!("{} answered {status}: {why}", sso.members))),
-	}
-}
-
-fn site_failed(e: eyre::Report) -> ApiError {
-	crate::report(&e, "asking valeratrades.com for members");
-	ApiError(StatusCode::BAD_GATEWAY, "valeratrades.com did not answer for the members".into())
-}
-
-/// Sets a member's balance, or adds to it (a grant, a purchase); an admin's.
-#[utoipa::path(post, path = "/members/{email}/tokens", tag = "me", params(("email" = String, Path)), request_body = TokensChange,
-	responses((status = 200, body = TokensDto), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
-async fn change_tokens(State(s): State<AppState>, caller: Caller, Path(email): Path<String>, JsonBody(req): JsonBody<TokensChange>) -> ApiResult<Json<TokensDto>> {
-	let by = caller.email.as_deref().unwrap_or("operator");
-	Ok(Json(s.archive.change_tokens(&email.trim().to_lowercase(), &req, by).await?))
+/// Sets a member's balance, or adds to it (a grant, a purchase).
+#[utoipa::path(post, path = "/members/{id}/tokens", tag = "me", params(("id" = i64, Path)), request_body = TokensChange,
+	responses((status = 200, body = TokensDto), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn change_tokens(State(s): State<AppState>, caller: Caller, Path(id): Path<i64>, JsonBody(req): JsonBody<TokensChange>) -> ApiResult<Json<TokensDto>> {
+	s.archive.check_person(PersonId(id)).await?;
+	Ok(Json(s.archive.change_tokens(PersonId(id), &req, &caller.email).await?))
 }
 
 /// The member's token ledger, newest first; each charge with its run and place.
 #[utoipa::path(get, path = "/me/tokens", tag = "me", responses((status = 200, body = [LedgerEntry])))]
 async fn ledger(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<LedgerEntry>>> {
-	Ok(Json(s.archive.ledger(&m).await?))
+	Ok(Json(s.archive.ledger(m).await?))
 }
 
 /// The member's gmails, each with its places, by screenshots over the last 7 days.
 #[utoipa::path(get, path = "/me/overview", tag = "me", responses((status = 200, body = [GmailOverview])))]
 async fn overview(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<GmailOverview>>> {
-	Ok(Json(s.archive.overview(&m).await?))
+	Ok(Json(s.archive.overview(m).await?))
 }
 
 /// Adds a managing gmail: the Google account a group of the member's places is managed from.
 #[utoipa::path(post, path = "/me/gmails", tag = "me", request_body = NewGmail, responses((status = 201, body = GmailDto), (status = 400, body = ErrorBody)))]
 async fn add_gmail(State(s): State<AppState>, Member(m): Member, JsonBody(req): JsonBody<NewGmail>) -> ApiResult<(StatusCode, Json<GmailDto>)> {
-	Ok((StatusCode::CREATED, Json(s.archive.add_gmail(&m, &req).await?)))
+	Ok((StatusCode::CREATED, Json(s.archive.add_gmail(m, &req).await?)))
 }
 
 /// Removes a gmail with its tracks and the Telegram channels scoped to it. A gmail with
 /// reinstatement requests on record is kept (400).
 #[utoipa::path(delete, path = "/me/gmails/{gmail}", tag = "me", params(("gmail" = i64, Path)), responses((status = 204), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
 async fn delete_gmail(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>) -> ApiResult<StatusCode> {
-	s.archive.delete_gmail(&m, gmail).await?;
+	s.archive.delete_gmail(m, gmail).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
 /// Switches a gmail on or off. Its places are scanned while some member has them on under a gmail that is on.
 #[utoipa::path(patch, path = "/me/gmails/{gmail}", tag = "me", params(("gmail" = i64, Path)), request_body = Switch, responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn set_gmail_enabled(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>, JsonBody(req): JsonBody<Switch>) -> ApiResult<StatusCode> {
-	s.archive.set_gmail_enabled(&m, gmail, req.enabled).await?;
+	s.archive.set_gmail_enabled(m, gmail, req.enabled).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
@@ -547,14 +476,14 @@ async fn set_gmail_enabled(State(s): State<AppState>, Member(m): Member, Path(gm
 #[utoipa::path(post, path = "/me/gmails/{gmail}/tracks", tag = "me", params(("gmail" = i64, Path)), request_body = NewTrack,
 	responses((status = 201, body = TargetDto), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
 async fn track(State(s): State<AppState>, Member(m): Member, Path(gmail): Path<i64>, JsonBody(req): JsonBody<NewTrack>) -> ApiResult<(StatusCode, Json<TargetDto>)> {
-	Ok((StatusCode::CREATED, Json(s.archive.track(&m, gmail, &req).await?)))
+	Ok((StatusCode::CREATED, Json(s.archive.track(m, gmail, &req).await?)))
 }
 
 /// Stops tracking; the place and its archive stay.
 #[utoipa::path(delete, path = "/me/gmails/{gmail}/tracks/{target}", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)),
 	responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn untrack(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>) -> ApiResult<StatusCode> {
-	s.archive.untrack(&m, gmail, TargetId(target)).await?;
+	s.archive.untrack(m, gmail, TargetId(target)).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
@@ -562,7 +491,7 @@ async fn untrack(State(s): State<AppState>, Member(m): Member, Path((gmail, targ
 #[utoipa::path(patch, path = "/me/gmails/{gmail}/tracks/{target}", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)), request_body = Switch,
 	responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn set_track_enabled(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>, JsonBody(req): JsonBody<Switch>) -> ApiResult<StatusCode> {
-	s.archive.set_track_enabled(&m, gmail, TargetId(target), req.enabled).await?;
+	s.archive.set_track_enabled(m, gmail, TargetId(target), req.enabled).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
@@ -570,7 +499,7 @@ async fn set_track_enabled(State(s): State<AppState>, Member(m): Member, Path((g
 #[utoipa::path(get, path = "/me/gmails/{gmail}/locations/{target}/board", tag = "me", params(("gmail" = i64, Path), ("target" = i64, Path)),
 	responses((status = 200, body = Board), (status = 404, body = ErrorBody)))]
 async fn board(State(s): State<AppState>, Member(m): Member, Path((gmail, target)): Path<(i64, i64)>) -> ApiResult<Json<Board>> {
-	Ok(Json(s.archive.board(&m, gmail, TargetId(target)).await?))
+	Ok(Json(s.archive.board(m, gmail, TargetId(target)).await?))
 }
 
 /// Records that the removed review's reinstatement was asked of Google, now. Asking again
@@ -578,41 +507,44 @@ async fn board(State(s): State<AppState>, Member(m): Member, Path((gmail, target
 #[utoipa::path(put, path = "/me/gmails/{gmail}/reinstatements/{review}", tag = "me", params(("gmail" = i64, Path), ("review" = i64, Path)),
 	responses((status = 200, body = ReinstatementDto), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
 async fn reinstate(State(s): State<AppState>, Member(m): Member, Path((gmail, review)): Path<(i64, i64)>) -> ApiResult<Json<ReinstatementDto>> {
-	Ok(Json(s.archive.reinstate(&m, gmail, ReviewId(review)).await?))
+	Ok(Json(s.archive.reinstate(m, gmail, ReviewId(review)).await?))
 }
 
 /// Withdraws the open request; it stays on record as withdrawn.
 #[utoipa::path(delete, path = "/me/gmails/{gmail}/reinstatements/{review}", tag = "me", params(("gmail" = i64, Path), ("review" = i64, Path)),
 	responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn withdraw(State(s): State<AppState>, Member(m): Member, Path((gmail, review)): Path<(i64, i64)>) -> ApiResult<StatusCode> {
-	s.archive.withdraw_reinstatement(&m, gmail, ReviewId(review)).await?;
+	s.archive.withdraw_reinstatement(m, gmail, ReviewId(review)).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(get, path = "/me/tg-channels", tag = "me", responses((status = 200, body = [TgChannelDto])))]
 async fn tg_channels(State(s): State<AppState>, Member(m): Member) -> ApiResult<Json<Vec<TgChannelDto>>> {
-	Ok(Json(s.archive.tg_channels(&m).await?))
+	Ok(Json(s.archive.tg_channels(m).await?))
 }
 
 /// Sends the events of the member's places to a Telegram chat, through the archive's bot —
 /// which has to be in the chat, allowed to post. A removed review comes with its screenshot.
 #[utoipa::path(post, path = "/me/tg-channels", tag = "me", request_body = NewTgChannel, responses((status = 201, body = TgChannelDto), (status = 400, body = ErrorBody)))]
 async fn add_tg_channel(State(s): State<AppState>, Member(m): Member, JsonBody(req): JsonBody<NewTgChannel>) -> ApiResult<(StatusCode, Json<TgChannelDto>)> {
-	Ok((StatusCode::CREATED, Json(s.archive.add_tg_channel(&m, &req).await?)))
+	Ok((StatusCode::CREATED, Json(s.archive.add_tg_channel(m, &req).await?)))
 }
 
 /// Removes a channel and what it was still owed.
 #[utoipa::path(delete, path = "/me/tg-channels/{id}", tag = "me", params(("id" = i64, Path)), responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn delete_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-	s.archive.delete_tg_channel(&m, id).await?;
+	s.archive.delete_tg_channel(m, id).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
 /// Posts a line to the channel now. 400 with Telegram's reason when it refuses.
 #[utoipa::path(post, path = "/me/tg-channels/{id}/test", tag = "me", params(("id" = i64, Path)),
-	responses((status = 204), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody)))]
+	responses((status = 204), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody), (status = 429, body = ErrorBody)))]
 async fn test_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-	s.archive.test_tg_channel(&m, id).await?;
+	if !s.test_posts.take(m) {
+		return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "one test post a minute".into()));
+	}
+	s.archive.test_tg_channel(m, id).await?;
 	Ok(StatusCode::NO_CONTENT)
 }
 
@@ -625,16 +557,16 @@ async fn test_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id):
 	),
 	// what no path returns: the body of a webhook delivery
 	components(schemas(EventPayload)),
-	security(("bearer" = [])),
-	modifiers(&BearerAuth)
+	security(("panel_assertion" = [])),
+	modifiers(&PanelAssertion)
 )]
 pub struct ApiDoc;
 
-struct BearerAuth;
+struct PanelAssertion;
 
-impl utoipa::Modify for BearerAuth {
+impl utoipa::Modify for PanelAssertion {
 	fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
 		let components = openapi.components.get_or_insert_with(Default::default);
-		components.add_security_scheme("bearer", SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()));
+		components.add_security_scheme("panel_assertion", SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(sa_auth::HEADER))));
 	}
 }

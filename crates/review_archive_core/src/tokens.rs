@@ -34,9 +34,9 @@ pub fn accrue(balance: i64, last: Timestamp, now: Timestamp, daily: i64, cap: i6
 
 /// `cost` over `payers` (`(who, balance)`): equal shares, none past its payer's balance, what
 /// one cannot pay going to the others. A cost past every balance together is charged up to them.
-pub fn split(cost: i64, payers: &[(String, i64)]) -> Vec<(String, i64)> {
+pub fn split<W: Clone>(cost: i64, payers: &[(W, i64)]) -> Vec<(W, i64)> {
 	assert!(cost >= 0 && payers.iter().all(|(_, b)| *b >= 0), "costs and balances are never negative");
-	let mut by_balance: Vec<&(String, i64)> = payers.iter().collect();
+	let mut by_balance: Vec<&(W, i64)> = payers.iter().collect();
 	by_balance.sort_by_key(|(_, b)| *b);
 	let mut left = cost;
 	let n = by_balance.len() as i64;

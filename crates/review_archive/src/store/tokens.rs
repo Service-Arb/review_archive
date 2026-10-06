@@ -4,7 +4,7 @@
 use eyre::WrapErr;
 use jiff::{SignedDuration, Timestamp};
 use review_archive_core::{
-	Rejected, TargetId,
+	PersonId, Rejected, TargetId,
 	dto::{BalanceChange, LedgerEntry, TokenKind},
 	fmt_ts,
 	maps::cost,
@@ -18,7 +18,7 @@ use super::{RunId, Store, parse_ts};
 #[derive(Clone, Debug)]
 pub struct Bill {
 	/// The members tracking it; none for a place nobody tracks, or the operator's own scan.
-	pub payers: Vec<String>,
+	pub payers: Vec<PersonId>,
 	/// Their balances together, within what the account has left this hour.
 	pub allowance: i64,
 }
@@ -46,7 +46,7 @@ struct LedgerRow {
 
 impl Store {
 	/// The member's balance at `now`, renewed up to it.
-	pub async fn balance(&self, member: &str, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
+	pub async fn balance(&self, member: PersonId, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
 		let mut tx = self.write().await?;
 		let b = renewed(&mut tx, member, now, cfg).await?;
 		tx.commit().await.wrap_err("committing a renewal")?;
@@ -54,7 +54,7 @@ impl Store {
 	}
 
 	/// Changes the member's balance as an admin (`by`) asks; the new balance comes back.
-	pub async fn change_balance(&self, member: &str, change: BalanceChange, by: &str, note: Option<&str>, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
+	pub async fn change_balance(&self, member: PersonId, change: BalanceChange, by: &str, note: Option<&str>, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
 		let mut tx = self.write().await?;
 		let balance = renewed(&mut tx, member, now, cfg).await?;
 		let (kind, delta) = match change {
@@ -63,8 +63,8 @@ impl Store {
 			BalanceChange::Purchase(n) if n > 0 => (TokenKind::Purchase, n),
 			_ => return Err(Rejected::invalid("a balance is set to 0 or more, and grants and purchases add 1 or more").into()),
 		};
-		sqlx::query("INSERT INTO token_ledger (member_email, at, delta, kind, by_email, note) VALUES (?, ?, ?, ?, ?, ?)")
-			.bind(member)
+		sqlx::query("INSERT INTO token_ledger (person_id, at, delta, kind, by_email, note) VALUES (?, ?, ?, ?, ?, ?)")
+			.bind(member.0)
 			.bind(fmt_ts(now))
 			.bind(delta)
 			.bind(kind.as_ref())
@@ -78,13 +78,13 @@ impl Store {
 	}
 
 	/// The member's ledger, newest first; days renewal added nothing to are left out.
-	pub async fn ledger(&self, member: &str, limit: u32) -> eyre::Result<Vec<LedgerEntry>> {
+	pub async fn ledger(&self, member: PersonId, limit: u32) -> eyre::Result<Vec<LedgerEntry>> {
 		let rows: Vec<LedgerRow> = sqlx::query_as(
 			"SELECT l.at, l.delta, l.kind, l.by_email, l.note, l.run_id, r.target_id, t.label
 			 FROM token_ledger l LEFT JOIN runs r ON r.id = l.run_id LEFT JOIN targets t ON t.id = r.target_id
-			 WHERE l.member_email = ? AND l.delta != 0 ORDER BY l.id DESC LIMIT ?",
+			 WHERE l.person_id = ? AND l.delta != 0 ORDER BY l.id DESC LIMIT ?",
 		)
-		.bind(member)
+		.bind(member.0)
 		.bind(limit)
 		.fetch_all(&self.pool)
 		.await
@@ -129,11 +129,11 @@ impl Store {
 		Ok(self.held_together(&payers, now, cfg).await? < cost::FIRST_SCREEN)
 	}
 
-	async fn held_together(&self, members: &[String], now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
+	async fn held_together(&self, members: &[PersonId], now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
 		let mut tx = self.write().await?;
 		let mut held = 0;
 		for m in members {
-			held += renewed(&mut tx, m, now, cfg).await?;
+			held += renewed(&mut tx, *m, now, cfg).await?;
 		}
 		tx.commit().await.wrap_err("committing renewals")?;
 		Ok(held)
@@ -163,23 +163,24 @@ impl Store {
 	}
 
 	/// Members with a track of `target` on, under a gmail that is on.
-	async fn trackers(&self, target: TargetId) -> eyre::Result<Vec<String>> {
-		sqlx::query_scalar(
-			"SELECT DISTINCT g.member_email FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id
-			 WHERE k.target_id = ? AND k.enabled AND g.enabled ORDER BY g.member_email",
+	async fn trackers(&self, target: TargetId) -> eyre::Result<Vec<PersonId>> {
+		let ids: Vec<i64> = sqlx::query_scalar(
+			"SELECT DISTINCT g.person_id FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id
+			 WHERE k.target_id = ? AND k.enabled AND g.enabled ORDER BY g.person_id",
 		)
 		.bind(target.0)
 		.fetch_all(&self.pool)
 		.await
-		.wrap_err("listing who tracks a target")
+		.wrap_err("listing who tracks a target")?;
+		Ok(ids.into_iter().map(PersonId).collect())
 	}
 }
 
 /// The member's balance, renewed up to `now` inside the caller's write. A member seen for
 /// the first time starts with a day's worth.
-async fn renewed(tx: &mut SqliteConnection, member: &str, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
-	let (balance, last): (i64, Option<String>) = sqlx::query_as("SELECT COALESCE(SUM(delta), 0), MAX(CASE WHEN kind = 'accrual' THEN at END) FROM token_ledger WHERE member_email = ?")
-		.bind(member)
+async fn renewed(tx: &mut SqliteConnection, member: PersonId, now: Timestamp, cfg: &Tokens) -> eyre::Result<i64> {
+	let (balance, last): (i64, Option<String>) = sqlx::query_as("SELECT COALESCE(SUM(delta), 0), MAX(CASE WHEN kind = 'accrual' THEN at END) FROM token_ledger WHERE person_id = ?")
+		.bind(member.0)
 		.fetch_one(&mut *tx)
 		.await
 		.wrap_err("summing a balance")?;
@@ -194,8 +195,8 @@ async fn renewed(tx: &mut SqliteConnection, member: &str, now: Timestamp, cfg: &
 		}
 	};
 	// a day with nothing added is still written: renewal counts from it, not from the last top-up
-	sqlx::query("INSERT INTO token_ledger (member_email, at, delta, kind) VALUES (?, ?, ?, 'accrual')")
-		.bind(member)
+	sqlx::query("INSERT INTO token_ledger (person_id, at, delta, kind) VALUES (?, ?, ?, 'accrual')")
+		.bind(member.0)
 		.bind(fmt_ts(at))
 		.bind(delta)
 		.execute(&mut *tx)
@@ -205,20 +206,20 @@ async fn renewed(tx: &mut SqliteConnection, member: &str, now: Timestamp, cfg: &
 }
 
 /// Charges `spent` to `payers` for `run`, within their balances.
-pub(super) async fn charge(tx: &mut SqliteConnection, run: RunId, spent: i64, payers: &[String], now: Timestamp) -> eyre::Result<()> {
+pub(super) async fn charge(tx: &mut SqliteConnection, run: RunId, spent: i64, payers: &[PersonId], now: Timestamp) -> eyre::Result<()> {
 	let mut balances = Vec::with_capacity(payers.len());
 	for m in payers {
-		let b: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(delta), 0) FROM token_ledger WHERE member_email = ?")
-			.bind(m)
+		let b: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(delta), 0) FROM token_ledger WHERE person_id = ?")
+			.bind(m.0)
 			.fetch_one(&mut *tx)
 			.await
 			.wrap_err("summing a balance")?;
 		assert!(b >= 0, "charges stay within a balance and a set is never below 0");
-		balances.push((m.clone(), b));
+		balances.push((*m, b));
 	}
 	for (m, paid) in split(spent, &balances) {
-		sqlx::query("INSERT INTO token_ledger (member_email, at, delta, kind, run_id) VALUES (?, ?, ?, 'charge', ?)")
-			.bind(m)
+		sqlx::query("INSERT INTO token_ledger (person_id, at, delta, kind, run_id) VALUES (?, ?, ?, 'charge', ?)")
+			.bind(m.0)
 			.bind(fmt_ts(now))
 			.bind(-paid)
 			.bind(run.0)

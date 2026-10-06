@@ -44,7 +44,7 @@ impl Emitter {
 			.collect::<eyre::Result<_>>()?;
 		let rows: Vec<(i64, String, i64)> = sqlx::query_as(
 			"SELECT c.id, c.events, k.target_id FROM tg_channels c
-			 JOIN managing_gmails g ON g.member_email = c.member_email AND (c.managing_gmail_id IS NULL OR c.managing_gmail_id = g.id)
+			 JOIN managing_gmails g ON g.person_id = c.person_id AND (c.managing_gmail_id IS NULL OR c.managing_gmail_id = g.id)
 			 JOIN tracks k ON k.managing_gmail_id = g.id",
 		)
 		.fetch_all(&mut *tx)

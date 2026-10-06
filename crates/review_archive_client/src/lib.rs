@@ -1,12 +1,12 @@
-//! A typed async client for a running review_archive, for services that call it over
-//! HTTP instead of embedding the library. Requests and responses are the DTOs of
+//! A typed async client for a running review_archive, reached through the Service-Arb panel,
+//! which vouches for the caller. Requests and responses are the DTOs of
 //! `review_archive_core::dto`, the same types the server serializes.
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), review_archive_client::Error> {
 //! use review_archive_client::{Client, dto::{CaptureLimits, CaptureRequest}};
 //!
-//! let client = Client::new("http://review-archive:59110", "the-bearer-token")?;
+//! let client = Client::ambient(reqwest::Client::new(), "https://sa.evinvest.ltd/api/review_archive")?;
 //! let req = CaptureRequest {
 //!     place: Some("ChIJLU7jZClu5kcR4PcOOO6p3I0".into()),
 //!     limits: CaptureLimits { max_reviews: Some(10), ..Default::default() },
@@ -80,10 +80,8 @@ pub enum Captured {
 pub struct Client {
 	http: reqwest::Client,
 	base: Url,
-	/// `None`: whatever the HTTP client carries authenticates (a browser's cookies).
-	token: Option<String>,
-	/// `/me` routes act as this member: an admin's.
-	member: Option<String>,
+	/// `/me` routes act as this person.
+	member: Option<i64>,
 }
 
 impl fmt::Debug for Client {
@@ -93,22 +91,8 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-	/// A client for the archive at `base` (e.g. `http://review-archive:59110`), with its
-	/// bearer token.
-	pub fn new(base: &str, token: impl Into<String>) -> Result<Self, Error> {
-		Self::with_http(reqwest::Client::new(), base, token)
-	}
-
-	/// The same, on an HTTP client the caller configured (timeouts, proxies of its own).
-	pub fn with_http(http: reqwest::Client, base: &str, token: impl Into<String>) -> Result<Self, Error> {
-		Ok(Self {
-			token: Some(token.into()),
-			..Self::ambient(http, base)?
-		})
-	}
-
-	/// A client without a bearer: in a browser on the archive's own origin, its sign-in
-	/// cookie authenticates.
+	/// A client whose HTTP client carries what authenticates: in a browser, the panel's
+	/// session cookie and CSRF header.
 	pub fn ambient(http: reqwest::Client, base: &str) -> Result<Self, Error> {
 		let mut base: Url = base.parse().map_err(|e| Error::Url(format!("{base:?}: {e}")))?;
 		if !base.path().ends_with('/') {
@@ -118,33 +102,28 @@ impl Client {
 		Ok(Self {
 			http,
 			base,
-			token: None,
 			member: None,
 		})
 	}
 
-	/// The same caller, acting as `member` on `/me` routes: what an admin sees and does on
-	/// their behalf. Anyone else is refused (403).
-	pub fn as_member(self, member: impl Into<String>) -> Self {
+	/// The same caller, acting as person `member` on `/me` routes: what one holding
+	/// `sa:review_archive:members:act_as` sees and does on their behalf. Anyone else is refused (403).
+	pub fn as_member(self, member: i64) -> Self {
 		Self {
-			member: Some(member.into()),
+			member: Some(member),
 			..self
 		}
 	}
 
-	/// The token goes only to the archive: a path that resolves to another origin (an
-	/// absolute URL, `//host/…`) is refused.
+	/// A path that resolves to another origin (an absolute URL, `//host/…`) is refused.
 	fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, Error> {
 		let url = self.base.join(path.trim_start_matches('/')).map_err(|e| Error::Url(format!("{path:?}: {e}")))?;
 		if url.origin() != self.base.origin() {
 			return Err(Error::Url(format!("{path:?} is not on {}", self.base)));
 		}
 		let mut req = self.http.request(method, url);
-		if let Some(t) = &self.token {
-			req = req.bearer_auth(t);
-		}
-		if let Some(m) = &self.member {
-			req = req.header(MEMBER_HEADER, m);
+		if let Some(m) = self.member {
+			req = req.header(MEMBER_HEADER, m.to_string());
 		}
 		Ok(req)
 	}
@@ -276,25 +255,13 @@ impl Client {
 		Self::json(self.request(Method::GET, "me")?).await
 	}
 
-	/// `GET /members`: everyone in `service-arb`, as valeratrades.com lists them. An admin's.
+	/// `GET /members`: everyone, with their balances.
 	pub async fn members(&self) -> Result<Vec<MemberDto>, Error> {
 		Self::json(self.request(Method::GET, "members")?).await
 	}
 
-	/// `PUT /members/{email}`: puts someone in `service-arb` on valeratrades.com. An admin's.
-	pub async fn add_member(&self, email: &str) -> Result<(), Error> {
-		Self::send(self.request(Method::PUT, &format!("members/{email}"))?).await?;
-		Ok(())
-	}
-
-	/// `DELETE /members/{email}`: takes someone out of `service-arb`. An admin's.
-	pub async fn remove_member(&self, email: &str) -> Result<(), Error> {
-		Self::send(self.request(Method::DELETE, &format!("members/{email}"))?).await?;
-		Ok(())
-	}
-
-	/// `POST /members/{email}/tokens`: sets a member's balance or adds to it. An admin's.
-	pub async fn change_tokens(&self, member: &str, change: &TokensChange) -> Result<TokensDto, Error> {
+	/// `POST /members/{id}/tokens`: sets a member's balance or adds to it.
+	pub async fn change_tokens(&self, member: i64, change: &TokensChange) -> Result<TokensDto, Error> {
 		Self::json(self.request(Method::POST, &format!("members/{member}/tokens"))?.json(change)).await
 	}
 
@@ -386,9 +353,8 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn the_token_stays_on_the_archive() {
-		let c = Client::new("http://archive:59110/api", "secret-token-0123456789").unwrap();
-		assert!(!format!("{c:?}").contains("secret-token"));
+	fn requests_stay_on_the_archive() {
+		let c = Client::ambient(reqwest::Client::new(), "http://archive:59110/api").unwrap();
 		assert!(c.request(Method::GET, "/captures/x.avif").is_ok());
 		for elsewhere in ["https://evil.example/x.avif", "http://archive:59111/x"] {
 			assert!(matches!(c.request(Method::GET, elsewhere), Err(Error::Url(_))), "{elsewhere}");

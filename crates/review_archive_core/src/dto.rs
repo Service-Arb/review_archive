@@ -739,20 +739,20 @@ pub struct NewTgChannel {
 	pub events: Vec<Event>,
 }
 
-/// `GET /me`: who is signed in, whoever they act as.
+/// `GET /me`: who is signed in.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Me {
-	/// Their verified email.
+	/// Their person id, what `X-Member` and `/members/{id}` name.
+	pub id: i64,
+	/// Their concierge email.
 	pub email: String,
-	/// Their valeratrades.com username.
-	pub username: String,
-	/// May act as any member (`X-Member`).
-	pub admin: bool,
-	/// In `service-arb` (admins are); not, `/me` is all they may see, until an admin adds them.
-	pub member: bool,
-	/// Their tokens, if a member.
-	pub tokens: Option<TokensDto>,
+	/// Their concierge name.
+	pub name: String,
+	/// What they may do here: `sa:review_archive:*` permissions.
+	pub permissions: Vec<String>,
+	/// Their tokens.
+	pub tokens: TokensDto,
 }
 
 /// A member's tokens: what their places' scans are paid with.
@@ -832,19 +832,21 @@ pub enum BalanceChange {
 	Purchase(i64),
 }
 
-/// `GET /members`: a member as valeratrades.com lists them.
+/// `GET /members`: someone who signed in here, or an address from before people had ids.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MemberDto {
-	/// The email the group lists.
+	/// Their person id.
+	pub id: i64,
+	/// Their concierge email, as of their last sign-in.
 	pub email: String,
-	/// `None`: not signed up yet.
-	pub username: Option<String>,
-	/// Their Google name, if they signed in with Google.
-	pub display_name: Option<String>,
+	/// Empty until they sign in.
+	pub name: String,
+	/// `false`: nobody signed in with this address since people got ids.
+	pub claimed: bool,
 	/// Their token balance.
 	pub balance: i64,
 }
 
-/// On `/me` routes: the member an admin acts as.
+/// On `/me` routes: the person id of the member an admin acts as.
 pub const MEMBER_HEADER: &str = "x-member";

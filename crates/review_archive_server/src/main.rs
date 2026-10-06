@@ -101,16 +101,17 @@ enum TargetCmd {
 
 #[derive(Args)]
 struct ServeArgs {
-	/// Treat a browser without a sign-in as this member: a local dashboard without
-	/// valeratrades.com. Loopback binds outside production only.
+	/// Take every request as one made-up person holding these permissions, without the panel:
+	/// an alias (`sa:admin`), `sa:review_archive:*` permissions comma-separated, or `none`. A
+	/// local dashboard; loopback binds outside production only.
 	#[arg(long)]
 	dev_member: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum GmailCmd {
-	/// Add a managing gmail to a member (their playbook email).
-	Add { member: String, gmail: String },
+	/// Add a managing gmail to a member (their person id, `GET /members`).
+	Add { member: i64, gmail: String },
 }
 
 #[derive(Args)]
@@ -219,7 +220,7 @@ async fn run(cli: Cli, config: AppConfig, settings: Settings) -> eyre::Result<()
 		Cmd::Scan(args) => scan(&archive, &config.schedule, args).await,
 		Cmd::Serve(args) => serve(archive, &config, &settings, args).await,
 		Cmd::Gmail(GmailCmd::Add { member, gmail }) => {
-			let added = archive.add_gmail(&member.to_lowercase(), &NewGmail { gmail }).await?;
+			let added = archive.add_gmail(review_archive_core::PersonId(member), &NewGmail { gmail }).await?;
 			println!("added gmail {} ({})", added.id, added.gmail);
 			Ok(())
 		}
@@ -343,10 +344,17 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 		eyre::ensure!(settings.app_env != "production", "--dev-member is for development, and APP_ENV is production");
 	}
 	let signals = std::sync::Arc::new(worker::Signals::default());
-	let sso = settings.sso()?;
-	// a dev member is never sent to sign in: no request of theirs answers 401
-	let sign_in = sso.as_ref().map(|s| s.refresh.clone()).or_else(|| args.dev_member.as_ref().map(|_| "/".to_owned()));
-	let auth = Auth::new(settings.api_token()?, sso, args.dev_member.clone());
+	// the page at `/` is the dev member's only: behind the panel, the panel's page mounts the bundle
+	let (auth, sign_in) = match &args.dev_member {
+		Some(held) => (
+			Auth::Dev {
+				sub: "dev".into(),
+				permissions: dev_permissions(held)?,
+			},
+			Some("/".to_owned()),
+		),
+		None => (Auth::Panel(settings.panel_keys()?), None),
+	};
 	let app = http::router(
 		http::AppState::new(archive.clone(), auth, signals.clone(), config.http.clone()),
 		config.mfe_dir.as_deref(),
@@ -355,7 +363,7 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 	let listener = tokio::net::TcpListener::bind(bind).await.wrap_err_with(|| format!("binding {bind}"))?;
 	tracing::info!(%bind, "serving");
 	match (&config.mfe_dir, &sign_in) {
-		(Some(_), Some(_)) => println!("▶ dashboard: http://{bind}/{}", args.dev_member.map(|m| format!("  (signed in as {m})")).unwrap_or_default()),
+		(Some(_), Some(_)) => println!("▶ dashboard: http://{bind}/{}", args.dev_member.map(|m| format!("  (signed in holding {m})")).unwrap_or_default()),
 		_ => println!("▶ API: http://{bind}/"),
 	}
 
@@ -412,4 +420,21 @@ async fn shutdown_signal() {
 		() = ctrl_c => {}
 		() = term => {}
 	}
+}
+
+/// `--dev-member`: an alias's `sa:review_archive:*` part, such permissions listed, or `none`.
+fn dev_permissions(held: &str) -> eyre::Result<sa_auth::PermissionSet> {
+	let catalog = concierge_iam::Catalog::collect("sa", 0);
+	let ours = |p: &String| p.starts_with(sa_auth::Service::ReviewArchive.prefix());
+	if held == "none" {
+		return Ok(std::iter::empty::<String>().collect());
+	}
+	if let Some(members) = catalog.aliases.get(held) {
+		return Ok(members.iter().filter(|p| ours(p)).cloned().collect());
+	}
+	let listed: Vec<String> = held.split(',').map(|p| p.trim().to_owned()).collect();
+	for p in &listed {
+		eyre::ensure!(catalog.permissions.contains(p) && ours(p), "--dev-member: {p} is not a sa:review_archive permission, an alias, or `none`");
+	}
+	Ok(listed.into_iter().collect())
 }

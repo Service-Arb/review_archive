@@ -1,11 +1,11 @@
 //! What is a member's own: their managing gmails, what each tracks, their appeals and
-//! their Telegram channels. Every query here is scoped by the member's email; the
+//! their Telegram channels. Every query here is scoped by the member; the
 //! archive under it (targets, reviews, captures) stays shared.
 
 use eyre::WrapErr;
 use jiff::{SignedDuration, Timestamp};
 use review_archive_core::{
-	Rejected, ReviewId, Target, TargetId,
+	PersonId, Rejected, ReviewId, Target, TargetId,
 	dto::{Board, BoardCard, GmailDto, GmailOverview, LocationSummary, NewTgChannel, PostDto, ReinstatementDto, ReviewDto, TgChannelDto},
 	fmt_ts,
 	tokens::Tokens,
@@ -92,10 +92,10 @@ fn no_gmail(id: i64) -> Rejected {
 
 impl Store {
 	/// Adds a managing gmail to a member.
-	pub async fn add_gmail(&self, member: &str, gmail: &str, now: Timestamp) -> eyre::Result<GmailDto> {
+	pub async fn add_gmail(&self, member: PersonId, gmail: &str, now: Timestamp) -> eyre::Result<GmailDto> {
 		let row: Option<GmailRow> =
-			sqlx::query_as("INSERT INTO managing_gmails (member_email, gmail, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, gmail, enabled, created_at")
-				.bind(member)
+			sqlx::query_as("INSERT INTO managing_gmails (person_id, gmail, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id, gmail, enabled, created_at")
+				.bind(member.0)
 				.bind(gmail)
 				.bind(fmt_ts(now))
 				.fetch_optional(&self.pool)
@@ -106,12 +106,12 @@ impl Store {
 
 	/// Removes a gmail with its tracks and the Telegram channels scoped to it. One with
 	/// appeals is kept: they are the history of what was asked of Google.
-	pub async fn delete_gmail(&self, member: &str, id: i64) -> eyre::Result<()> {
+	pub async fn delete_gmail(&self, member: PersonId, id: i64) -> eyre::Result<()> {
 		let mut tx = self.write().await?;
 		let appeals: Option<i64> =
-			sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM reinstatements WHERE managing_gmail_id = g.id) FROM managing_gmails g WHERE g.id = ? AND g.member_email = ?")
+			sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM reinstatements WHERE managing_gmail_id = g.id) FROM managing_gmails g WHERE g.id = ? AND g.person_id = ?")
 				.bind(id)
-				.bind(member)
+				.bind(member.0)
 				.fetch_optional(&mut *tx)
 				.await
 				.wrap_err("loading a gmail")?;
@@ -129,7 +129,7 @@ impl Store {
 
 	/// Tracks a target under a gmail; tracking it twice is tracking it. `member: None` is
 	/// the operator, who may assign any gmail.
-	pub async fn track(&self, member: Option<&str>, gmail: i64, target: TargetId, now: Timestamp) -> eyre::Result<()> {
+	pub async fn track(&self, member: Option<PersonId>, gmail: i64, target: TargetId, now: Timestamp) -> eyre::Result<()> {
 		self.check_gmail(member, gmail).await?;
 		self.target(target).await?;
 		sqlx::query("INSERT INTO tracks (managing_gmail_id, target_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
@@ -143,10 +143,10 @@ impl Store {
 	}
 
 	/// Stops tracking; the target and its archive stay.
-	pub async fn untrack(&self, member: &str, gmail: i64, target: TargetId) -> eyre::Result<()> {
-		let done = sqlx::query("DELETE FROM tracks WHERE managing_gmail_id = (SELECT id FROM managing_gmails WHERE id = ? AND member_email = ?) AND target_id = ?")
+	pub async fn untrack(&self, member: PersonId, gmail: i64, target: TargetId) -> eyre::Result<()> {
+		let done = sqlx::query("DELETE FROM tracks WHERE managing_gmail_id = (SELECT id FROM managing_gmails WHERE id = ? AND person_id = ?) AND target_id = ?")
 			.bind(gmail)
-			.bind(member)
+			.bind(member.0)
 			.bind(target.0)
 			.execute(&self.pool)
 			.await
@@ -158,11 +158,11 @@ impl Store {
 	}
 
 	/// Switches a member's gmail on or off.
-	pub async fn set_gmail_enabled(&self, member: &str, gmail: i64, on: bool) -> eyre::Result<()> {
-		let done = sqlx::query("UPDATE managing_gmails SET enabled = ? WHERE id = ? AND member_email = ?")
+	pub async fn set_gmail_enabled(&self, member: PersonId, gmail: i64, on: bool) -> eyre::Result<()> {
+		let done = sqlx::query("UPDATE managing_gmails SET enabled = ? WHERE id = ? AND person_id = ?")
 			.bind(on)
 			.bind(gmail)
-			.bind(member)
+			.bind(member.0)
 			.execute(&self.pool)
 			.await
 			.wrap_err("switching a gmail")?;
@@ -173,11 +173,11 @@ impl Store {
 	}
 
 	/// Switches a member's track on or off.
-	pub async fn set_track_enabled(&self, member: &str, gmail: i64, target: TargetId, on: bool) -> eyre::Result<()> {
-		let done = sqlx::query("UPDATE tracks SET enabled = ? WHERE managing_gmail_id = (SELECT id FROM managing_gmails WHERE id = ? AND member_email = ?) AND target_id = ?")
+	pub async fn set_track_enabled(&self, member: PersonId, gmail: i64, target: TargetId, on: bool) -> eyre::Result<()> {
+		let done = sqlx::query("UPDATE tracks SET enabled = ? WHERE managing_gmail_id = (SELECT id FROM managing_gmails WHERE id = ? AND person_id = ?) AND target_id = ?")
 			.bind(on)
 			.bind(gmail)
-			.bind(member)
+			.bind(member.0)
 			.bind(target.0)
 			.execute(&self.pool)
 			.await
@@ -189,12 +189,12 @@ impl Store {
 	}
 
 	/// The member's gmails and each one's places, by screenshots over 7 days, most first.
-	pub async fn overview(&self, member: &str, now: Timestamp, tokens: &Tokens) -> eyre::Result<Vec<GmailOverview>> {
+	pub async fn overview(&self, member: PersonId, now: Timestamp, tokens: &Tokens) -> eyre::Result<Vec<GmailOverview>> {
 		let days_ago = |d: i64| fmt_ts(now - SignedDuration::from_hours(24 * d));
 		// one snapshot: every location row's gmail is among the gmails read
 		let mut tx = self.pool.begin().await.wrap_err("starting a read")?;
-		let gmails: Vec<GmailRow> = sqlx::query_as("SELECT id, gmail, enabled, created_at FROM managing_gmails WHERE member_email = ? ORDER BY gmail")
-			.bind(member)
+		let gmails: Vec<GmailRow> = sqlx::query_as("SELECT id, gmail, enabled, created_at FROM managing_gmails WHERE person_id = ? ORDER BY gmail")
+			.bind(member.0)
 			.fetch_all(&mut *tx)
 			.await
 			.wrap_err("listing gmails")?;
@@ -220,10 +220,10 @@ impl Store {
 			 JOIN managing_gmails g ON g.id = k.managing_gmail_id
 			 JOIN targets t ON t.id = k.target_id
 			 LEFT JOIN posts p ON p.id = (SELECT id FROM posts WHERE target_id = t.id ORDER BY first_seen DESC, id DESC LIMIT 1)
-			 WHERE g.member_email = ?1
+			 WHERE g.person_id = ?1
 			 ORDER BY snapshots_7d DESC, t.id",
 		)
-		.bind(member)
+		.bind(member.0)
 		.bind(days_ago(7))
 		.bind(days_ago(30))
 		.fetch_all(&mut *tx)
@@ -271,7 +271,7 @@ impl Store {
 
 	/// A tracked target's reviews in the board's three columns, as this gmail sees them.
 	// ponytail: every live review in one answer; page `snapshotted` when a place's list outgrows a screen's worth of JSON
-	pub async fn board(&self, member: &str, gmail: i64, target: TargetId) -> eyre::Result<Board> {
+	pub async fn board(&self, member: PersonId, gmail: i64, target: TargetId) -> eyre::Result<Board> {
 		self.check_track(member, gmail, target).await?;
 		let select = REVIEW_SELECT.replacen("SELECT ", "SELECT x.requested_at, x.reinstated_at, ", 1);
 		let rows: Vec<CardRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -309,7 +309,7 @@ impl Store {
 
 	/// Opens an appeal of a gone review under a gmail tracking its place; one already open
 	/// stays as it is.
-	pub async fn reinstate(&self, member: &str, gmail: i64, review: ReviewId, now: Timestamp) -> eyre::Result<ReinstatementDto> {
+	pub async fn reinstate(&self, member: PersonId, gmail: i64, review: ReviewId, now: Timestamp) -> eyre::Result<ReinstatementDto> {
 		let (target, gone): (i64, bool) = sqlx::query_as("SELECT target_id, gone_at IS NOT NULL FROM reviews WHERE id = ?")
 			.bind(review.0)
 			.fetch_optional(&self.pool)
@@ -343,7 +343,7 @@ impl Store {
 	}
 
 	/// Withdraws the open appeal of a review: kept, marked withdrawn.
-	pub async fn withdraw_reinstatement(&self, member: &str, gmail: i64, review: ReviewId, now: Timestamp) -> eyre::Result<()> {
+	pub async fn withdraw_reinstatement(&self, member: PersonId, gmail: i64, review: ReviewId, now: Timestamp) -> eyre::Result<()> {
 		self.check_gmail(Some(member), gmail).await?;
 		let done = sqlx::query("UPDATE reinstatements SET withdrawn_at = ? WHERE managing_gmail_id = ? AND review_id = ? AND withdrawn_at IS NULL AND reinstated_at IS NULL")
 			.bind(fmt_ts(now))
@@ -359,29 +359,29 @@ impl Store {
 	}
 
 	/// Whether a capture shows a review of a place the member tracks.
-	pub async fn member_sees_capture(&self, member: &str, sha256: &str) -> eyre::Result<bool> {
+	pub async fn member_sees_capture(&self, member: PersonId, sha256: &str) -> eyre::Result<bool> {
 		sqlx::query_scalar(
 			"SELECT EXISTS (SELECT 1 FROM captures c JOIN reviews r ON r.id = c.review_id JOIN tracks k ON k.target_id = r.target_id
 			                JOIN managing_gmails g ON g.id = k.managing_gmail_id
-			                WHERE c.sha256 = ? AND g.member_email = ?)",
+			                WHERE c.sha256 = ? AND g.person_id = ?)",
 		)
 		.bind(sha256)
-		.bind(member)
+		.bind(member.0)
 		.fetch_one(&self.pool)
 		.await
 		.wrap_err("checking a capture's owner")
 	}
 
 	/// Adds a Telegram channel; `destination` already parsed by the caller.
-	pub async fn add_tg_channel(&self, member: &str, ch: &NewTgChannel, now: Timestamp) -> eyre::Result<TgChannelDto> {
+	pub async fn add_tg_channel(&self, member: PersonId, ch: &NewTgChannel, now: Timestamp) -> eyre::Result<TgChannelDto> {
 		if let Some(g) = ch.gmail_id {
 			self.check_gmail(Some(member), g).await?;
 		}
 		let row: TgChannelRow = sqlx::query_as(
-			"INSERT INTO tg_channels (member_email, managing_gmail_id, destination, events, created_at) VALUES (?, ?, ?, ?, ?)
+			"INSERT INTO tg_channels (person_id, managing_gmail_id, destination, events, created_at) VALUES (?, ?, ?, ?, ?)
 			 RETURNING id, destination, managing_gmail_id, events, created_at",
 		)
-		.bind(member)
+		.bind(member.0)
 		.bind(ch.gmail_id)
 		.bind(ch.destination.trim())
 		.bind(serde_json::to_string(&ch.events)?)
@@ -393,9 +393,9 @@ impl Store {
 	}
 
 	/// A member's Telegram channels.
-	pub async fn tg_channels(&self, member: &str) -> eyre::Result<Vec<TgChannelDto>> {
-		let rows: Vec<TgChannelRow> = sqlx::query_as("SELECT id, destination, managing_gmail_id, events, created_at FROM tg_channels WHERE member_email = ? ORDER BY id")
-			.bind(member)
+	pub async fn tg_channels(&self, member: PersonId) -> eyre::Result<Vec<TgChannelDto>> {
+		let rows: Vec<TgChannelRow> = sqlx::query_as("SELECT id, destination, managing_gmail_id, events, created_at FROM tg_channels WHERE person_id = ? ORDER BY id")
+			.bind(member.0)
 			.fetch_all(&self.pool)
 			.await
 			.wrap_err("listing Telegram channels")?;
@@ -403,10 +403,10 @@ impl Store {
 	}
 
 	/// Removes a channel and what it was still owed. `false` when the member has none by that id.
-	pub async fn delete_tg_channel(&self, member: &str, id: i64) -> eyre::Result<bool> {
-		let done = sqlx::query("DELETE FROM tg_channels WHERE id = ? AND member_email = ?")
+	pub async fn delete_tg_channel(&self, member: PersonId, id: i64) -> eyre::Result<bool> {
+		let done = sqlx::query("DELETE FROM tg_channels WHERE id = ? AND person_id = ?")
 			.bind(id)
-			.bind(member)
+			.bind(member.0)
 			.execute(&self.pool)
 			.await
 			.wrap_err("deleting a Telegram channel")?;
@@ -414,10 +414,10 @@ impl Store {
 	}
 
 	/// [`Rejected::NotFound`] unless the gmail is the member's (any gmail for the operator).
-	pub(crate) async fn check_gmail(&self, member: Option<&str>, gmail: i64) -> eyre::Result<()> {
-		let found: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM managing_gmails WHERE id = ?1 AND (?2 IS NULL OR member_email = ?2))")
+	pub(crate) async fn check_gmail(&self, member: Option<PersonId>, gmail: i64) -> eyre::Result<()> {
+		let found: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM managing_gmails WHERE id = ?1 AND (?2 IS NULL OR person_id = ?2))")
 			.bind(gmail)
-			.bind(member)
+			.bind(member.map(|m| m.0))
 			.fetch_one(&self.pool)
 			.await
 			.wrap_err("looking up a gmail")?;
@@ -428,11 +428,11 @@ impl Store {
 	}
 
 	/// [`Rejected::NotFound`] unless the member's gmail tracks the target.
-	async fn check_track(&self, member: &str, gmail: i64, target: TargetId) -> eyre::Result<()> {
+	async fn check_track(&self, member: PersonId, gmail: i64, target: TargetId) -> eyre::Result<()> {
 		let found: bool =
-			sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id WHERE g.id = ? AND g.member_email = ? AND k.target_id = ?)")
+			sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id WHERE g.id = ? AND g.person_id = ? AND k.target_id = ?)")
 				.bind(gmail)
-				.bind(member)
+				.bind(member.0)
 				.bind(target.0)
 				.fetch_one(&self.pool)
 				.await
