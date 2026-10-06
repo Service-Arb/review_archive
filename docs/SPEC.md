@@ -266,7 +266,9 @@ exposure for it. Tokens price that, and the members whose places are scanned pay
   and ad-hoc captures are paid by no one and limited by the hour only.
 - `purchase` is recorded by an admin (a payment reference in `note`); nothing is sold here.
 - `GET /me` carries the signed-in person's `tokens {balance, daily, cap}`; `GET /me/tokens` is
-  the member's ledger, each charge with its run and place. `GET /members` lists every person
+  the member's ledger, each charge with its run and place; `GET /me/usage` its charges summed
+  per UTC day over the last 30 (`{day, walks, tokens}`, every day present) and the places it
+  tracks now. `GET /members` lists every person
   with their balance; `POST /members/{id}/tokens` `{set | grant | purchase: n, note?}` sets or
   adds to one. Both need `sa:review_archive:tokens:grant`.
   A place held for tokens shows "out of tokens" on its card (`held`).

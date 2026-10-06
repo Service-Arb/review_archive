@@ -808,6 +808,31 @@ pub struct LedgerEntry {
 	pub target_label: Option<String>,
 }
 
+/// `GET /me/usage`: what the member's tokens bought lately.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Usage {
+	/// The last [`USAGE_DAYS`] UTC days, oldest first, today last; every day present.
+	pub days: Vec<UsageDay>,
+	/// Places with a track on under a gmail that is on, now.
+	pub places_tracked: i64,
+}
+
+/// How many days [`Usage`] covers.
+pub const USAGE_DAYS: i64 = 30;
+
+/// One UTC day of [`Usage`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UsageDay {
+	/// `YYYY-MM-DD`.
+	pub day: String,
+	/// Walks the member paid a share of.
+	pub walks: i64,
+	/// Tokens charged to them.
+	pub tokens: i64,
+}
+
 /// `POST /members/{email}/tokens`: one change of a member's balance.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -4,7 +4,7 @@
 use jiff::Timestamp;
 use review_archive_core::{
 	GbpLocation, PersonId, Rejected, ReviewId, TargetId, check_lang,
-	dto::{Board, GmailDto, MemberDto, GmailOverview, LedgerEntry, NewGmail, NewTgChannel, NewTrack, ReinstatementDto, TargetDto, TargetPatch, TgChannelDto, TokensChange, TokensDto},
+	dto::{Board, GmailDto, GmailOverview, LedgerEntry, MemberDto, NewGmail, NewTgChannel, NewTrack, ReinstatementDto, TargetDto, TargetPatch, TgChannelDto, TokensChange, TokensDto, Usage},
 };
 use tg_types::TelegramDestination;
 
@@ -39,6 +39,7 @@ impl Archive {
 			None => Err(Rejected::not_found(format!("no person {id}")).into()),
 		}
 	}
+
 	/// Adds a managing gmail to the member.
 	pub async fn add_gmail(&self, member: PersonId, req: &NewGmail) -> eyre::Result<GmailDto> {
 		let gmail = req.gmail.trim().to_lowercase();
@@ -179,6 +180,11 @@ impl Archive {
 	/// The member's ledger, newest first: 200 rows.
 	pub async fn ledger(&self, member: PersonId) -> eyre::Result<Vec<LedgerEntry>> {
 		self.store()?.ledger(member, 200).await
+	}
+
+	/// What the member's tokens bought over the last 30 days.
+	pub async fn usage(&self, member: PersonId) -> eyre::Result<Usage> {
+		self.store()?.usage(member, Timestamp::now()).await
 	}
 
 	/// Sets or adds to the member's balance, as admin `by`.

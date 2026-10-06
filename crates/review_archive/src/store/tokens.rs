@@ -5,7 +5,7 @@ use eyre::WrapErr;
 use jiff::{SignedDuration, Timestamp};
 use review_archive_core::{
 	PersonId, Rejected, TargetId,
-	dto::{BalanceChange, LedgerEntry, TokenKind},
+	dto::{BalanceChange, LedgerEntry, TokenKind, USAGE_DAYS, Usage, UsageDay},
 	fmt_ts,
 	maps::cost,
 	tokens::{Tokens, accrue, split},
@@ -103,6 +103,39 @@ impl Store {
 				})
 			})
 			.collect()
+	}
+
+	/// The member's charges over the [`USAGE_DAYS`] UTC days up to `now`, and what they track now.
+	pub async fn usage(&self, member: PersonId, now: Timestamp) -> eyre::Result<Usage> {
+		let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+		let first = today - jiff::Span::new().days(USAGE_DAYS - 1);
+		let charged: Vec<(String, i64, i64)> = sqlx::query_as(
+			"SELECT substr(at, 1, 10) AS day, COUNT(DISTINCT run_id), -SUM(delta) FROM token_ledger
+			 WHERE person_id = ? AND kind = 'charge' AND delta < 0 AND at >= ? GROUP BY day",
+		)
+		.bind(member.0)
+		.bind(first.to_string())
+		.fetch_all(&self.pool)
+		.await
+		.wrap_err("summing a member's charges by day")?;
+		let places_tracked: i64 = sqlx::query_scalar(
+			"SELECT COUNT(DISTINCT k.target_id) FROM tracks k JOIN managing_gmails g ON g.id = k.managing_gmail_id
+			 WHERE g.person_id = ? AND k.enabled AND g.enabled",
+		)
+		.bind(member.0)
+		.fetch_one(&self.pool)
+		.await
+		.wrap_err("counting a member's tracked places")?;
+		let days = first
+			.series(jiff::Span::new().days(1))
+			.take(USAGE_DAYS as usize)
+			.map(|d| {
+				let day = d.to_string();
+				let (walks, tokens) = charged.iter().find(|(c, ..)| *c == day).map_or((0, 0), |&(_, w, t)| (w, t)); // a day with no charge row charged nothing
+				UsageDay { day, walks, tokens }
+			})
+			.collect();
+		Ok(Usage { days, places_tracked })
 	}
 
 	/// Who pays for scanning `target` now, and what the walk may spend. `operator`: a scan
