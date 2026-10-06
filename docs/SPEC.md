@@ -139,8 +139,8 @@ CLI (`clap`):
 - `review_archive serve` — scheduler + HTTP.
 - `review_archive export --target <id> [--since <date>] --out <dir|file.zip>` — captures (AVIF) + `manifest.json`.
 
-HTTP (axum), the operator's bearer `REVIEW_ARCHIVE_TOKEN` or a browser's sign-in cookie
-(see Auth), binds `127.0.0.1` unless configured:
+HTTP (axum), behind the Service-Arb panel's assertion (see Auth), binds `127.0.0.1` unless
+configured:
 
 - `GET /health` (no auth)
 - `GET /targets`
@@ -214,13 +214,14 @@ Events:
 Several people track their places here, grouped the way they manage them: by
 **managing gmail**, the Google manager account a small group of GBPs is attached to.
 
-- A **member** is a verified email in valeratrades.com's `service-arb` group, as its
-  `va_access` cookie says; there is no member table here. The site keeps the group, in its
-  database; admins keep it from here, through its `/auth/members` (beside `SSO_REFRESH_URL`),
-  asked with the admin's own cookie: `GET /members` is the group and the admins, with their
-  usernames; `PUT`/`DELETE /members/{email}` puts someone in or takes them out. Someone
-  signed in outside the group sees who they are signed in as, and that an admin adds them.
-- `managing_gmails(id, member_email, gmail, created_at)`, unique per member — a grouping,
+- A **member** is a person: a concierge account the Service-Arb panel vouches for, kept in
+  `people(id, sub UNIQUE, email, name, first_seen)` and found or made by `sub` on every
+  request. Anyone signed in to the panel is one; what they may do beyond their own `/me` is
+  their `sa:review_archive:*` permissions, granted in concierge. Rows from before people had
+  ids were keyed by email: each address is a person without a `sub`, claimed by the first
+  sign-in with it — only when concierge says the address is verified and no other account
+  already holds it; otherwise the request is a 403 and an error is logged for an admin.
+- `managing_gmails(id, person_id, gmail, created_at)`, unique per member — a grouping,
   not a credential: an address, or any alias for one without spaces (`tg:@owner`), lowercased. GBP reads keep the service's one grant: a client adds the service's
   Google account as a manager of their GBP.
 - `tracks(managing_gmail_id, target_id, created_at)`. Tracking a place finds the target on
@@ -251,7 +252,7 @@ exposure for it. Tokens price that, and the members whose places are scanned pay
   (each retried click 2), each scroll of the feed 1 — the data requests each sends Google, a
   scroll's ~9 being the unit. "More" and screenshots send none. An unchanged place costs 8;
   a rescan 15 and 1 per screen of cards.
-- `token_ledger(id, member_email, at, delta, kind[accrual|grant|purchase|set|charge], run_id, by_email, note)`:
+- `token_ledger(id, person_id, at, delta, kind[accrual|grant|purchase|set|charge], run_id, by_email, note)`:
   append-only; a balance is the sum of its rows. Reading a balance renews it first, a whole
   day at a time: `tokens.daily` (15) per day while under `tokens.cap` (300); granted or bought
   tokens above the cap stay. A member seen for the first time starts with a day's worth.
@@ -265,35 +266,37 @@ exposure for it. Tokens price that, and the members whose places are scanned pay
   and ad-hoc captures are paid by no one and limited by the hour only.
 - `purchase` is recorded by an admin (a payment reference in `note`); nothing is sold here.
 - `GET /me` carries the signed-in person's `tokens {balance, daily, cap}`; `GET /me/tokens` is
-  the member's ledger, each charge with its run and place. `GET /members` gives each member's
-  balance; `POST /members/{email}/tokens` `{set | grant | purchase: n, note?}` is an admin's.
+  the member's ledger, each charge with its run and place. `GET /members` lists every person
+  with their balance; `POST /members/{id}/tokens` `{set | grant | purchase: n, note?}` sets or
+  adds to one. Both need `sa:review_archive:tokens:grant`.
   A place held for tokens shows "out of tokens" on its card (`held`).
 
 ### Auth
 
-Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
+Served behind the Service-Arb panel at `sa.evinvest.ltd`: its `/api/review_archive/*` reaches
+the API (the prefix stripped), its `/review_archive/mfe/*` the bundle. Nothing else reaches
+the service.
 
-- `REVIEW_ARCHIVE_TOKEN` as a bearer is the operator: every route but `/me`, unless it names a member (below). Any other
-  bearer is a 401.
-- A browser brings the site's `va_access` cookie (`Domain=.valeratrades.com`): an EdDSA
-  JWT `{sub, email, username, admin, groups, exp}` of 15 minutes, verified here with the
-  site's public key (`SSO_PUBLIC_KEY`; issuer and audience pinned, `va_sso`). `admin`
-  opens the operator's routes; `service-arb` in `groups`, or `admin`, opens `/me` and
-  `GET /captures/{sha}.avif` of the places the member's gmails track. Anyone else signed in
-  gets `GET /me` only, and 403 elsewhere.
-- `GET /me` is who signed in: email, username, admin, member, and a member's tokens. On every other `/me` route an admin —
-  the operator's token too — acts as the member `X-Member` names: their gmails, boards and
-  channels, their writes. Anyone else sending it gets 403.
-- A cookie-authenticated request other than GET/HEAD must carry
-  `Sec-Fetch-Site: same-origin`, or it is a 403: the cookie rides along on requests other
-  sites start.
-- Without `SSO_PUBLIC_KEY` + `SSO_REFRESH_URL` only the operator's token works.
-- `serve --dev-member <email>` (loopback, outside production): a request with neither token
-  nor cookie is that member, for a local dashboard (`nix run .#dev-mfe -- <email>`).
+- Every authenticated request carries the panel's assertion in `x-sa-assertion` (`sa_auth`):
+  an Ed25519 JWS `{aud: review_archive, sub, email, email_verified, name, permissions, method,
+  path, exp}`, verified with the panel's public keys (`PANEL_ASSERTION_KEYS`). It names this
+  one request — its method and path — and lives 60 s; anything else is a 401. `permissions`
+  is the caller's `sa:review_archive:*` slice.
+- `sa:review_archive:archive:operate` opens the archive's own routes: targets, scans,
+  captures, jobs, reviews, stats, webhooks, export, and any capture's AVIF.
+  `sa:review_archive:tokens:grant` opens `GET /members` and `POST /members/{id}/tokens`.
+- `/me` routes are every signed-in person's own, and `GET /captures/{sha}.avif` of the places
+  their gmails track. With `sa:review_archive:members:act_as`, `X-Member: <person id>` acts as
+  that member: their gmails, boards and channels, their writes; anyone else sending it gets 403.
+- `POST /me/tg-channels/{id}/test` posts at most once a minute per person (429).
+- CSRF is the panel's: it checks its own header on every write before forwarding.
+- `serve --dev-member <alias | permissions | none>` (loopback, outside production): every
+  request is one made-up person holding that, without the panel, for a local dashboard
+  (`nix run .#dev-mfe`).
 
 ### Telegram
 
-- `tg_channels(member_email, managing_gmail_id NULL = all, destination, events)`;
+- `tg_channels(person_id, managing_gmail_id NULL = all, destination, events)`;
   `destination` is what the member pasted (`@channel`, `-100…`, `<group>/<topic>`),
   parsed as `tg_types::TelegramDestination`.
 - Events go through the outbox (`webhook_deliveries`, a row names exactly one hook or
@@ -306,15 +309,16 @@ Served at `sa.valeratrades.com`; valeratrades.com is the sign-in.
 
 ### Dashboard
 
-`crates/review_archive_web`: a dioxus microfrontend, `<mfe-review-archive-dashboard
-sign-in="…">`, its bundle served by the binary under `/mfe/` (`mfe_dir`) and its page
-(`index.html`) at `/`, so it calls the API on its own origin with the sign-in cookie. A 401
-sends the top window to `sign-in` (`SSO_REFRESH_URL`, the site's `/auth/refresh`) with
-`return_to` = the page, which comes back signed in. Design: Figma "review_archive / dashboard",
-on ev_lib's `uikit`. An admin gets tabs: their own dashboard, and one per member opened from
+`crates/review_archive_web`: a dioxus microfrontend, `<mfe-review-archive-dashboard>`, its
+bundle served by the binary under `/mfe/` (`mfe_dir`), which the panel forwards as
+`/review_archive/mfe/`; the panel's page at `/review_archive` mounts it under its top bar
+and gives it the API base (`/api/review_archive`), its sign-in and its CSRF cookie. A 401
+sends the top window to the sign-in with `return_to` = the page, which comes back signed
+in. Design: Figma "review_archive / dashboard", on ev_lib's `uikit`. One holding
+`members:act_as` gets tabs: their own dashboard, and one per member opened from
 `GET /members`, acting as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
-`/gmails/{id}/places/{target}`, `/telegram`, `/tokens` (the ledger), under `/members/{email}` for a member's tab —
-which the binary answers with the same page.
+`/gmails/{id}/places/{target}`, `/telegram`, `/tokens` (the ledger), under `/members/{id}`
+for a member's tab. Standalone (`--dev-member`), the binary serves the same page at `/`.
 
 ## Library
 

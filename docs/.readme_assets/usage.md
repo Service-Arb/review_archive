@@ -15,8 +15,8 @@ review_archive target list
 review_archive scan 1          # one pass now, prints a summary
 review_archive scan --all
 
-# Scheduler + HTTP on 127.0.0.1:59110. The API wants `Authorization: Bearer
-# $REVIEW_ARCHIVE_TOKEN`, or a browser's valeratrades.com sign-in (docs/SPEC.md, Auth).
+# Scheduler + HTTP on 127.0.0.1:59110. The API wants the Service-Arb panel's assertion
+# (`x-sa-assertion`, keys in PANEL_ASSERTION_KEYS; docs/SPEC.md, Auth).
 review_archive serve
 
 # AVIF captures + manifest.json, to a directory or a .zip
