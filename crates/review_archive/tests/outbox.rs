@@ -17,14 +17,18 @@ use jiff::Timestamp;
 use review_archive::{
 	config::WebhookConfig,
 	core::{
-		Coverage, Known, Observed, ReviewId, Scan, Target, TargetKind,
+		Coverage, Known, Observed, PersonId, ReviewId, Scan, Target, TargetKind,
 		dto::{Event, EventPayload, JobKind, JobStatus, NewTgChannel, NewWebhook, RunStatus},
 		schedule::Schedule,
 		tokens::{Meter, Tokens},
 	},
 	record::Recorder,
 	sources::ReviewSource,
-	store::{InsertTarget, Recipient, Store, blobs::BlobStore},
+	store::{
+		InsertTarget, Recipient, Store,
+		blobs::BlobStore,
+		people::{Claim, Seen},
+	},
 	webhooks::{Deliverer, Telegram, signature},
 };
 
@@ -330,6 +334,20 @@ fn png() -> Vec<u8> {
 	out
 }
 
+async fn person(store: &Store, sub: &str) -> PersonId {
+	let email = format!("{sub}@x.com");
+	let seen = Seen {
+		sub,
+		email: &email,
+		email_verified: true,
+		name: sub,
+	};
+	match store.person(&seen, Timestamp::now()).await.unwrap() {
+		Claim::Person(p) => p,
+		refused => panic!("{sub}: {refused:?}"),
+	}
+}
+
 /// A member's channel hears about the places the member tracks, and only those; a removed
 /// review arrives as its screenshot; what Telegram refuses is retried, with its reason.
 #[tokio::test]
@@ -360,21 +378,27 @@ async fn telegram_channels_get_their_members_places_only() {
 		gmail_id: gmail,
 		events: events.clone(),
 	};
-	let alice = store.add_gmail("alice@x.com", "ops@gmail.com", now).await.unwrap();
-	store.track(Some("alice@x.com"), alice.id, watched.id, now).await.unwrap();
-	store.add_tg_channel("alice@x.com", &channel("@alice_chan", None), now).await.unwrap();
-	let bob = store.add_gmail("bob@x.com", "bob@gmail.com", now).await.unwrap();
-	store.track(Some("bob@x.com"), bob.id, other, now).await.unwrap();
-	store.add_tg_channel("bob@x.com", &channel("@bob_chan", None), now).await.unwrap();
+	let (alice_p, bob_p, carol_p, dave_p) = (
+		person(&store, "alice").await,
+		person(&store, "bob").await,
+		person(&store, "carol").await,
+		person(&store, "dave").await,
+	);
+	let alice = store.add_gmail(alice_p, "ops@gmail.com", now).await.unwrap();
+	store.track(Some(alice_p), alice.id, watched.id, now).await.unwrap();
+	store.add_tg_channel(alice_p, &channel("@alice_chan", None), now).await.unwrap();
+	let bob = store.add_gmail(bob_p, "bob@gmail.com", now).await.unwrap();
+	store.track(Some(bob_p), bob.id, other, now).await.unwrap();
+	store.add_tg_channel(bob_p, &channel("@bob_chan", None), now).await.unwrap();
 	// carol tracks the same place, but her channel's gmail tracks nothing
-	let carol = store.add_gmail("carol@x.com", "c1@gmail.com", now).await.unwrap();
-	let carol_empty = store.add_gmail("carol@x.com", "c2@gmail.com", now).await.unwrap();
-	store.track(Some("carol@x.com"), carol.id, watched.id, now).await.unwrap();
-	store.add_tg_channel("carol@x.com", &channel("@carol_chan", Some(carol_empty.id)), now).await.unwrap();
+	let carol = store.add_gmail(carol_p, "c1@gmail.com", now).await.unwrap();
+	let carol_empty = store.add_gmail(carol_p, "c2@gmail.com", now).await.unwrap();
+	store.track(Some(carol_p), carol.id, watched.id, now).await.unwrap();
+	store.add_tg_channel(carol_p, &channel("@carol_chan", Some(carol_empty.id)), now).await.unwrap();
 	// dave's chat does not have the bot
-	let dave = store.add_gmail("dave@x.com", "d@gmail.com", now).await.unwrap();
-	store.track(Some("dave@x.com"), dave.id, watched.id, now).await.unwrap();
-	store.add_tg_channel("dave@x.com", &channel("@nochat", None), now).await.unwrap();
+	let dave = store.add_gmail(dave_p, "d@gmail.com", now).await.unwrap();
+	store.track(Some(dave_p), dave.id, watched.id, now).await.unwrap();
+	store.add_tg_channel(dave_p, &channel("@nochat", None), now).await.unwrap();
 
 	let rec = Recorder {
 		store: &store,

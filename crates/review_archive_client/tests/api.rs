@@ -4,7 +4,6 @@
 
 use std::{io::Read, sync::Arc, time::Duration};
 
-use axum::response::IntoResponse;
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use review_archive::{
@@ -16,27 +15,94 @@ use review_archive::{
 		tokens::Meter,
 	},
 	sources::ReviewSource,
+	store::people::{Claim, Seen},
 };
 use review_archive_client::{Captured, Client};
 use review_archive_server::{
-	auth::{Auth, SsoSite},
+	auth::Auth,
 	http::{AppState, HttpConfig, router},
 	worker::Signals,
 };
+use sa_auth::Signer;
 
-const TOKEN: &str = "test-token-0123456789";
-/// valeratrades.com's side: the key its `va_access` cookies are signed with.
-const SSO_PRIVATE: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA3bBKSXvm87i5bc706Y1QG1uj5EmbgUZygHJGfO1XYj\n-----END PRIVATE KEY-----\n";
-const SSO_PUBLIC: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAws8sYuYGZt4/OjCm05rzUQYOTAWBxVHPL1Fdg74KyV4=\n-----END PUBLIC KEY-----\n";
-const ALICE: &str = "Alice@x.com";
-const BOB: &str = "bob@x.com";
+/// The panel's signing key, and another under the same id that the archive does not hold.
+const PANEL_KEY: &str = "panel:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const FOREIGN_KEY: &str = "panel:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+/// Who the test panel vouches for on a request: it signs for them and strips this.
+const CALLER_HEADER: &str = "x-test-caller";
+const ALICE: &str = "alice";
+const BOB: &str = "bob";
 const PLACE: &str = "ChIJLU7jZClu5kcR4PcOOO6p3I0";
 
+/// A concierge account, as the panel's assertion names it.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct Who {
+	sub: String,
+	email: String,
+	verified: bool,
+	name: String,
+	permissions: Vec<String>,
+}
+
+impl Who {
+	/// `{sub}@x.com`, verified, with no permissions.
+	fn member(sub: &str) -> Self {
+		Self {
+			sub: sub.into(),
+			email: format!("{sub}@x.com"),
+			verified: true,
+			name: sub.into(),
+			permissions: vec![],
+		}
+	}
+
+	fn may(self, permissions: &[&str]) -> Self {
+		Self {
+			permissions: permissions.iter().map(|p| (*p).to_owned()).collect(),
+			..self
+		}
+	}
+}
+
+fn operator() -> Who {
+	Who::member("root").may(&[sa_auth::Archive::Operate.as_str()])
+}
+
+fn admin() -> Who {
+	Who::member("root").may(&[sa_auth::Archive::Operate.as_str(), sa_auth::Tokens::Grant.as_str(), sa_auth::Members::ActAs.as_str()])
+}
+
+fn sign(signer: &Signer, who: &Who, method: &str, path: &str, exp: i64) -> String {
+	signer.sign(&sa_auth::Assertion {
+		aud: sa_auth::Service::ReviewArchive,
+		sub: who.sub.clone(),
+		email: who.email.clone(),
+		email_verified: who.verified,
+		name: who.name.clone(),
+		permissions: who.permissions.iter().cloned().collect(),
+		method: method.into(),
+		path: path.into(),
+		exp,
+	})
+}
+
+fn alive() -> i64 {
+	Timestamp::now().as_second() + sa_auth::TTL
+}
+
+/// An HTTP client whose every request the test panel signs for `who`.
+fn http_as(who: &Who) -> reqwest::Client {
+	let headers = reqwest::header::HeaderMap::from_iter([(CALLER_HEADER.parse().unwrap(), serde_json::to_string(who).unwrap().parse().unwrap())]);
+	reqwest::Client::builder().default_headers(headers).build().unwrap()
+}
+
 struct Env {
-	_dir: tempfile::TempDir,
+	dir: tempfile::TempDir,
 	archive: Archive,
 	signals: Arc<Signals>,
+	signer: Arc<Signer>,
 	base: String,
+	/// The operator: may operate the archive, and nothing else.
 	client: Client,
 	server: tokio::task::JoinHandle<()>,
 }
@@ -51,71 +117,32 @@ async fn env() -> Env {
 	config.webhooks.allowed_hosts = vec!["127.0.0.1".into()];
 	let archive = Archive::open(config).await.unwrap();
 	let signals = Arc::new(Signals::default());
-	// valeratrades.com's `/auth/members`, as far as the archive sees it: keeps `service-arb` for whoever forwards a cookie
-	#[derive(serde::Deserialize)]
-	struct Change {
-		group: String,
-		email: String,
-	}
-	let group = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([BOB.to_owned()])));
-	let signed = |headers: &axum::http::HeaderMap| headers.get("cookie").is_some_and(|c| c.to_str().unwrap().starts_with("va_access="));
-	let site = axum::Router::new().route(
-		"/auth/members",
-		axum::routing::get({
-			let group = group.clone();
-			move |headers: axum::http::HeaderMap| async move {
-				match signed(&headers) {
-					true => axum::Json(
-						group
-							.lock()
-							.unwrap()
-							.iter()
-							.map(|e| match e.as_str() {
-								BOB => serde_json::json!({"email": BOB, "username": "bob", "display_name": "Bob B"}),
-								e => serde_json::json!({"email": e, "username": null, "display_name": null}),
-							})
-							.collect::<Vec<_>>(),
-					)
-					.into_response(),
-					false => StatusCode::UNAUTHORIZED.into_response(),
+	let signer: Arc<Signer> = Arc::new(PANEL_KEY.parse().unwrap());
+	let panel = {
+		let signer = signer.clone();
+		axum::middleware::from_fn(move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+			let signer = signer.clone();
+			async move {
+				if let Some(who) = req.headers_mut().remove(CALLER_HEADER) {
+					let who: Who = serde_json::from_slice(who.as_bytes()).expect("http_as serialized it");
+					let token = sign(&signer, &who, req.method().as_str(), req.uri().path(), alive());
+					req.headers_mut().insert(sa_auth::HEADER, token.parse().expect("a JWS is base64url and dots"));
 				}
+				next.run(req).await
 			}
 		})
-		.put({
-			let group = group.clone();
-			move |headers: axum::http::HeaderMap, axum::extract::Query(c): axum::extract::Query<Change>| async move {
-				assert_eq!(c.group, "service-arb");
-				match signed(&headers) {
-					true => {
-						group.lock().unwrap().insert(c.email.to_lowercase());
-						StatusCode::NO_CONTENT
-					}
-					false => StatusCode::UNAUTHORIZED,
-				}
-			}
-		})
-		.delete(move |headers: axum::http::HeaderMap, axum::extract::Query(c): axum::extract::Query<Change>| async move {
-			assert_eq!(c.group, "service-arb");
-			match (signed(&headers), group.lock().unwrap().remove(&c.email.to_lowercase())) {
-				(false, _) => StatusCode::UNAUTHORIZED,
-				(true, true) => StatusCode::NO_CONTENT,
-				(true, false) => StatusCode::NOT_FOUND,
-			}
-		}),
-	);
-	let site_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-	let refresh = format!("http://{}/auth/refresh", site_listener.local_addr().unwrap());
-	tokio::spawn(async move { axum::serve(site_listener, site).await.unwrap() });
-	let auth = Auth::new(TOKEN, Some(SsoSite::new(va_sso::Verifier::try_new(SSO_PUBLIC).unwrap(), &refresh).unwrap()), None);
-	let app = router(AppState::new(archive.clone(), auth, signals.clone(), HttpConfig::default()), None, None);
+	};
+	let auth = Auth::Panel(signer.public().parse().unwrap());
+	let app = router(AppState::new(archive.clone(), auth, signals.clone(), HttpConfig::default()), None, None).layer(panel);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let base = format!("http://{}", listener.local_addr().unwrap());
 	let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-	let client = Client::new(&base, TOKEN).unwrap();
+	let client = Client::ambient(http_as(&operator()), &base).unwrap();
 	Env {
-		_dir: dir,
+		dir,
 		archive,
 		signals,
+		signer,
 		base,
 		client,
 		server,
@@ -123,27 +150,40 @@ async fn env() -> Env {
 }
 
 impl Env {
-	/// The client as a browser on the archive's pages, signed in as a `service-arb` member.
-	fn member(&self, email: &str) -> Client {
-		self.signed_in(email, false, &["service-arb"], "same-origin")
+	fn caller(&self, who: &Who) -> Client {
+		Client::ambient(http_as(who), &self.base).unwrap()
 	}
 
-	fn signed_in(&self, email: &str, admin: bool, groups: &[&str], fetch_site: &str) -> Client {
-		let claims = va_sso::Claims {
-			sub: email.into(),
-			email: email.into(),
-			username: email.into(),
-			admin,
-			groups: groups.iter().map(|g| (*g).to_owned()).collect(),
-			exp: Timestamp::now().as_second() + 900,
-		};
-		let cookie = format!("{}={}", va_sso::COOKIE, va_sso::mint(SSO_PRIVATE, claims).unwrap());
-		let headers = reqwest::header::HeaderMap::from_iter([
-			(reqwest::header::COOKIE, cookie.parse().unwrap()),
-			("sec-fetch-site".parse().unwrap(), fetch_site.parse().unwrap()),
-		]);
-		Client::ambient(reqwest::Client::builder().default_headers(headers).build().unwrap(), &self.base).unwrap()
+	/// Someone signed in with no permissions here.
+	fn member(&self, sub: &str) -> Client {
+		self.caller(&Who::member(sub))
 	}
+
+	fn admin(&self) -> Client {
+		self.caller(&admin())
+	}
+
+	/// Pre-existing rows under `email`: a person nobody signed in as yet, and a gmail of theirs.
+	async fn unclaimed(&self, email: &str, gmail: &str) {
+		let db = sqlx::SqlitePool::connect(&format!("sqlite://{}", self.dir.path().join("review_archive.db").display()))
+			.await
+			.unwrap();
+		let id: i64 = sqlx::query_scalar("INSERT INTO people (email, name, first_seen) VALUES (?, '', '2026-01-01T00:00:00Z') RETURNING id")
+			.bind(email)
+			.fetch_one(&db)
+			.await
+			.unwrap();
+		sqlx::query("INSERT INTO managing_gmails (person_id, gmail, created_at) VALUES (?, ?, '2026-01-01T00:00:00Z')")
+			.bind(id)
+			.bind(gmail)
+			.execute(&db)
+			.await
+			.unwrap();
+	}
+}
+
+async fn id(c: &Client) -> i64 {
+	c.me().await.unwrap().id
 }
 
 struct Listed(Vec<Observed>);
@@ -263,8 +303,6 @@ async fn targets_crud_and_errors() {
 		.unwrap_err();
 	assert_eq!(not_a_place.status(), Some(StatusCode::BAD_REQUEST));
 
-	let stranger = Client::new(&e.base, "wrong-token-0000000000").unwrap();
-	assert_eq!(stranger.targets().await.unwrap_err().status(), Some(StatusCode::UNAUTHORIZED));
 	e.server.abort();
 }
 
@@ -400,7 +438,7 @@ async fn webhooks_and_the_openapi_document() {
 	] {
 		assert!(paths.contains(&p), "{p} missing from {paths:?}");
 	}
-	assert!(doc["components"]["securitySchemes"]["bearer"].is_object());
+	assert!(doc["components"]["securitySchemes"]["panel_assertion"].is_object());
 	e.server.abort();
 }
 
@@ -440,7 +478,7 @@ async fn record(e: &Env, target: i64, reviews: Vec<Observed>) {
 }
 
 #[tokio::test]
-async fn every_route_but_health_and_openapi_wants_the_token() {
+async fn every_route_but_health_and_openapi_wants_an_assertion() {
 	let e = env().await;
 	let http = reqwest::Client::new();
 	let routes = [
@@ -454,18 +492,24 @@ async fn every_route_but_health_and_openapi_wants_the_token() {
 		("POST", "/targets/1/scan"),
 		("GET", "/targets/1/export.zip"),
 		("POST", "/captures"),
-		("GET", &format!("/captures/{}.png", "0".repeat(64))),
+		("GET", &format!("/captures/{}.avif", "0".repeat(64))),
 		("GET", "/jobs/1"),
 		("GET", "/reviews/1"),
 		("GET", "/stats"),
 		("GET", "/webhooks"),
 		("POST", "/webhooks"),
 		("DELETE", "/webhooks/1"),
+		("GET", "/members"),
+		("POST", "/members/1/tokens"),
+		("GET", "/me"),
+		("GET", "/me/tokens"),
 		("GET", "/me/overview"),
 		("POST", "/me/gmails"),
 		("DELETE", "/me/gmails/1"),
+		("PATCH", "/me/gmails/1"),
 		("POST", "/me/gmails/1/tracks"),
 		("DELETE", "/me/gmails/1/tracks/1"),
+		("PATCH", "/me/gmails/1/tracks/1"),
 		("GET", "/me/gmails/1/locations/1/board"),
 		("PUT", "/me/gmails/1/reinstatements/1"),
 		("DELETE", "/me/gmails/1/reinstatements/1"),
@@ -477,17 +521,55 @@ async fn every_route_but_health_and_openapi_wants_the_token() {
 	for (method, path) in routes {
 		let resp = http
 			.request(method.parse().unwrap(), format!("{}{path}", e.base))
-			.bearer_auth("wrong-token-0000000000")
 			.json(&serde_json::json!({}))
 			.send()
 			.await
 			.unwrap();
 		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {path}");
-		let resp = http.request(method.parse().unwrap(), format!("{}{path}", e.base)).send().await.unwrap();
-		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {path} without a token");
 	}
 	assert_eq!(reqwest::get(format!("{}/health", e.base)).await.unwrap().status(), StatusCode::OK);
 	assert_eq!(reqwest::get(format!("{}/openapi.json", e.base)).await.unwrap().status(), StatusCode::OK);
+	e.server.abort();
+}
+
+/// An assertion is for the one request it was signed for: not another path, not another method.
+#[tokio::test]
+async fn an_assertion_replayed_on_another_request_is_refused() {
+	let e = env().await;
+	let alice = Who::member(ALICE);
+	let http = reqwest::Client::new();
+	let send = async |method: &str, path: &str, token: &str| {
+		http.request(method.parse().unwrap(), format!("{}{path}", e.base))
+			.header(sa_auth::HEADER, token)
+			.json(&serde_json::json!({}))
+			.send()
+			.await
+			.unwrap()
+			.status()
+	};
+	let me = sign(&e.signer, &alice, "GET", "/me", alive());
+	assert_eq!(send("GET", "/me", &me).await, StatusCode::OK);
+	assert_eq!(send("GET", "/me/overview", &me).await, StatusCode::UNAUTHORIZED);
+	let channels = sign(&e.signer, &alice, "GET", "/me/tg-channels", alive());
+	assert_eq!(send("POST", "/me/tg-channels", &channels).await, StatusCode::UNAUTHORIZED);
+	e.server.abort();
+}
+
+#[tokio::test]
+async fn a_forged_or_expired_assertion_is_no_sign_in() {
+	let e = env().await;
+	let alice = Who::member(ALICE);
+	let foreign: Signer = FOREIGN_KEY.parse().unwrap();
+	let unknown: Signer = FOREIGN_KEY.replacen("panel", "other", 1).parse().unwrap();
+	for token in [
+		sign(&foreign, &alice, "GET", "/me", alive()),
+		sign(&unknown, &alice, "GET", "/me", alive()),
+		sign(&e.signer, &alice, "GET", "/me", Timestamp::now().as_second() - 1),
+		"not.a.jws".to_owned(),
+	] {
+		let resp = reqwest::Client::new().get(format!("{}/me", e.base)).header(sa_auth::HEADER, &token).send().await.unwrap();
+		assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{token}");
+	}
 	e.server.abort();
 }
 
@@ -538,10 +620,9 @@ async fn an_interval_too_large_to_store_is_a_400() {
 #[tokio::test]
 async fn an_unreadable_body_or_query_gets_a_json_error_body() {
 	let e = env().await;
-	let http = reqwest::Client::new();
+	let http = http_as(&operator());
 	let bad_body = http
 		.post(format!("{}/targets", e.base))
-		.bearer_auth(TOKEN)
 		.header("content-type", "application/json")
 		.body("{not json")
 		.send()
@@ -551,7 +632,7 @@ async fn an_unreadable_body_or_query_gets_a_json_error_body() {
 	let text = bad_body.text().await.unwrap();
 	assert!(serde_json::from_str::<review_archive::core::dto::ErrorBody>(&text).is_ok(), "not an ErrorBody: {text:?}");
 
-	let bad_query = http.get(format!("{}/targets/1/reviews?gone=maybe", e.base)).bearer_auth(TOKEN).send().await.unwrap();
+	let bad_query = http.get(format!("{}/targets/1/reviews?gone=maybe", e.base)).send().await.unwrap();
 	assert!(bad_query.status().is_client_error(), "{}", bad_query.status());
 	let text = bad_query.text().await.unwrap();
 	assert!(serde_json::from_str::<review_archive::core::dto::ErrorBody>(&text).is_ok(), "not an ErrorBody: {text:?}");
@@ -569,7 +650,7 @@ async fn a_capture_is_served_only_once_recorded_and_by_its_exact_name() {
 
 	let avif = e.client.capture_avif(&url).await.unwrap();
 	assert_eq!(&avif[4..12], b"ftypavif");
-	let blobs = review_archive::store::blobs::BlobStore::new(e._dir.path().join("blobs"));
+	let blobs = review_archive::store::blobs::BlobStore::new(e.dir.path().join("blobs"));
 	assert_eq!(avif, std::fs::read(blobs.path_of(&sha).unwrap()).unwrap());
 
 	// a file in the blob dir that no capture row names is not served
@@ -689,9 +770,8 @@ async fn stats_come_back_as_json_through_the_client_and_as_csv_on_request() {
 	assert_eq!(rows[0].mean_rating, Some(5.0));
 	assert!(e.client.stats(Some(t), Some("2999-01-01"), None).await.unwrap().is_empty());
 
-	let csv = reqwest::Client::new()
+	let csv = http_as(&operator())
 		.get(format!("{}/stats?target={t}", e.base))
-		.bearer_auth(TOKEN)
 		.header("accept", "text/csv")
 		.send()
 		.await
@@ -737,93 +817,118 @@ async fn a_wait_beyond_the_cap_still_answers_when_the_job_ends() {
 	e.server.abort();
 }
 
-/// The operator's routes are not a member's, and `/me` is not the operator token's; a
-/// site admin signed in gets both. Someone signed in outside `service-arb` gets neither.
+/// The archive's own routes are for whoever may operate it, whatever else they may do.
 #[tokio::test]
-async fn members_and_the_operator_keep_to_their_routes() {
+async fn archive_routes_need_archive_operate() {
 	let e = env().await;
-	let alice = e.member(ALICE);
-	assert_eq!(alice.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(alice.webhooks().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(e.client.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(alice.overview().await.unwrap(), vec![]);
-
-	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
-	assert_eq!(admin.targets().await.unwrap(), vec![]);
-	assert_eq!(admin.overview().await.unwrap(), vec![]);
-
-	let stranger = e.signed_in("stranger@x.com", false, &["another-group"], "same-origin");
-	assert_eq!(stranger.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	let all_but = e.caller(&Who::member("root").may(&[sa_auth::Tokens::Grant.as_str(), sa_auth::Members::ActAs.as_str()]));
+	for c in [all_but, e.member(ALICE)] {
+		assert_eq!(c.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+		assert_eq!(c.webhooks().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+		assert_eq!(c.export_zip(1, None).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	}
+	assert_eq!(e.client.targets().await.unwrap(), vec![]);
 	e.server.abort();
 }
 
-/// An admin acts as any member through `X-Member`: their overview, their writes. No one else
-/// may; without it, everyone is themselves; `/me` is always who signed in.
+/// `/me` is anyone signed in, with no permission at all.
 #[tokio::test]
-async fn an_admin_acts_as_a_member_and_no_one_else_may() {
+async fn me_is_open_to_anyone_signed_in() {
+	let e = env().await;
+	let alice = e.member(ALICE);
+	let me = alice.me().await.unwrap();
+	assert_eq!(
+		me,
+		Me {
+			id: me.id,
+			email: "alice@x.com".into(),
+			name: ALICE.into(),
+			permissions: vec![],
+			tokens: TokensDto { balance: 15, daily: 15, cap: 300 },
+		}
+	);
+	assert_eq!(alice.overview().await.unwrap(), vec![]);
+	e.server.abort();
+}
+
+/// The members' list and their balances are for whoever may grant tokens.
+#[tokio::test]
+async fn members_and_their_balances_need_tokens_grant() {
+	let e = env().await;
+	let alice = e.member(ALICE);
+	let a = id(&alice).await;
+	let set = TokensChange {
+		change: BalanceChange::Set(8),
+		note: None,
+	};
+	for c in [&e.client, &alice] {
+		assert_eq!(c.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+		assert_eq!(c.change_tokens(a, &set).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	}
+	let granter = e.caller(&Who::member("root").may(&[sa_auth::Tokens::Grant.as_str()]));
+	assert_eq!(granter.change_tokens(a, &set).await.unwrap().balance, 8);
+	assert_eq!(granter.change_tokens(9999, &set).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	let root = id(&granter).await;
+	let member = |id, sub: &str, balance| MemberDto {
+		id,
+		email: format!("{sub}@x.com"),
+		name: sub.into(),
+		claimed: true,
+		balance,
+	};
+	assert_eq!(granter.members().await.unwrap(), vec![member(a, ALICE, 8), member(root, "root", 15)]);
+	e.server.abort();
+}
+
+/// Who may act as others does, through `X-Member`: their overview, their writes; `/me` is
+/// still who signed in. No one else may.
+#[tokio::test]
+async fn acting_as_a_member_needs_members_act_as() {
 	let e = env().await;
 	let alice = e.member(ALICE);
 	alice.add_gmail("alice@gmail.com").await.unwrap();
-	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
+	let a = id(&alice).await;
+	let admin = e.admin();
 	assert_eq!(admin.overview().await.unwrap(), vec![], "without the header, the admin's own");
-	let as_alice = admin.clone().as_member(ALICE);
+	let as_alice = admin.clone().as_member(a);
 	assert_eq!(as_alice.overview().await.unwrap(), alice.overview().await.unwrap());
 	as_alice.add_gmail("ops@gmail.com").await.unwrap();
 	assert_eq!(alice.overview().await.unwrap().len(), 2, "the admin's write is alice's");
-	assert_eq!(e.client.clone().as_member(ALICE).overview().await.unwrap().len(), 2, "the operator's token acts too");
-	assert_eq!(e.member(BOB).as_member(ALICE).overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-
-	let root = Me {
-		email: "root@x.com".into(),
-		username: "root@x.com".into(),
-		admin: true,
-		member: true,
-		tokens: Some(TokensDto { balance: 15, daily: 15, cap: 300 }),
-	};
-	assert_eq!(as_alice.me().await.unwrap(), root);
-	assert!(!alice.me().await.unwrap().admin);
-	assert_eq!(e.client.me().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "the token is no one");
-
-	let bob = MemberDto {
-		email: BOB.into(),
-		username: Some("bob".into()),
-		display_name: Some("Bob B".into()),
-		balance: 15,
-	};
-	assert_eq!(admin.members().await.unwrap(), vec![bob]);
-	assert_eq!(alice.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(e.client.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "no cookie to ask the site with");
+	assert_eq!(as_alice.me().await.unwrap().email, "root@x.com");
+	assert_eq!(admin.as_member(9999).overview().await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	for c in [e.client.clone(), e.member(BOB)] {
+		assert_eq!(c.as_member(a).overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	}
 	e.server.abort();
 }
 
-/// Someone signed in outside `service-arb` learns who they are signed in as, and nothing else;
-/// an admin puts them in the group through valeratrades.com, and takes them out.
+/// Rows from before people had ids go to the first sign-in with their address that concierge
+/// verified.
 #[tokio::test]
-async fn an_admin_lets_someone_signed_in_into_the_group() {
+async fn an_unverified_sign_in_cannot_claim_its_addresss_rows() {
 	let e = env().await;
-	let newcomer = e.signed_in("New@x.com", false, &[], "same-origin");
-	let me = newcomer.me().await.unwrap();
-	assert_eq!(
-		(me.email.as_str(), me.admin, me.member, me.tokens),
-		("new@x.com", false, false, None),
-		"no tokens accrue to someone not in"
-	);
-	assert_eq!(newcomer.overview().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(newcomer.add_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(e.member(ALICE).add_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	assert_eq!(
-		e.client.add_member("new@x.com").await.unwrap_err().status(),
-		Some(StatusCode::FORBIDDEN),
-		"no cookie to ask the site with"
-	);
+	e.unclaimed("carol@x.com", "carol.ops@gmail.com").await;
+	let unverified = Who {
+		verified: false,
+		..Who::member("carol")
+	};
+	assert_eq!(e.caller(&unverified).me().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
+	let overview = e.member("carol").overview().await.unwrap();
+	assert_eq!(overview.iter().map(|g| g.gmail.gmail.as_str()).collect::<Vec<_>>(), ["carol.ops@gmail.com"]);
+	e.server.abort();
+}
 
-	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
-	admin.add_member("New@x.com").await.unwrap();
-	let emails = |ms: Vec<MemberDto>| ms.into_iter().map(|m| m.email).collect::<Vec<_>>();
-	assert_eq!(emails(admin.members().await.unwrap()), vec![BOB, "new@x.com"]);
-	admin.remove_member("new@x.com").await.unwrap();
-	assert_eq!(emails(admin.members().await.unwrap()), vec![BOB]);
-	assert_eq!(admin.remove_member("new@x.com").await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+/// With another account already holding the address, whose the rows are is not for a sign-in to say.
+#[tokio::test]
+async fn an_address_another_account_holds_cannot_be_claimed() {
+	let e = env().await;
+	e.member("dan").me().await.unwrap();
+	e.unclaimed("dan@x.com", "dan.ops@gmail.com").await;
+	let twin = Who {
+		sub: "dan-twin".into(),
+		..Who::member("dan")
+	};
+	assert_eq!(e.caller(&twin).me().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	e.server.abort();
 }
 
@@ -832,15 +937,15 @@ async fn an_admin_lets_someone_signed_in_into_the_group() {
 async fn an_admin_sets_a_members_tokens() {
 	let e = env().await;
 	let alice = e.member(ALICE);
-	assert_eq!(alice.me().await.unwrap().tokens.unwrap().balance, 15, "a day's worth on first sight");
+	let me = alice.me().await.unwrap();
+	assert_eq!(me.tokens.balance, 15, "a day's worth on first sight");
 	let set = |n| TokensChange {
 		change: BalanceChange::Set(n),
 		note: Some("trial".into()),
 	};
-	assert_eq!(alice.change_tokens(ALICE, &set(1000)).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	let admin = e.signed_in("root@x.com", true, &[], "same-origin");
-	assert_eq!(admin.change_tokens(ALICE, &set(8)).await.unwrap().balance, 8);
-	assert_eq!(alice.me().await.unwrap().tokens.unwrap().balance, 8);
+	let admin = e.admin();
+	assert_eq!(admin.change_tokens(me.id, &set(8)).await.unwrap().balance, 8);
+	assert_eq!(alice.me().await.unwrap().tokens.balance, 8);
 	let ledger = alice.ledger().await.unwrap();
 	assert_eq!(
 		ledger.iter().map(|l| (l.kind, l.delta, l.by.as_deref())).collect::<Vec<_>>(),
@@ -850,12 +955,11 @@ async fn an_admin_sets_a_members_tokens() {
 		change: BalanceChange::Grant(0),
 		note: None,
 	};
-	assert_eq!(admin.change_tokens(ALICE, &bad).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
+	assert_eq!(admin.change_tokens(me.id, &bad).await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
 	e.server.abort();
 }
 
-/// `serve --dev-member`: a browser with no sign-in is that member, so a dashboard runs
-/// without valeratrades.com; a token or a cookie still says who it is.
+/// `serve --dev-member`: every request is that member, so a dashboard runs without the panel.
 #[tokio::test]
 async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 	let dir = tempfile::tempdir().unwrap();
@@ -865,11 +969,20 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 	})
 	.await
 	.unwrap();
-	archive
-		.add_gmail("test@x.com", &review_archive::core::dto::NewGmail { gmail: "ops@gmail.com".into() })
-		.await
-		.unwrap();
-	let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
+	let seen = Seen {
+		sub: "test",
+		email: "test@localhost",
+		email_verified: true,
+		name: "test",
+	};
+	let Claim::Person(test) = archive.person(&seen).await.unwrap() else {
+		panic!("nobody else holds the address")
+	};
+	archive.add_gmail(test, &review_archive::core::dto::NewGmail { gmail: "ops@gmail.com".into() }).await.unwrap();
+	let auth = Auth::Dev {
+		sub: "test".into(),
+		permissions: Vec::<String>::new().into_iter().collect(),
+	};
 	let mfe = tempfile::tempdir().unwrap();
 	let app = router(AppState::new(archive, auth, Arc::new(Signals::default()), HttpConfig::default()), Some(mfe.path()), Some("/"));
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -878,22 +991,17 @@ async fn a_dev_member_stands_in_for_a_missing_sign_in() {
 
 	let nobody = Client::ambient(reqwest::Client::new(), &base).unwrap();
 	assert_eq!(nobody.overview().await.unwrap()[0].gmail.gmail, "ops@gmail.com");
-	assert_eq!(nobody.me().await.unwrap().email, "test@x.com");
+	assert_eq!(nobody.me().await.unwrap().email, "test@localhost");
 	assert_eq!(nobody.targets().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN), "a member, not the operator");
-	assert_eq!(
-		Client::new(&base, TOKEN).unwrap().overview().await.unwrap_err().status(),
-		Some(StatusCode::FORBIDDEN),
-		"the token is still the token"
-	);
 	for view in [
 		"/",
 		"/telegram",
 		"/tokens",
 		"/gmails/1",
 		"/gmails/1/places/2",
-		"/members/bob@x.com",
-		"/members/bob@x.com/",
-		"/members/bob@x.com/gmails/1/places/2",
+		"/members/3",
+		"/members/3/",
+		"/members/3/gmails/1/places/2",
 	] {
 		let page = reqwest::get(format!("{base}{view}")).await.unwrap();
 		assert_eq!(page.status(), StatusCode::OK, "{view} is the dashboard's page");
@@ -925,7 +1033,10 @@ async fn a_new_bundle_is_never_answered_from_an_old_ones_cache() {
 		})
 		.await
 		.unwrap();
-		let auth = Auth::new(TOKEN, None, Some("test@x.com".into()));
+		let auth = Auth::Dev {
+			sub: "test".into(),
+			permissions: Vec::<String>::new().into_iter().collect(),
+		};
 		let app = router(AppState::new(archive, auth, Arc::new(Signals::default()), HttpConfig::default()), Some(mfe.path()), Some("/"));
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let base = format!("http://{}", listener.local_addr().unwrap());
@@ -966,34 +1077,6 @@ async fn a_new_bundle_is_never_answered_from_an_old_ones_cache() {
 	server.abort();
 }
 
-/// A sign-in cookie reads from anywhere it is sent, but writes only from the archive's own
-/// pages; one signed by another key, or expired, is no sign-in.
-#[tokio::test]
-async fn a_cookie_writes_only_from_this_origin_and_only_while_valid() {
-	let e = env().await;
-	let elsewhere = e.signed_in(ALICE, false, &["service-arb"], "cross-site");
-	assert_eq!(elsewhere.overview().await.unwrap(), vec![]);
-	assert_eq!(elsewhere.add_gmail("ops@gmail.com").await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
-	e.member(ALICE).add_gmail("ops@gmail.com").await.unwrap();
-
-	let http = reqwest::Client::new();
-	let ask = async |cookie: String| http.get(format!("{}/me/overview", e.base)).header("cookie", cookie).send().await.unwrap().status();
-	let claims = |exp: i64| va_sso::Claims {
-		sub: "a".into(),
-		email: ALICE.into(),
-		username: "a".into(),
-		admin: false,
-		groups: vec!["service-arb".into()],
-		exp,
-	};
-	let other_key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHz7B0H6oZ1y3Yb8hB5o2c0X9m1wV6o1b8wXcY0f3s1a\n-----END PRIVATE KEY-----\n";
-	let forged = va_sso::mint(other_key, claims(Timestamp::now().as_second() + 900)).unwrap();
-	assert_eq!(ask(format!("va_access={forged}")).await, StatusCode::UNAUTHORIZED);
-	let expired = va_sso::mint(SSO_PRIVATE, claims(Timestamp::now().as_second() - 3600)).unwrap();
-	assert_eq!(ask(format!("va_access={expired}")).await, StatusCode::UNAUTHORIZED);
-	e.server.abort();
-}
-
 /// Two members on one place share its target and its scans; each sees only their own
 /// gmails, boards and screenshots, and the operator sees every screenshot.
 #[tokio::test]
@@ -1005,7 +1088,7 @@ async fn members_share_places_but_see_only_their_own() {
 	assert_eq!(alice.add_gmail("ops.paris@gmail.com").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST), "twice");
 	assert_eq!(alice.add_gmail("two words").await.unwrap_err().status(), Some(StatusCode::BAD_REQUEST));
 	assert_eq!(
-		e.member("carol@x.com").add_gmail(" tg:@Owner ").await.unwrap().gmail,
+		e.member("carol").add_gmail(" tg:@Owner ").await.unwrap().gmail,
 		"tg:@owner",
 		"an alias groups as well as an address"
 	);
@@ -1208,5 +1291,27 @@ async fn telegram_channels_are_the_members_own() {
 	assert_eq!(alice.tg_channels().await.unwrap(), vec![added.clone()]);
 	alice.delete_tg_channel(added.id).await.unwrap();
 	assert_eq!(alice.tg_channels().await.unwrap(), vec![]);
+	e.server.abort();
+}
+
+/// A test post is one a minute per person, whatever became of the last.
+#[tokio::test]
+async fn a_second_test_post_within_a_minute_is_a_429() {
+	let e = env().await;
+	let alice = e.member(ALICE);
+	let ch = alice
+		.add_tg_channel(&NewTgChannel {
+			destination: "@chan".into(),
+			gmail_id: None,
+			events: vec![Event::ReviewGone],
+		})
+		.await
+		.unwrap();
+	// no bot is configured here, which the archive also answers 429, so the limit is told by its reason
+	let limited = |r: &Result<(), review_archive_client::Error>| matches!(r, Err(review_archive_client::Error::Api { status: StatusCode::TOO_MANY_REQUESTS, message }) if message == "one test post a minute");
+	let first = alice.test_tg_channel(ch.id).await;
+	assert!(!limited(&first), "{first:?}");
+	let second = alice.test_tg_channel(ch.id).await;
+	assert!(limited(&second), "{second:?}");
 	e.server.abort();
 }
