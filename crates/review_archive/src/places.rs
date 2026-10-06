@@ -29,6 +29,13 @@ pub struct Resolved {
 /// The place id in `input`, searching for it when the input has only a name. `Some`
 /// resolution when a search happened. `key` is the Places API key, needed only then.
 pub async fn resolve(http: &reqwest::Client, key: Option<&str>, input: &str) -> eyre::Result<(String, Option<Resolved>)> {
+	let expanded;
+	let input = if input.trim().starts_with("https://maps.app.goo.gl/") {
+		expanded = expand_short_link(input.trim()).await?;
+		expanded.as_str()
+	} else {
+		input
+	};
 	match place::parse(input).map_err(|e| Rejected::invalid(format!("{e:#}")))? {
 		Parsed::PlaceId(id) => Ok((id, None)),
 		Parsed::Search { query, near } => {
@@ -37,6 +44,20 @@ pub async fn resolve(http: &reqwest::Client, key: Option<&str>, input: &str) -> 
 			Ok((found.place_id.clone(), Some(found)))
 		}
 	}
+}
+
+/// One hop only: following further can land on consent.google.com instead of the place.
+async fn expand_short_link(url: &str) -> eyre::Result<String> {
+	let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(PlacesError::from)?;
+	let resp = client.get(url).send().await.map_err(PlacesError::from)?;
+	let location = resp
+		.headers()
+		.get(reqwest::header::LOCATION)
+		.ok_or_else(|| Rejected::invalid(format!("{url:?} answered {} without a redirect", resp.status())))?;
+	Ok(location
+		.to_str()
+		.map_err(|e| Rejected::invalid(format!("{url:?} redirected to a non-UTF-8 location: {e}")))?
+		.to_owned())
 }
 
 /// Places API (New) text search, first hit.
