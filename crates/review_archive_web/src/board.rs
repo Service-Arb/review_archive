@@ -27,7 +27,7 @@ const DOCK_THEME: &str = "--dv-group-bg: var(--secondary); --dv-tabstrip-bg: var
 	--dv-accent: var(--primary); --dv-shadow-bg: var(--hover); --dv-resize-bg: var(--border); --dv-content-pad: 0;";
 
 #[component]
-pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<String>) -> Element {
+pub fn Board(gmail: GmailDto, location: LocationSummary, tab: Option<i64>) -> Element {
 	let Api(api) = use_context();
 	let Refresh(refresh) = use_context();
 	let (g, target) = (gmail.id, location.target.id);

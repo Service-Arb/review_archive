@@ -5585,6 +5585,7 @@ dependencies = [
  "js-sys",
  "reqwest 0.13.5",
  "review_archive_client",
+ "sa_auth",
  "wasm-bindgen",
  "web-sys",
 ]

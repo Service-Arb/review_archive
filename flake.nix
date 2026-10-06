@@ -148,15 +148,15 @@
           auditable = false;
         };
 
-        # `nix run .#dev-mfe [-- <member email>]`: the dashboard built (debug) into tmp/mfe-dev and
-        # served by a local `serve` at `/`, on the repo's `data/`, signed in as that member
-        # (`--dev-member`: no valeratrades.com needed). Scans run in a Chromium window: a
+        # `nix run .#dev-mfe [-- <held>]`: the dashboard built (debug) into tmp/mfe-dev and
+        # served by a local `serve` at `/`, on the repo's `data/`, signed in holding `<held>`
+        # (`--dev-member`: an alias, permissions comma-separated, or `none`; no panel needed). Scans run in a Chromium window: a
         # headless one gets Maps' limited view (#9).
         devMfe = pkgs.writeShellApplication {
           name = "dev-mfe";
           runtimeInputs = [ pkgs.git ];
           text = ''
-            member="''${1:-test@valeratrades.com}"
+            member="''${1:-sa:admin}"
             repo="$(git rev-parse --show-toplevel)"
             cd "$repo"
             out="$repo/tmp/mfe-dev"
@@ -223,7 +223,7 @@
             nix build                         the review_archive binary
             nix build .#${pname}-container    OCI image with chromium (Linux only)
             nix build .#mfe                   the dashboard bundle (served under /mfe/)
-            nix run .#dev-mfe [-- <email>]    the dashboard, built and served locally at / as that member
+            nix run .#dev-mfe [-- <held>]     the dashboard, built and served locally at /, holding those permissions
             nix run .#help                    this
             cargo test                        parser snapshots, repository, scheduler, gbp stub
             cargo test -- --ignored live      one real scan; needs a browser and the network

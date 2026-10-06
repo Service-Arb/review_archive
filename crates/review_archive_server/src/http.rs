@@ -81,7 +81,7 @@ impl AppState {
 }
 
 /// `mfe`: the built dashboard bundle, served under `/mfe/`. `sign_in`: where the page sends a
-/// browser without a live `va_access` cookie; with both, `/` is the dashboard's page.
+/// browser on a 401; with both, `/` is the dashboard's page.
 pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&str>) -> Router {
 	let admin = Router::new()
 		.route("/targets", get(targets).post(add_target))
@@ -145,6 +145,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 				.route("/telegram", get(page.clone()))
 				.route("/tokens", get(page.clone()))
 				.route("/gmails/{*view}", get(page.clone()))
+				.route("/members/{id}/tokens", get(page.clone())) // the API's path for a balance change; its GET is the member tab's ledger
 				.route("/members/{member}/{*view}", get(page.clone()))
 				.route("/members/{member}/", get(page.clone()))
 				.route("/members/{member}", get(page));

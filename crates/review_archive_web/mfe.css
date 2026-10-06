@@ -15,6 +15,7 @@
 @layer ramfe {
 	mfe-review-archive-dashboard {
 		display: block;
+		height: 100%;
 	}
 	mfe-review-archive-dashboard :where(button, input, select, p) {
 		margin: 0;
