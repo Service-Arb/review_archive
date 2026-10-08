@@ -317,10 +317,10 @@ bundle served by the binary under `/mfe/` (`mfe_dir`), which the panel forwards 
 and gives it the API base (`/api/review_archive`), its sign-in and its CSRF cookie. A 401
 sends the top window to the sign-in with `return_to` = the page, which comes back signed
 in. Design: Figma "review_archive / dashboard", on ev_lib's `uikit`. One holding
-`members:act_as` gets tabs: their own dashboard, and one per member opened from
-`GET /members`, acting as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
+`members:act_as` picks a member from `GET /members` at `/act-as` (the panel's account menu
+links there) and acts as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
 `/gmails/{id}/places/{target}`, `/telegram`, `/tokens` (the ledger), under `/members/{id}`
-for a member's tab. Standalone (`--dev-member`), the binary serves the same page at `/`.
+when acting as one. Standalone (`--dev-member`), the binary serves the same page at `/`.
 
 ## Library
 

@@ -149,6 +149,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 				.route("/", get(page.clone()))
 				.route("/telegram", get(page.clone()))
 				.route("/tokens", get(page.clone()))
+				.route("/act-as", get(page.clone()))
 				.route("/gmails/{*view}", get(page.clone()))
 				.route("/members/{id}/tokens", get(page.clone())) // the API's path for a balance change; its GET is the member tab's ledger
 				.route("/members/{member}/{*view}", get(page.clone()))

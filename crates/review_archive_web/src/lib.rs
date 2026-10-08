@@ -1,7 +1,7 @@
 //! The dashboard: a person's managing gmails, the places each tracks, and per place a board
 //! of its reviews — snapshotted, removed, reinstating. The Service-Arb panel mounts it and
 //! forwards its calls to the archive: the panel's session cookie and CSRF header sign them.
-//! One who may act as others gets tabs: their own dashboard, and any member's, acting as them.
+//! One who may act as others picks a member at `/act-as`, from the panel's account menu.
 
 #![cfg(target_arch = "wasm32")]
 #![allow(clippy::useless_format)] // rsx! lowers every "{x}" to a format!
@@ -18,7 +18,6 @@ use ev_lib::{
 	t,
 	uikit::{
 		self, BadgeVariant, Button, ButtonVariant, Card, CommandDialog, CommandEmpty, CommandInput, CommandItem, CommandList, InfoTip, InfoTipContent, InfoTipTrigger, Input, Size, Switch,
-		Tabs, TabsList, TabsTrigger,
 	},
 };
 use review_archive_client::{
@@ -160,11 +159,13 @@ impl dioxus::router::FromRouteSegments for View {
 }
 
 /// Where the dashboard is, as its URL under the host's `base` says: a view of the caller's
-/// own, or of the member their tab acts as.
+/// own, of the member they act as, or the pick of one.
 #[derive(Clone, Debug, PartialEq, Routable)]
 #[rustfmt::skip]
 enum Route {
 	#[layout(Shell)]
+		#[route("/act-as", Pick)]
+		Pick {},
 		#[route("/members/:member/:..view", TheirView)]
 		Theirs { member: i64, view: View },
 		#[route("/:..view", MyView)]
@@ -178,44 +179,16 @@ impl Route {
 			None => Self::Mine { view },
 		}
 	}
-
-	fn member(&self) -> Option<i64> {
-		match self {
-			Self::Theirs { member, .. } => Some(*member),
-			Self::Mine { .. } => None,
-		}
-	}
-
-	fn view(&self) -> &View {
-		match self {
-			Self::Theirs { view, .. } | Self::Mine { view } => view,
-		}
-	}
-}
-
-/// Each tab's last route, by its member: what a hidden tab keeps showing, and where going
-/// back to it lands.
-#[derive(Clone, Copy)]
-struct Views(Signal<std::collections::HashMap<Option<i64>, Route>>);
-
-/// The routes render nothing themselves — every tab stays mounted under [`Shell`] — they
-/// only note where their tab is.
-fn remember(route: Route) -> Element {
-	let Views(mut views) = use_context();
-	use_effect(use_reactive!(|route| {
-		views.write().insert(route.member(), route);
-	}));
-	rsx! {}
 }
 
 #[component]
 fn MyView(view: View) -> Element {
-	remember(Route::Mine { view })
+	rsx! { Workspace { tab: None, at: view } }
 }
 
 #[component]
 fn TheirView(member: i64, view: View) -> Element {
-	remember(Route::Theirs { member, view })
+	rsx! { Workspace { key: "{member}", tab: member, at: view } } // a workspace's `Api` is fixed at mount
 }
 
 fn api() -> Client {
@@ -277,135 +250,40 @@ const SHELL: &str = "flex min-h-0 flex-1 bg-background text-ink text-[13px] font
 
 #[component]
 fn Shell() -> Element {
-	use_context_provider(|| Views(Signal::new(Default::default())));
-	let route = use_route::<Route>();
 	let me = use_resource(|| async { api().me().await.map_err(shown) });
-	let body = match &*me.read() {
-		Some(Ok(me)) => rsx! { Signed { me: me.clone(), view: route } },
+	match &*me.read() {
+		Some(Ok(me)) => rsx! { Signed { me: me.clone() } },
 		Some(Err(e)) => rsx! { div { class: "{SHELL} p-6 text-accent-error", "{e}" } },
 		None => rsx! { div { class: "{SHELL} p-6 text-ink-soft", "Loading…" } },
-	};
-	rsx! {
-		div { class: "flex h-full flex-col",
-			{body}
-			Outlet::<Route> {}
-		}
 	}
 }
 
 #[component]
-fn Signed(me: Me, view: Route) -> Element {
+fn Signed(me: Me) -> Element {
 	use_context_provider(|| Held(me.permissions.iter().cloned().collect()));
-	match may(Members::ActAs) || may(Tokens::Grant) {
-		true => rsx! { Admin { me: me.id } },
-		false => rsx! { Workspace { view } },
+	use_context_provider(|| me.clone());
+	rsx! {
+		div { class: "flex h-full flex-col", Outlet::<Route> {} }
 	}
 }
 
-/// "You", then a tab per member opened; every tab stays mounted, so switching keeps where
-/// each one was. The active tab is the URL's `member`.
+/// The picker over one's own dashboard; picking a member acts as them, unless one only grants
+/// tokens.
 #[component]
-fn Admin(me: i64) -> Element {
-	let route = use_route::<Route>();
-	let Views(mut views) = use_context();
-	let active = route.member();
+fn Pick() -> Element {
+	let me: Me = use_context();
 	let acts = may(Members::ActAs);
-	let grants = may(Tokens::Grant);
-	let mut opened = use_signal(Vec::<i64>::new);
-	let mut labels = use_signal(std::collections::HashMap::<i64, String>::new);
-	let mut picking = use_signal(|| false);
-	// a link to a member's view opens their tab
-	use_effect(use_reactive!(|active| {
-		if let Some(m) = active
-			&& !opened.peek().contains(&m)
-		{
-			opened.write().push(m);
-		}
-	}));
-	let mut tabs = opened();
-	if let Some(m) = active
-		&& !tabs.contains(&m)
-	{
-		tabs.push(m);
-	}
-	// where a tab is: the URL for the active one, else where it was left; a tab never visited starts at its home
-	let view_of = move |m: Option<i64>| match views.read().get(&m) {
-		Some(r) => r.clone(),
-		None => Route::at(m, View::Home),
-	};
-	let shown = |m: Option<i64>| match active == m {
-		true => "flex min-h-0 flex-1",
-		false => "hidden",
-	};
 	rsx! {
-		div { class: "flex min-h-0 flex-1 flex-col bg-background text-ink text-[13px] font-sans",
-			Tabs {
-				// the kit's tabs are keyed by string: "" is the caller's own
-				value: active.map(|m| m.to_string()).unwrap_or_default(),
-				on_value_change: move |m: String| {
-					navigator().push(view_of((!m.is_empty()).then(|| m.parse().expect("a tab's value is its member's id"))));
-				},
-				class: "border-b border-border bg-secondary px-2 py-1.5",
-				div { class: "flex items-center gap-1",
-					TabsList { class: "bg-transparent",
-						TabsTrigger { value: "", "You" }
-						for m in tabs.clone() {
-							div { key: "{m}", class: "flex items-center",
-								TabsTrigger { value: m.to_string(), {labels.read().get(&m).cloned().unwrap_or_else(|| format!("#{m}"))} }
-								Button {
-									variant: ButtonVariant::Ghost,
-									size: Size::Xs,
-									icon: true,
-									r#type: "button",
-									onclick: move |_| {
-										opened.write().retain(|t| *t != m);
-										views.write().remove(&Some(m));
-										if router().current::<Route>().member() == Some(m) {
-											navigator().push(view_of(None));
-										}
-									},
-									"×"
-								}
-							}
-						}
-					}
-					if grants {
-						Button {
-							variant: ButtonVariant::Ghost,
-							size: Size::Xs,
-							icon: true,
-							r#type: "button",
-							class: "text-ink-soft text-base",
-							onclick: move |_| picking.set(true),
-							"+"
-						}
-					}
+		Workspace { tab: None, at: View::Home }
+		Picker {
+			on_pick: move |m: MemberDto| {
+				if acts {
+					navigator().replace(Route::at((m.id != me.id).then_some(m.id), View::Home));
 				}
-			}
-			div { class: shown(None),
-				Workspace { view: if active.is_none() { route.clone() } else { view_of(None) } }
-			}
-			for m in tabs {
-				div { key: "{m}", class: shown(Some(m)),
-					Workspace { view: if active == Some(m) { route.clone() } else { view_of(Some(m)) } }
-				}
-			}
-			if picking() {
-				Picker {
-					on_pick: move |m: MemberDto| {
-						if !acts {
-							return;
-						}
-						picking.set(false);
-						let tab = (m.id != me).then_some(m.id);
-						if !m.name.is_empty() {
-							labels.write().insert(m.id, m.name);
-						}
-						navigator().push(view_of(tab));
-					},
-					on_close: move |_| picking.set(false),
-				}
-			}
+			},
+			on_close: move |_| {
+				navigator().replace(Route::Mine { view: View::Home });
+			},
 		}
 	}
 }
@@ -495,12 +373,10 @@ fn Balance(member: i64, balance: i64) -> Element {
 	}
 }
 
-/// One tab's dashboard at `view`: the signed-in person's own, or (its `member`) the one they
-/// act as.
+/// The dashboard at `at`: the signed-in person's own, or the one `tab` they act as.
 #[component]
-fn Workspace(view: Route) -> Element {
+fn Workspace(tab: Option<i64>, at: View) -> Element {
 	let tr: Translator = use_context();
-	let tab = view.member();
 	let Api(client) = use_context_provider(|| {
 		Api(match tab {
 			Some(m) => api().as_member(m),
@@ -559,7 +435,6 @@ fn Workspace(view: Route) -> Element {
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
 		None => (None, None),
 	};
-	let at = view.view().clone();
 	let (picked, target) = match at {
 		View::Home | View::Telegram | View::Tokens => (None, None),
 		View::Gmail(gmail) => (Some(gmail), None),
@@ -582,7 +457,10 @@ fn Workspace(view: Route) -> Element {
 			Rail { gmails: gmails.clone(), current, at: at.clone(), tokens, tab }
 			div { class: "flex min-h-0 min-w-0 flex-1 flex-col",
 				if let Some(acting) = acting {
-					div { class: "border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn", "{acting}" }
+					div { class: "flex items-center gap-3 border-b border-border bg-accent-warn/15 px-6 py-2 text-accent-warn",
+						span { class: "flex-1", "{acting}" }
+						Link { class: "underline", to: Route::Mine { view: View::Home }, {t!(tr, "workspace.back", "Back to you")} }
+					}
 				}
 				if let Some(e) = failure.0() {
 					div { class: "border-b border-border bg-accent-error/15 px-6 py-2 text-accent-error", "{e}" }
