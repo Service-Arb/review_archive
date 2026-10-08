@@ -6,7 +6,7 @@ use dioxus::{prelude::*, web::WebEventExt};
 use dockviewers_dioxus::{Config, DockPanel, Group, GroupId, MinSize, PackedApi, PackedArea, PanelId, Step};
 use review_archive_client::dto::{BoardCard, GmailDto, LocationSummary};
 
-use crate::{Api, Badge, Refresh, Route, Tone, View, act, ago, shown};
+use crate::{Api, Badge, Refresh, Route, Tone, View, act, ago, host, shown};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Column {
@@ -174,7 +174,7 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 			},
 			ondragend: move |_| dragging.set(None),
 			if let Some(url) = r.capture_url.clone() {
-				img { class: "w-full rounded-md bg-muted", src: "{url}" }
+				img { class: "w-full rounded-md bg-muted", src: "{host().api.trim_end_matches('/')}{url}" }
 			}
 			div { class: "mt-2 flex items-center gap-2",
 				span { class: "text-accent-warn", "{stars}" }
@@ -182,6 +182,9 @@ fn Card(card: BoardCard, column: Column, mut dragging: Signal<Option<(i64, Colum
 			}
 			if let Some(text) = &r.text {
 				p { class: "mt-1 line-clamp-3 text-ink-soft", "{text}" }
+			}
+			if let Some(reply) = &r.reply {
+				p { class: "mt-2 line-clamp-3 border-l-2 border-border pl-2 text-ink-soft", "{reply}" }
 			}
 			div { class: "mt-2 flex items-center justify-between text-[11px] text-ink-soft",
 				span { "{when}" }
