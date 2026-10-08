@@ -28,7 +28,7 @@ color-eyre = "0.6"
 concierge_iam = "0.1.0"
 crc32fast = "1"
 csv = "1"
-ev_lib = { version = "0.24.2", default-features = false }
+ev_lib = { version = "0.25.0", default-features = false }
 eyre = "0.6"
 futures = "0.3"
 hmac = "0.13"
@@ -64,7 +64,7 @@ utoipa = "5"
 v_utils = { version = "2.19", default-features = false, features = ["macros"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
-ev_lib_classes = "0.13.1"
+ev_lib_classes = "0.14.0"
 insta = { version = "1", features = ["yaml"] }
 png = "0.18"
 tempfile = "3"
