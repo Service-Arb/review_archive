@@ -142,7 +142,12 @@ pub async fn operates_archive(req: Request, next: Next) -> Response {
 	require(sa_auth::Archive::Operate, req, next).await
 }
 
-/// The members' list and their balances.
+/// The members' list: whom one may act as.
+pub async fn acts_as(req: Request, next: Next) -> Response {
+	require(sa_auth::Members::ActAs, req, next).await
+}
+
+/// A member's balance change.
 pub async fn grants_tokens(req: Request, next: Next) -> Response {
 	require(sa_auth::Tokens::Grant, req, next).await
 }

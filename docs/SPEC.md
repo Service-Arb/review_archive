@@ -286,7 +286,8 @@ the service.
   is the caller's `sa:review_archive:*` slice.
 - `sa:review_archive:archive:operate` opens the archive's own routes: targets, scans,
   captures, jobs, reviews, stats, webhooks, export, and any capture's AVIF.
-  `sa:review_archive:tokens:grant` opens `GET /members` and `POST /members/{id}/tokens`.
+  `sa:review_archive:members:act_as` opens `GET /members`; `sa:review_archive:tokens:grant`,
+  `POST /members/{id}/tokens`.
 - `/me` routes are every signed-in person's own, and `GET /captures/{sha}.avif` of the places
   their gmails track. With `sa:review_archive:members:act_as`, `X-Member: <person id>` acts as
   that member: their gmails, boards and channels, their writes; anyone else sending it gets 403.
@@ -317,8 +318,9 @@ bundle served by the binary under `/mfe/` (`mfe_dir`), which the panel forwards 
 and gives it the API base (`/api/review_archive`), its sign-in and its CSRF cookie. A 401
 sends the top window to the sign-in with `return_to` = the page, which comes back signed
 in. Design: Figma "review_archive / dashboard", on ev_lib's `uikit`. One holding
-`members:act_as` gets tabs: their own dashboard, and one per member opened from
-`GET /members`, acting as them through `X-Member`. Where it is is its URL — `/gmails/{id}`,
+`members:act_as` gets tabs: their own dashboard, and one per member picked from
+`GET /members` at `/act-as` (the panel's account menu links there), acting as them through
+`X-Member`; the open tabs outlive a full load of the page, per browser tab. Where it is is its URL — `/gmails/{id}`,
 `/gmails/{id}/places/{target}`, `/telegram`, `/tokens` (the ledger), under `/members/{id}`
 for a member's tab. Standalone (`--dev-member`), the binary serves the same page at `/`.
 

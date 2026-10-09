@@ -851,9 +851,9 @@ async fn me_is_open_to_anyone_signed_in() {
 	e.server.abort();
 }
 
-/// The members' list and their balances are for whoever may grant tokens.
+/// Who may act as others lists them, with their balances; who may grant tokens changes those.
 #[tokio::test]
-async fn members_and_their_balances_need_tokens_grant() {
+async fn members_need_act_as_and_their_balances_tokens_grant() {
 	let e = env().await;
 	let alice = e.member(ALICE);
 	let a = id(&alice).await;
@@ -866,8 +866,11 @@ async fn members_and_their_balances_need_tokens_grant() {
 		assert_eq!(c.change_tokens(a, &set).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	}
 	let granter = e.caller(&Who::member("root").may(&[sa_auth::Tokens::Grant.as_str()]));
+	assert_eq!(granter.members().await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	assert_eq!(granter.change_tokens(a, &set).await.unwrap().balance, 8);
 	assert_eq!(granter.change_tokens(9999, &set).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	let actor = e.caller(&Who::member("root").may(&[sa_auth::Members::ActAs.as_str()]));
+	assert_eq!(actor.change_tokens(a, &set).await.unwrap_err().status(), Some(StatusCode::FORBIDDEN));
 	let root = id(&granter).await;
 	let member = |id, sub: &str, balance| MemberDto {
 		id,
@@ -876,7 +879,7 @@ async fn members_and_their_balances_need_tokens_grant() {
 		claimed: true,
 		balance,
 	};
-	assert_eq!(granter.members().await.unwrap(), vec![member(a, ALICE, 8), member(root, "root", 15)]);
+	assert_eq!(actor.members().await.unwrap(), vec![member(a, ALICE, 8), member(root, "root", 15)]);
 	e.server.abort();
 }
 

@@ -26,7 +26,7 @@ reqwest = { version = "0.13", default-features = false }
 review_archive_client = { path = "../review_archive_client" }
 sa_auth.workspace = true
 wasm-bindgen = "=0.2.129" # the flake's wasm-bindgen-cli is this version; a skew is a hard error
-web-sys = { version = "0.3", features = ["DataTransfer", "DragEvent", "Element", "HtmlDocument", "Location", "Window", "Document"] }
+web-sys = { version = "0.3", features = ["DataTransfer", "DragEvent", "Element", "HtmlDocument", "Location", "Storage", "Window", "Document"] }
 
 [build-dependencies]
 ev_lib_classes = { workspace = true }
