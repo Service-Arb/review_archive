@@ -160,11 +160,13 @@ impl dioxus::router::FromRouteSegments for View {
 }
 
 /// Where the dashboard is, as its URL under the host's `base` says: a view of the caller's
-/// own, or of the member their tab acts as.
+/// own, of the member their tab acts as, or the pick of a member to open a tab for.
 #[derive(Clone, Debug, PartialEq, Routable)]
 #[rustfmt::skip]
 enum Route {
 	#[layout(Shell)]
+		#[route("/act-as", PickView)]
+		Pick {},
 		#[route("/members/:member/:..view", TheirView)]
 		Theirs { member: i64, view: View },
 		#[route("/:..view", MyView)]
@@ -182,13 +184,14 @@ impl Route {
 	fn member(&self) -> Option<i64> {
 		match self {
 			Self::Theirs { member, .. } => Some(*member),
-			Self::Mine { .. } => None,
+			Self::Mine { .. } | Self::Pick {} => None,
 		}
 	}
 
 	fn view(&self) -> &View {
 		match self {
 			Self::Theirs { view, .. } | Self::Mine { view } => view,
+			Self::Pick {} => &View::Home,
 		}
 	}
 }
@@ -216,6 +219,21 @@ fn MyView(view: View) -> Element {
 #[component]
 fn TheirView(member: i64, view: View) -> Element {
 	remember(Route::Theirs { member, view })
+}
+
+#[component]
+fn PickView() -> Element {
+	rsx! {}
+}
+
+const TABS: &str = "review_archive.tabs";
+
+fn session() -> web_sys::Storage {
+	web_sys::window()
+		.expect("a browser")
+		.session_storage()
+		.expect("sessionStorage is readable")
+		.expect("a page has sessionStorage")
 }
 
 fn api() -> Client {
@@ -296,24 +314,38 @@ fn Shell() -> Element {
 #[component]
 fn Signed(me: Me, view: Route) -> Element {
 	use_context_provider(|| Held(me.permissions.iter().cloned().collect()));
-	match may(Members::ActAs) || may(Tokens::Grant) {
+	match may(Members::ActAs) {
 		true => rsx! { Admin { me: me.id } },
 		false => rsx! { Workspace { view } },
 	}
 }
 
-/// "You", then a tab per member opened; every tab stays mounted, so switching keeps where
+/// "You", then a tab per member opened, kept for this browser tab across the full loads the
+/// panel's links make; every tab stays mounted, so switching keeps where
 /// each one was. The active tab is the URL's `member`.
 #[component]
 fn Admin(me: i64) -> Element {
 	let route = use_route::<Route>();
 	let Views(mut views) = use_context();
 	let active = route.member();
-	let acts = may(Members::ActAs);
-	let grants = may(Tokens::Grant);
-	let mut opened = use_signal(Vec::<i64>::new);
-	let mut labels = use_signal(std::collections::HashMap::<i64, String>::new);
-	let mut picking = use_signal(|| false);
+	let mut opened = use_signal(|| match session().get_item(TABS).expect("sessionStorage is readable") {
+		Some(ids) => ids.split(',').filter(|m| !m.is_empty()).map(|m| m.parse::<i64>().expect("written below")).collect(),
+		None => Vec::new(),
+	});
+	use_effect(move || {
+		let ids = opened().iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+		session().set_item(TABS, &ids).expect("sessionStorage is writable");
+	});
+	let members = use_resource(|| async { api().members().await.map_err(shown) });
+	let label = move |m: i64| match &*members.read() {
+		Some(Ok(all)) => match all.iter().find(|x| x.id == m) {
+			Some(x) if !x.name.is_empty() => x.name.clone(),
+			Some(x) => x.email.clone(),
+			None => format!("#{m}"),
+		},
+		Some(Err(e)) => e.clone(),
+		None => format!("#{m}"),
+	};
 	// a link to a member's view opens their tab
 	use_effect(use_reactive!(|active| {
 		if let Some(m) = active
@@ -339,6 +371,7 @@ fn Admin(me: i64) -> Element {
 	};
 	rsx! {
 		div { class: "flex min-h-0 flex-1 flex-col bg-background text-ink text-[13px] font-sans",
+			if !tabs.is_empty() {
 			Tabs {
 				// the kit's tabs are keyed by string: "" is the caller's own
 				value: active.map(|m| m.to_string()).unwrap_or_default(),
@@ -351,7 +384,7 @@ fn Admin(me: i64) -> Element {
 						TabsTrigger { value: "", "You" }
 						for m in tabs.clone() {
 							div { key: "{m}", class: "flex items-center",
-								TabsTrigger { value: m.to_string(), {labels.read().get(&m).cloned().unwrap_or_else(|| format!("#{m}"))} }
+								TabsTrigger { value: m.to_string(), {label(m)} }
 								Button {
 									variant: ButtonVariant::Ghost,
 									size: Size::Xs,
@@ -369,41 +402,25 @@ fn Admin(me: i64) -> Element {
 							}
 						}
 					}
-					if grants {
-						Button {
-							variant: ButtonVariant::Ghost,
-							size: Size::Xs,
-							icon: true,
-							r#type: "button",
-							class: "text-ink-soft text-base",
-							onclick: move |_| picking.set(true),
-							"+"
-						}
-					}
 				}
 			}
+			}
 			div { class: shown(None),
-				Workspace { view: if active.is_none() { route.clone() } else { view_of(None) } }
+				Workspace { view: if matches!(route, Route::Mine { .. }) { route.clone() } else { view_of(None) } }
 			}
 			for m in tabs {
 				div { key: "{m}", class: shown(Some(m)),
 					Workspace { view: if active == Some(m) { route.clone() } else { view_of(Some(m)) } }
 				}
 			}
-			if picking() {
+			if route == (Route::Pick {}) {
 				Picker {
 					on_pick: move |m: MemberDto| {
-						if !acts {
-							return;
-						}
-						picking.set(false);
-						let tab = (m.id != me).then_some(m.id);
-						if !m.name.is_empty() {
-							labels.write().insert(m.id, m.name);
-						}
-						navigator().push(view_of(tab));
+						navigator().replace(view_of((m.id != me).then_some(m.id)));
 					},
-					on_close: move |_| picking.set(false),
+					on_close: move |_| {
+						navigator().replace(view_of(None));
+					},
 				}
 			}
 		}
@@ -483,6 +500,7 @@ fn Balance(member: i64, balance: i64) -> Element {
 				span { class: "max-w-40 truncate text-[11px] text-accent-error", title: "{e}", "{e}" }
 			}
 			span { class: "w-20 text-right font-mono text-ink-soft", "{balance} tokens" }
+			if may(Tokens::Grant) {
 			Input {
 				class: "w-16",
 				size: Size::Xs,
@@ -491,6 +509,7 @@ fn Balance(member: i64, balance: i64) -> Element {
 			}
 			Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "button", onclick: move |_| set(BalanceChange::Set), "set" }
 			Button { variant: ButtonVariant::Outline, size: Size::Xs, r#type: "button", onclick: move |_| change(BalanceChange::Grant), "grant" }
+			}
 		}
 	}
 }
@@ -517,15 +536,14 @@ fn Workspace(view: Route) -> Element {
 		}
 	});
 	// `/me` is the caller whoever they act as: who a member tab is, and their balance, are read
-	// off the members list, which only one who grants tokens may read
-	let grants = may(Tokens::Grant);
+	// off the members list
 	let unknown = tr.clone();
 	let tokens = use_resource(move || {
 		let unknown = unknown.clone();
 		async move {
 			refresh.0();
 			let mine = api().me().await.map_err(shown)?.tokens;
-			let whom = match tab.filter(|_| grants) {
+			let whom = match tab {
 				Some(m) => Some(
 					api()
 						.members()
@@ -548,14 +566,7 @@ fn Workspace(view: Route) -> Element {
 		_ => return rsx! { div { class: "{shell} p-6 text-ink-soft", "Loading…" } },
 	};
 	let (tokens, whom) = match &*tokens.read() {
-		Some(Ok((mine, whom))) => (
-			match (tab, whom) {
-				(None, _) => Some(*mine),
-				(Some(_), Some(w)) => Some(TokensDto { balance: w.balance, ..*mine }),
-				(Some(_), None) => None,
-			},
-			whom.clone(),
-		),
+		Some(Ok((mine, whom))) => (Some(whom.as_ref().map_or(*mine, |w| TokensDto { balance: w.balance, ..*mine })), whom.clone()),
 		Some(Err(e)) => return rsx! { div { class: "{shell} p-6 text-accent-error", "{e}" } },
 		None => (None, None),
 	};

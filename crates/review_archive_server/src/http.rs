@@ -39,7 +39,7 @@ use utoipa::{
 use v_utils::{Timeframe, macros::SettingsNested};
 
 use crate::{
-	auth::{Auth, Caller, Member, TestPosts, authenticate, grants_tokens, operates_archive},
+	auth::{Auth, Caller, Member, TestPosts, acts_as, authenticate, grants_tokens, operates_archive},
 	worker::Signals,
 };
 
@@ -96,10 +96,8 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/webhooks", get(webhooks).post(add_webhook))
 		.route("/webhooks/{id}", axum::routing::delete(delete_webhook))
 		.route_layer(middleware::from_fn(operates_archive));
-	let tokens = Router::new()
-		.route("/members", get(members))
-		.route("/members/{id}/tokens", post(change_tokens))
-		.route_layer(middleware::from_fn(grants_tokens));
+	let members = Router::new().route("/members", get(members)).route_layer(middleware::from_fn(acts_as));
+	let tokens = Router::new().route("/members/{id}/tokens", post(change_tokens)).route_layer(middleware::from_fn(grants_tokens));
 	let me = Router::new()
 		.route("/me", get(me))
 		.route("/me/tokens", get(ledger))
@@ -115,6 +113,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.route("/me/tg-channels/{id}", axum::routing::delete(delete_tg_channel))
 		.route("/me/tg-channels/{id}/test", post(test_tg_channel));
 	let timed = admin
+		.merge(members)
 		.merge(tokens)
 		.merge(me)
 		.route("/captures/{file}", get(capture_avif))
@@ -149,6 +148,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 				.route("/", get(page.clone()))
 				.route("/telegram", get(page.clone()))
 				.route("/tokens", get(page.clone()))
+				.route("/act-as", get(page.clone()))
 				.route("/gmails/{*view}", get(page.clone()))
 				.route("/members/{id}/tokens", get(page.clone())) // the API's path for a balance change; its GET is the member tab's ledger
 				.route("/members/{member}/{*view}", get(page.clone()))
