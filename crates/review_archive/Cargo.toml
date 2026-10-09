@@ -55,7 +55,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "time", "rt", "macros", "net"] }
 tracing.workspace = true
 tracing-error.workspace = true
-v_utils.workspace = true
+v_utils = { workspace = true, features = ["memory_lease"] } # tokio/net, which the wasm crates cannot build
 zip = { workspace = true, optional = true }
 
 [dev-dependencies]
