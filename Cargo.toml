@@ -61,7 +61,7 @@ tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = "5"
-v_utils = { version = "2.19", default-features = false, features = ["macros"] }
+v_utils = { version = "2.23", default-features = false, features = ["macros", "memory_lease"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 ev_lib_classes = "0.14.0"

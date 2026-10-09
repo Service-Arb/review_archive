@@ -65,7 +65,8 @@ pub(crate) fn exif(captured_at: Timestamp, page_url: &str, title: &str, review_i
 
 /// CPU-bound for seconds on a large card, so off the async threads.
 pub(crate) async fn encode(png: Vec<u8>, exif: Vec<u8>) -> eyre::Result<Avif> {
-	tokio::task::spawn_blocking(move || {
+	let lease = v_utils::memory_lease::Lease::acquire().await?;
+	let avif = tokio::task::spawn_blocking(move || {
 		let rgb = image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgb8();
 		let (width, height) = rgb.dimensions();
 		let pixels: Vec<ravif::RGB8> = rgb.pixels().map(|p| ravif::RGB8::new(p[0], p[1], p[2])).collect();
@@ -80,7 +81,9 @@ pub(crate) async fn encode(png: Vec<u8>, exif: Vec<u8>) -> eyre::Result<Avif> {
 			height,
 		})
 	})
-	.await?
+	.await?;
+	drop(lease);
+	avif
 }
 
 #[cfg(test)]
