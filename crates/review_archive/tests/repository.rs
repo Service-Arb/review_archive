@@ -509,10 +509,9 @@ async fn a_scan_the_store_refuses_is_a_failed_run() {
 	assert!(e.by_source_id().await.is_empty(), "nothing of it was stored");
 }
 
-/// Captures stored as PNG, from before AVIF: converted (`serve` does it beside its worker),
-/// keeping the provenance their `tEXt` chunks carry, and the outbox's payloads follow them.
-#[tokio::test]
-async fn png_captures_become_avif() {
+/// Captures stored as PNG (provenance in `tEXt`) or AVIF (in Exif), from before WebP: converted
+/// (`serve` does it beside its worker), keeping the provenance, and the outbox's payloads follow them.
+async fn legacy_capture_becomes_webp(ext: &str, old_blob: Vec<u8>) {
 	use review_archive::core::dto::{Event, NewWebhook};
 	use sha2::Digest;
 
@@ -530,9 +529,63 @@ async fn png_captures_become_avif() {
 		.unwrap();
 	let src = Scripted(Mutex::new(scan(vec![review("a", 5, "Great", None, true)], Coverage::DownTo(None))));
 	e.archive().run(&src, &e.target).await.unwrap();
-	let avif = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
+	let webp = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
 
 	// back to how a capture was stored before
+	let old = review_archive::core::hex(&sha2::Sha256::digest(&old_blob));
+	let old_path = e.blobs.path_of(&old).unwrap().with_extension(ext);
+	std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+	std::fs::write(&old_path, &old_blob).unwrap();
+	std::fs::remove_file(e.blobs.path_of(&webp).unwrap()).unwrap();
+	let db = sqlx::SqlitePool::connect(&format!("sqlite://{}", e.dir.path().join("review_archive.db").display()))
+		.await
+		.unwrap();
+	sqlx::query("UPDATE captures SET sha256 = ?2 WHERE sha256 = ?1")
+		.bind(&webp)
+		.bind(&old)
+		.execute(&db)
+		.await
+		.unwrap();
+	sqlx::query("UPDATE webhook_deliveries SET payload = REPLACE(REPLACE(payload, '/captures/' || ?1 || '.webp', '/captures/' || ?2 || '.' || ?3), ?1, ?2)")
+		.bind(&webp)
+		.bind(&old)
+		.bind(ext)
+		.execute(&db)
+		.await
+		.unwrap();
+	db.close().await;
+
+	let open = || async {
+		let config = review_archive::config::Config {
+			data_dir: Some(e.dir.path().to_owned()),
+			..Default::default()
+		};
+		let archive = review_archive::Archive::open(config).await.unwrap();
+		archive.convert_legacy_blobs().await.unwrap();
+		archive.close().await;
+	};
+	open().await;
+	let new = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
+	assert_ne!(new, old);
+	assert!(!old_path.exists(), "the old blob is gone");
+	let bytes = std::fs::read(e.blobs.path_of(&new).unwrap()).unwrap();
+	assert_eq!((&bytes[..4], &bytes[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
+	let texts = exif_texts(&e.blobs, &new);
+	assert_eq!(texts["DateTimeOriginal"], "2026:08:31 09:00:00");
+	assert_eq!(texts["DocumentName"], "https://www.google.com/maps/place/x");
+	assert_eq!(texts["ImageDescription"], "Café test");
+	assert_eq!(texts["ImageUniqueID"], "a");
+	assert_eq!(texts["Software"], "review_archive 0.1.0+old");
+	let payloads: Vec<String> = e.store.due_deliveries(Timestamp::MAX, 10).await.unwrap().into_iter().map(|d| d.payload).collect();
+	assert_eq!(payloads.len(), 1);
+	assert!(payloads[0].contains(&format!("\"/captures/{new}.webp\"")) && !payloads[0].contains(&old), "{}", payloads[0]);
+
+	open().await;
+	assert_eq!(e.by_source_id().await["a"].capture_sha256.as_deref(), Some(new.as_str()), "a second pass does nothing");
+}
+
+#[tokio::test]
+async fn png_captures_become_webp() {
 	let mut old_png = Vec::new();
 	let mut enc = png::Encoder::new(&mut old_png, 4, 3);
 	enc.set_color(png::ColorType::Rgb);
@@ -546,51 +599,32 @@ async fn png_captures_become_avif() {
 		enc.add_text_chunk(k.into(), v.into()).unwrap();
 	}
 	enc.write_header().unwrap().write_image_data(&[90; 36]).unwrap();
-	let old = review_archive::core::hex(&sha2::Sha256::digest(&old_png));
-	let png_path = e.blobs.path_of(&old).unwrap().with_extension("png");
-	std::fs::create_dir_all(png_path.parent().unwrap()).unwrap();
-	std::fs::write(&png_path, &old_png).unwrap();
-	std::fs::remove_file(e.blobs.path_of(&avif).unwrap()).unwrap();
-	let db = sqlx::SqlitePool::connect(&format!("sqlite://{}", e.dir.path().join("review_archive.db").display()))
-		.await
-		.unwrap();
-	sqlx::query("UPDATE captures SET sha256 = ?2 WHERE sha256 = ?1")
-		.bind(&avif)
-		.bind(&old)
-		.execute(&db)
-		.await
-		.unwrap();
-	sqlx::query("UPDATE webhook_deliveries SET payload = REPLACE(REPLACE(payload, '/captures/' || ?1 || '.avif', '/captures/' || ?2 || '.png'), ?1, ?2)")
-		.bind(&avif)
-		.bind(&old)
-		.execute(&db)
-		.await
-		.unwrap();
-	db.close().await;
+	legacy_capture_becomes_webp("png", old_png).await;
+}
 
-	let open = || async {
-		let config = review_archive::config::Config {
-			data_dir: Some(e.dir.path().to_owned()),
-			..Default::default()
-		};
-		let archive = review_archive::Archive::open(config).await.unwrap();
-		archive.convert_png_blobs().await.unwrap();
-		archive.close().await;
+#[tokio::test]
+async fn avif_captures_become_webp() {
+	use exif::{Field, In, Tag, Value};
+
+	let ascii = |tag, s: &str| Field {
+		tag,
+		ifd_num: In::PRIMARY,
+		value: Value::Ascii(vec![s.as_bytes().to_vec()]),
 	};
-	open().await;
-	let new = e.by_source_id().await["a"].capture_sha256.clone().unwrap();
-	assert_ne!(new, old);
-	assert!(!png_path.exists(), "the PNG is gone");
-	let texts = exif_texts(&e.blobs, &new);
-	assert_eq!(texts["DateTimeOriginal"], "2026:08:31 09:00:00");
-	assert_eq!(texts["DocumentName"], "https://www.google.com/maps/place/x");
-	assert_eq!(texts["ImageDescription"], "Café test");
-	assert_eq!(texts["ImageUniqueID"], "a");
-	assert_eq!(texts["Software"], "review_archive 0.1.0+old");
-	let payloads: Vec<String> = e.store.due_deliveries(Timestamp::MAX, 10).await.unwrap().into_iter().map(|d| d.payload).collect();
-	assert_eq!(payloads.len(), 1);
-	assert!(payloads[0].contains(&format!("\"/captures/{new}.avif\"")) && !payloads[0].contains(&old), "{}", payloads[0]);
-
-	open().await;
-	assert_eq!(e.by_source_id().await["a"].capture_sha256.as_deref(), Some(new.as_str()), "a second pass does nothing");
+	let fields = [
+		ascii(Tag::DateTimeOriginal, "2026:08:31 09:00:00"),
+		ascii(Tag(exif::Context::Tiff, 0x010d), "https://www.google.com/maps/place/x"),
+		ascii(Tag::ImageDescription, "Café test"),
+		ascii(Tag::ImageUniqueID, "a"),
+		ascii(Tag::Software, "review_archive 0.1.0+old"),
+	];
+	let mut w = exif::experimental::Writer::new();
+	for f in &fields {
+		w.push_field(f);
+	}
+	let mut exif = std::io::Cursor::new(Vec::new());
+	w.write(&mut exif, false).unwrap();
+	let pixels = [ravif::RGB8::new(90, 90, 90); 12];
+	let avif = ravif::Encoder::new().with_exif(exif.into_inner()).encode_rgb(ravif::Img::new(&pixels[..], 4, 3)).unwrap();
+	legacy_capture_becomes_webp("avif", avif.avif_file).await;
 }

@@ -6,7 +6,7 @@
 [<img alt="ci warnings" src="https://img.shields.io/github/actions/workflow/status/service-arb/review_archive/warnings.yml?branch=main&style=for-the-badge&style=flat-square&label=warnings&labelColor=d16002" height="20">](https://github.com/service-arb/review_archive/actions?query=branch%3Amain) <!--NB: Won't find it if repo is private-->
 
 An archive of public place reviews. `review_archive` watches a list of places, and every review it
-has not seen before is stored twice: as structured data in SQLite, and as an AVIF screenshot of the
+has not seen before is stored twice: as structured data in SQLite, and as a WebP screenshot of the
 review card as it first appeared. Edits are kept as history, never overwritten; a review that stops
 being listed is marked gone, and unmarked if it comes back. Statistics and exports are read from
 what was stored.
@@ -33,7 +33,7 @@ cargo install --path .
 
 ## Usage
 ```sh
-# Everything lives under one data dir: `review_archive.db`, `blobs/` with the AVIFs, and the
+# Everything lives under one data dir: `review_archive.db`, `blobs/` with the WebPs, and the
 # browser profile that remembers the consent answer. Set it, the bind address and the defaults in
 # a TOML file passed as `--config`; secrets only ever come from the environment.
 review_archive --config config.toml target add 'https://www.google.com/maps/place/?q=place_id:ChIJ...' --label cafe --lang fr
@@ -53,7 +53,7 @@ review_archive scan --all
 # (`x-sa-assertion`, keys in PANEL_ASSERTION_KEYS; docs/SPEC.md, Auth).
 review_archive serve
 
-# AVIF captures + manifest.json, to a directory or a .zip
+# WebP captures + manifest.json, to a directory or a .zip
 review_archive export --target 1 --since 2026-01-01 --out cafe.zip
 ```
 
@@ -80,7 +80,7 @@ max_reviews_initial = 2000
 | `GET /health` | no auth |
 | `GET /targets` | |
 | `GET /targets/{id}/reviews?since=&gone=` | `since`: date or RFC 3339, on first sighting |
-| `GET /captures/{sha256}.avif` | only hashes the archive recorded |
+| `GET /captures/{sha256}.webp` | only hashes the archive recorded |
 | `GET /stats?target=&from=&to=` | per target and day; `Accept: text/csv` for CSV |
 
 ## When Maps changes

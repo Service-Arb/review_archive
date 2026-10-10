@@ -116,7 +116,7 @@ pub fn router(state: AppState, mfe: Option<&std::path::Path>, sign_in: Option<&s
 		.merge(members)
 		.merge(tokens)
 		.merge(me)
-		.route("/captures/{file}", get(capture_avif))
+		.route("/captures/{file}", get(capture_webp))
 		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, state.cfg.request_timeout.duration()));
 	// an export of a large archive takes as long as it takes; it streams from a file
 	let authed = timed
@@ -347,18 +347,18 @@ async fn review(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Jso
 	Ok(Json(s.archive.review(ReviewId(id)).await?))
 }
 
-/// A capture's AVIF, provenance in its Exif. Only what the archive recorded; for a
+/// A capture's WebP, provenance in its Exif. Only what the archive recorded; for a
 /// member, only what shows a review of a place they track.
-#[utoipa::path(get, path = "/captures/{sha256}.avif", tag = "reviews", params(("sha256" = String, Path)),
-	responses((status = 200, content_type = "image/avif"), (status = 404, body = ErrorBody)))]
-async fn capture_avif(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
-	let sha = file.strip_suffix(".avif").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
-	let avif = match caller.permissions.may(sa_auth::Archive::Operate) {
-		true => s.archive.capture_avif(sha).await?,
-		false => s.archive.member_capture_avif(caller.person, sha).await?,
+#[utoipa::path(get, path = "/captures/{sha256}.webp", tag = "reviews", params(("sha256" = String, Path)),
+	responses((status = 200, content_type = "image/webp"), (status = 404, body = ErrorBody)))]
+async fn capture_webp(State(s): State<AppState>, caller: Caller, Path(file): Path<String>) -> ApiResult<Response> {
+	let sha = file.strip_suffix(".webp").ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such capture".into()))?;
+	let webp = match caller.permissions.may(sa_auth::Archive::Operate) {
+		true => s.archive.capture_webp(sha).await?,
+		false => s.archive.member_capture_webp(caller.person, sha).await?,
 	};
 	// behind auth, so no shared cache may keep it; the name is its hash, so it never changes
-	Ok(([(header::CONTENT_TYPE, "image/avif"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], avif).into_response())
+	Ok(([(header::CONTENT_TYPE, "image/webp"), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")], webp).into_response())
 }
 
 /// The same archive as `export`: `manifest.json` and the first capture of each review.
@@ -562,9 +562,9 @@ async fn test_tg_channel(State(s): State<AppState>, Member(m): Member, Path(id):
 
 #[derive(OpenApi)]
 #[openapi(
-	info(title = "review_archive", description = "Archive of public place reviews: an AVIF screenshot of every review as it first appears, plus data for statistics."),
+	info(title = "review_archive", description = "Archive of public place reviews: a WebP screenshot of every review as it first appears, plus data for statistics."),
 	paths(
-		targets, add_target, target, patch_target, delete_target, reviews, runs, scan, capture, job, review, capture_avif, export_zip, stats, add_webhook,
+		targets, add_target, target, patch_target, delete_target, reviews, runs, scan, capture, job, review, capture_webp, export_zip, stats, add_webhook,
 		webhooks, delete_webhook
 	),
 	// what no path returns: the body of a webhook delivery

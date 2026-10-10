@@ -23,7 +23,7 @@ crates/review_archive/          the engine (features: maps, store)
   src/archive/members.rs        what a member does, scoped to them
   src/browser/                  the `Browser` handle over `browser_manipulation`: consent, sorting, the walk, screenshots
   src/sources/                  the `ReviewSource` port; the maps and gbp adapters
-  src/store/                    SQLite (runtime sqlx queries, embedded migrations/), AVIF blobs, export
+  src/store/                    SQLite (runtime sqlx queries, embedded migrations/), WebP blobs, export
   src/store/jobs.rs             the job queue (on-demand scans and ad-hoc captures)
   src/store/events.rs           events into the outbox (hooks, members' Telegram channels), in the scan's own transaction
   src/store/members.rs          per-member state: gmails, tracks, reinstatements, Telegram channels
@@ -55,14 +55,14 @@ review_archive = { version = "0.1", default-features = false, features = ["maps"
 ```rust
 use review_archive::{Archive, CaptureRequest, config::Config};
 
-// No data dir: nothing stored, the reviews and AVIFs come back in memory.
+// No data dir: nothing stored, the reviews and WebPs come back in memory.
 let mut config = Config::default();
 config.browser.profile_dir = Some("/var/lib/my-service/chromium".into());
 config.browser.executable = Some("/usr/bin/chromium".into());
 let archive = Archive::open(config).await?;
 let got = archive.capture_place(&CaptureRequest::new("ChIJLU7jZClu5kcR4PcOOO6p3I0").lang("fr").max_reviews(20)).await?;
 for r in &got.scan.reviews {
-    // got.avifs[&r.source_review_id]: the AVIF, provenance in Exif, for each card screenshotted
+    // got.webps[&r.source_review_id]: the WebP, provenance in Exif, for each card screenshotted
 }
 archive.close().await;
 ```
@@ -164,5 +164,5 @@ with its own platform implements `sources::ReviewSource` and records through
   `PANEL_ASSERTION_KEYS`, required at boot when `APP_ENV=production`
   (`review_archive --print-required-vars` lists what a profile needs).
 - **A capture is the review as it first appeared.** Cards are screenshotted when new (or while
-  `capture_pending`), after "More" is expanded. It is kept as AVIF, its provenance in Exif,
+  `capture_pending`), after "More" is expanded. It is kept as WebP, its provenance in Exif,
   under its SHA-256.

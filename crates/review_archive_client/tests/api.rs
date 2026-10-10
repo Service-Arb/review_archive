@@ -429,7 +429,7 @@ async fn webhooks_and_the_openapi_document() {
 		"/targets/{id}/scan",
 		"/targets/{id}/export.zip",
 		"/captures",
-		"/captures/{sha256}.avif",
+		"/captures/{sha256}.webp",
 		"/jobs/{id}",
 		"/reviews/{id}",
 		"/stats",
@@ -492,7 +492,7 @@ async fn every_route_but_health_and_openapi_wants_an_assertion() {
 		("POST", "/targets/1/scan"),
 		("GET", "/targets/1/export.zip"),
 		("POST", "/captures"),
-		("GET", &format!("/captures/{}.avif", "0".repeat(64))),
+		("GET", &format!("/captures/{}.webp", "0".repeat(64))),
 		("GET", "/jobs/1"),
 		("GET", "/reviews/1"),
 		("GET", "/stats"),
@@ -648,19 +648,19 @@ async fn a_capture_is_served_only_once_recorded_and_by_its_exact_name() {
 	let url = a.capture_url.clone().expect("a capture was recorded");
 	let sha = a.capture_sha256.clone().unwrap();
 
-	let avif = e.client.capture_avif(&url).await.unwrap();
-	assert_eq!(&avif[4..12], b"ftypavif");
+	let webp = e.client.capture_webp(&url).await.unwrap();
+	assert_eq!((&webp[..4], &webp[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
 	let blobs = review_archive::store::blobs::BlobStore::new(e.dir.path().join("blobs"));
-	assert_eq!(avif, std::fs::read(blobs.path_of(&sha).unwrap()).unwrap());
+	assert_eq!(webp, std::fs::read(blobs.path_of(&sha).unwrap()).unwrap());
 
 	// a file in the blob dir that no capture row names is not served
 	let stray = blobs.put(b"not a recorded capture").await.unwrap();
-	assert_eq!(e.client.capture_avif(&format!("/captures/{stray}.avif")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
-	let never_recorded = format!("/captures/{}.avif", "0".repeat(64));
-	assert_eq!(e.client.capture_avif(&never_recorded).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
-	assert_eq!(e.client.capture_avif(&format!("/captures/{sha}")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(e.client.capture_webp(&format!("/captures/{stray}.webp")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	let never_recorded = format!("/captures/{}.webp", "0".repeat(64));
+	assert_eq!(e.client.capture_webp(&never_recorded).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(e.client.capture_webp(&format!("/captures/{sha}")).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
 	assert_eq!(
-		e.client.capture_avif(&format!("/captures/{}.avif", sha.to_uppercase())).await.unwrap_err().status(),
+		e.client.capture_webp(&format!("/captures/{}.webp", sha.to_uppercase())).await.unwrap_err().status(),
 		Some(StatusCode::NOT_FOUND)
 	);
 	e.server.abort();
@@ -685,13 +685,13 @@ async fn export_zip_holds_each_first_capture_under_its_manifest_name() {
 		.map(|r| (r["source_review_id"].as_str().unwrap().to_owned(), r["capture"].as_str().map(str::to_owned)))
 		.collect();
 	let a_file = files.iter().find(|(id, _)| id == "a").unwrap().1.clone().expect("a has a capture in the export");
-	assert!(a_file.starts_with("captures/") && a_file.ends_with(".avif"), "{a_file}");
+	assert!(a_file.starts_with("captures/") && a_file.ends_with(".webp"), "{a_file}");
 	assert_eq!(files.iter().find(|(id, _)| id == "b").unwrap().1, None, "no capture, no file");
 	assert_eq!(archive.len(), 2, "the manifest and a's capture");
 
 	let mut in_zip = Vec::new();
 	archive.by_name(&a_file).unwrap().read_to_end(&mut in_zip).unwrap();
-	assert_eq!(in_zip, e.client.capture_avif(a.capture_url.as_deref().unwrap()).await.unwrap());
+	assert_eq!(in_zip, e.client.capture_webp(a.capture_url.as_deref().unwrap()).await.unwrap());
 
 	// `since` filters on first sight: nothing was first seen in the future
 	let later = e.client.export_zip(t, Some("2999-01-01")).await.unwrap();
@@ -1149,14 +1149,14 @@ async fn members_share_places_but_see_only_their_own() {
 
 	let board = alice.board(a.id, t.id).await.unwrap();
 	let url = board.snapshotted.iter().find_map(|c| c.review.capture_url.clone()).expect("r1 was captured");
-	assert_eq!(&alice.capture_avif(&url).await.unwrap()[4..12], b"ftypavif");
-	assert!(e.client.capture_avif(&url).await.is_ok(), "the operator sees everything");
+	assert_eq!(&alice.capture_webp(&url).await.unwrap()[8..12], b"WEBP");
+	assert!(e.client.capture_webp(&url).await.is_ok(), "the operator sees everything");
 	assert_eq!(bob.board(a.id, t.id).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
 
 	// once bob stops tracking the place, its screenshots are no longer his to see
-	assert!(bob.capture_avif(&url).await.is_ok());
+	assert!(bob.capture_webp(&url).await.is_ok());
 	bob.untrack(b.id, t.id).await.unwrap();
-	assert_eq!(bob.capture_avif(&url).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
+	assert_eq!(bob.capture_webp(&url).await.unwrap_err().status(), Some(StatusCode::NOT_FOUND));
 	assert_eq!(bob.overview().await.unwrap()[0].locations, vec![]);
 	assert_eq!(alice.overview().await.unwrap()[0].locations.len(), 1, "alice's track stays");
 	e.server.abort();

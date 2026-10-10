@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use crate::{config::AppConfig, settings::Settings};
 
 #[derive(Parser)]
-#[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: an AVIF screenshot of every review as it first appears, plus data for statistics")]
+#[command(name = "review_archive", version = SCANNER_VERSION, about = "Archive of public place reviews: a WebP screenshot of every review as it first appears, plus data for statistics")]
 struct Cli {
 	#[clap(flatten)]
 	settings_flags: config::SettingsFlags,
@@ -395,7 +395,7 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 	// resumable per blob: a shutdown midway leaves the rest for the next boot
 	let convert = async {
 		tokio::select! {
-			r = archive.convert_png_blobs() => r,
+			r = archive.convert_legacy_blobs() => r,
 			_ = stop.wait_for(|stopped| *stopped) => Ok(()),
 		}
 	};
@@ -442,7 +442,10 @@ fn dev_permissions(held: &str) -> eyre::Result<sa_auth::PermissionSet> {
 	}
 	let listed: Vec<String> = held.split(',').map(|p| p.trim().to_owned()).collect();
 	for p in &listed {
-		eyre::ensure!(catalog.permissions.contains(p) && ours(p), "--dev-member: {p} is not a sa:review_archive permission, an alias, or `none`");
+		eyre::ensure!(
+			catalog.permissions.contains(p) && ours(p),
+			"--dev-member: {p} is not a sa:review_archive permission, an alias, or `none`"
+		);
 	}
 	Ok(listed.into_iter().collect())
 }

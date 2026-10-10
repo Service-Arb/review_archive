@@ -52,7 +52,7 @@ pub enum Destination {
 }
 
 /// A target's reviews (first seen at or after `since`) and their first screenshots:
-/// `manifest.json` + `captures/*.avif`.
+/// `manifest.json` + `captures/*.webp`.
 pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: Option<Timestamp>, out: Destination, now: Timestamp) -> eyre::Result<Exported> {
 	let t = store.target(target).await?;
 	let rows = store.reviews(target, since, None).await?;
@@ -61,7 +61,7 @@ pub async fn export(store: &Store, blobs: &BlobStore, target: TargetId, since: O
 	for review in rows {
 		let capture = match review.capture_sha256.as_deref().and_then(|sha| blobs.path_of(sha).map(|p| (sha.to_owned(), p))) {
 			Some((sha, path)) => {
-				let name = format!("captures/{}_{}.avif", review.id, &sha[..12]);
+				let name = format!("captures/{}_{}.webp", review.id, &sha[..12]);
 				files.push((name.clone(), path));
 				Some(name)
 			}
@@ -113,7 +113,7 @@ fn write_out(out: Destination, manifest: &[u8], files: &[(String, PathBuf)]) -> 
 fn write_zip(file: File, manifest: &[u8], files: &[(String, PathBuf)]) -> eyre::Result<()> {
 	let mut zip = zip::ZipWriter::new(file);
 	let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-	// AVIFs are already compressed
+	// WebPs are already compressed
 	let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 	zip.start_file("manifest.json", deflated)?;
 	zip.write_all(manifest)?;

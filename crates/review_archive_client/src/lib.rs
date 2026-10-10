@@ -202,8 +202,8 @@ impl Client {
 		Self::json(self.request(Method::GET, &format!("reviews/{id}"))?).await
 	}
 
-	/// A capture's AVIF, by the `capture_url` (or `url`) the archive gave for it.
-	pub async fn capture_avif(&self, capture_url: &str) -> Result<Vec<u8>, Error> {
+	/// A capture's WebP, by the `capture_url` (or `url`) the archive gave for it.
+	pub async fn capture_webp(&self, capture_url: &str) -> Result<Vec<u8>, Error> {
 		Ok(Self::send(self.request(Method::GET, capture_url)?).await?.bytes().await?.to_vec())
 	}
 
@@ -353,8 +353,8 @@ mod tests {
 	#[test]
 	fn requests_stay_on_the_archive() {
 		let c = Client::ambient(reqwest::Client::new(), "http://archive:59110/api").unwrap();
-		assert!(c.request(Method::GET, "/captures/x.avif").is_ok());
-		for elsewhere in ["https://evil.example/x.avif", "http://archive:59111/x"] {
+		assert!(c.request(Method::GET, "/captures/x.webp").is_ok());
+		for elsewhere in ["https://evil.example/x.webp", "http://archive:59111/x"] {
 			assert!(matches!(c.request(Method::GET, elsewhere), Err(Error::Url(_))), "{elsewhere}");
 		}
 	}

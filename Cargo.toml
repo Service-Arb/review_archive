@@ -32,9 +32,10 @@ ev_lib = { version = "0.25.0", default-features = false }
 eyre = "0.6"
 futures = "0.3"
 hmac = "0.13"
-image = { version = "0.25", default-features = false, features = ["png", "avif-native"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "avif-native"] }
 jiff = { version = "0.2", features = ["serde"] }
 kamadak-exif = "0.6"
+libwebp = { package = "webp", version = "0.3", default-features = false } # the `image` crate encodes WebP lossless only
 miette = "7"
 rand = "0.10"
 ravif = "0.13"

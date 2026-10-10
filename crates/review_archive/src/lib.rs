@@ -1,4 +1,4 @@
-//! A review archive: an AVIF screenshot of every review of a place as it first appears, plus the data
+//! A review archive: a WebP screenshot of every review of a place as it first appears, plus the data
 //! behind it — new, edited, gone — for statistics.
 //!
 //! The pure parts (parsing Maps HTML, deciding what is new or gone, relative dates, the
@@ -10,7 +10,7 @@
 //!   and share.
 //! - [`sources::ReviewSource`] — the port every platform implements; `maps` and `gbp` are
 //!   the two Google ones.
-//! - [`store::Store`] (feature `store`) — SQLite plus content-addressed AVIFs.
+//! - [`store::Store`] (feature `store`) — SQLite plus content-addressed WebPs.
 //!
 //! Features: `maps` (the browser, and both Google sources), `store`; both on by default.
 //!
@@ -35,7 +35,6 @@
 #![warn(missing_docs)]
 
 mod archive;
-pub mod avif;
 #[cfg(feature = "maps")]
 pub mod browser;
 pub mod config;
@@ -48,6 +47,7 @@ pub mod sources;
 pub mod store;
 #[cfg(feature = "store")]
 pub mod webhooks;
+pub mod webp;
 
 #[cfg(feature = "store")]
 pub use archive::Added;

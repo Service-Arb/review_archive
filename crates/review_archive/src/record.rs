@@ -14,9 +14,10 @@ use review_archive_core::{
 };
 
 use crate::{
-	SCANNER_VERSION, avif,
+	SCANNER_VERSION,
 	sources::ReviewSource,
 	store::{RunEnd, RunId, ScanWrite, Store, StoredCapture, blobs::BlobStore, sat_u32},
+	webp,
 };
 
 /// A recorded run: the summary, its row, the reviews it listed, and why it failed.
@@ -169,12 +170,12 @@ impl Recorder<'_> {
 	}
 
 	async fn store_capture(&self, target: &Target, source_review_id: &str, c: &Capture) -> eyre::Result<StoredCapture> {
-		let avif = avif::provenance(c, &target.label, source_review_id).await?;
-		let sha256 = self.blobs.put(&avif.bytes).await?;
+		let webp = webp::provenance(c, &target.label, source_review_id).await?;
+		let sha256 = self.blobs.put(&webp.bytes).await?;
 		Ok(StoredCapture {
 			sha256,
-			width: avif.width,
-			height: avif.height,
+			width: webp.width,
+			height: webp.height,
 			captured_at: c.captured_at,
 			page_url: c.page_url.clone(),
 		})

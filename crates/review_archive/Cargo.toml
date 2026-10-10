@@ -38,9 +38,9 @@ hmac = { workspace = true, optional = true }
 image.workspace = true
 jiff.workspace = true
 kamadak-exif.workspace = true
+libwebp.workspace = true
 miette.workspace = true
 png = { workspace = true, optional = true }
-ravif.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 review_archive_core.workspace = true
 schemars = { workspace = true, optional = true }
@@ -61,6 +61,7 @@ zip = { workspace = true, optional = true }
 [dev-dependencies]
 axum.workspace = true
 png.workspace = true
+ravif.workspace = true # the AVIFs from before WebP, for the converter's test
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
 

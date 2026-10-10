@@ -1,5 +1,5 @@
 An archive of public place reviews. `review_archive` watches a list of places, and every review it
-has not seen before is stored twice: as structured data in SQLite, and as an AVIF screenshot of the
+has not seen before is stored twice: as structured data in SQLite, and as a WebP screenshot of the
 review card as it first appeared. Edits are kept as history, never overwritten; a review that stops
 being listed is marked gone, and unmarked if it comes back. Statistics and exports are read from
 what was stored.

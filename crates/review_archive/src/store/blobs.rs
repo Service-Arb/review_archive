@@ -1,4 +1,4 @@
-//! Content-addressed captures: `<root>/<sha256[0..2]>/<sha256>.avif`.
+//! Content-addressed captures: `<root>/<sha256[0..2]>/<sha256>.webp`.
 
 use std::{
 	io::Write,
@@ -41,7 +41,7 @@ impl BlobStore {
 	/// `None` unless `sha` is 64 lowercase hex digits — it arrives from URLs.
 	pub fn path_of(&self, sha: &str) -> Option<PathBuf> {
 		let valid = sha.len() == 64 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-		valid.then(|| self.root.join(&sha[..2]).join(format!("{sha}.avif")))
+		valid.then(|| self.root.join(&sha[..2]).join(format!("{sha}.webp")))
 	}
 
 	/// Where it lives.

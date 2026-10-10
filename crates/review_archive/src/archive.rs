@@ -53,14 +53,14 @@ use crate::{
 /// # async fn demo() -> eyre::Result<()> {
 /// use review_archive::{Archive, CaptureRequest, config::Config};
 ///
-/// // no data dir: nothing is stored, the AVIFs come back in memory
+/// // no data dir: nothing is stored, the WebPs come back in memory
 /// let mut config = Config::default();
 /// config.browser.profile_dir = Some("/tmp/review-archive-profile".into());
 /// config.browser.executable = Some("/usr/bin/chromium".into());
 /// let archive = Archive::open(config).await?;
 /// let got = archive.capture_place(&CaptureRequest::new("ChIJLU7jZClu5kcR4PcOOO6p3I0").max_reviews(5)).await?;
 /// for review in &got.scan.reviews {
-///     println!("{} {:?} {} bytes", review.author, review.rating, got.avifs.get(&review.source_review_id).map_or(0, |a| a.bytes.len()));
+///     println!("{} {:?} {} bytes", review.author, review.rating, got.webps.get(&review.source_review_id).map_or(0, |a| a.bytes.len()));
 /// }
 /// archive.close().await;
 /// # Ok(()) }
@@ -147,10 +147,10 @@ pub struct Captured {
 	/// The page the reviews were read on.
 	pub page_url: String,
 	/// The reviews, newest first; how much of the list they span; what went wrong along the
-	/// way. Their `capture`s are taken out into `avifs`.
+	/// way. Their `capture`s are taken out into `webps`.
 	pub scan: review_archive_core::Scan,
 	/// By source review id, provenance written in: the cards that were screenshotted.
-	pub avifs: HashMap<String, crate::avif::Avif>,
+	pub webps: HashMap<String, crate::webp::Webp>,
 }
 
 /// A target just added, and the search that found its place, if one was needed.
@@ -196,12 +196,12 @@ impl Archive {
 		Self::open_inner(config, browser).await
 	}
 
-	/// The PNG captures from before AVIF, converted one by one; `serve` runs it beside its
-	/// worker, so a large backlog never holds up the boot.
+	/// The PNG and AVIF captures from before WebP, converted one by one; `serve` runs it beside
+	/// its worker, so a large backlog never holds up the boot.
 	#[cfg(feature = "store")]
-	pub async fn convert_png_blobs(&self) -> eyre::Result<()> {
+	pub async fn convert_legacy_blobs(&self) -> eyre::Result<()> {
 		let stored = self.stored()?;
-		stored.store.convert_png_blobs(&stored.blobs).await
+		stored.store.convert_legacy_blobs(&stored.blobs).await
 	}
 
 	async fn open_inner(config: Config, #[cfg(feature = "maps")] browser: Browser) -> eyre::Result<Self> {
@@ -274,7 +274,7 @@ impl Archive {
 	}
 
 	/// Reads a place's reviews and screenshots them, storing nothing: the reviews and the
-	/// AVIFs come back in memory. Works on an archive without a data dir.
+	/// WebPs come back in memory. Works on an archive without a data dir.
 	#[cfg(feature = "maps")]
 	pub async fn capture_place(&self, req: &CaptureRequest) -> eyre::Result<Captured> {
 		use review_archive_core::{Known, maps::Requested};
@@ -290,13 +290,13 @@ impl Archive {
 		let walked = self.inner.browser.walk(&req.place_id, lang, &mut policy, &mut meter, max).await?;
 		let page_url = walked.page_url.clone();
 		let mut scan = policy.conclude(walked, Timestamp::now());
-		let mut avifs = HashMap::new();
+		let mut webps = HashMap::new();
 		for r in &mut scan.reviews {
 			if let Some(c) = r.capture.take() {
-				avifs.insert(r.source_review_id.clone(), crate::avif::provenance(&c, &req.place_id, &r.source_review_id).await?);
+				webps.insert(r.source_review_id.clone(), crate::webp::provenance(&c, &req.place_id, &r.source_review_id).await?);
 			}
 		}
-		Ok(Captured { page_url, scan, avifs })
+		Ok(Captured { page_url, scan, webps })
 	}
 }
 
@@ -667,9 +667,9 @@ impl Archive {
 		self.inner.webhooks.deliver_due(self.store()?, Timestamp::now()).await
 	}
 
-	/// The AVIF of a recorded capture. [`Rejected::NotFound`] for a hash the archive never
+	/// The WebP of a recorded capture. [`Rejected::NotFound`] for a hash the archive never
 	/// recorded, even if a file by that name exists.
-	pub async fn capture_avif(&self, sha256: &str) -> eyre::Result<Vec<u8>> {
+	pub async fn capture_webp(&self, sha256: &str) -> eyre::Result<Vec<u8>> {
 		let stored = self.stored()?;
 		let not_found = || Rejected::not_found("no such capture");
 		let path = stored.blobs.path_of(sha256).ok_or_else(not_found)?;

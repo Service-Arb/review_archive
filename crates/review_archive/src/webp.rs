@@ -1,4 +1,4 @@
-//! What the archive keeps of a screenshot: AVIF, its provenance in Exif, so a capture that
+//! What the archive keeps of a screenshot: lossy WebP, its provenance in Exif, so a capture that
 //! leaves the archive still says when and where it was taken.
 
 use exif::{Context, Field, In, Tag, Value, experimental::Writer};
@@ -10,12 +10,11 @@ use crate::SCANNER_VERSION;
 /// TIFF's, which kamadak-exif does not name.
 const DOCUMENT_NAME: Tag = Tag(Context::Tiff, 0x010d);
 
-const QUALITY: f32 = 60.;
-const SPEED: u8 = 6;
+const QUALITY: f32 = 80.;
 
 /// An encoded capture.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Avif {
+pub struct Webp {
 	/// The file.
 	pub bytes: Vec<u8>,
 	/// In pixels.
@@ -24,15 +23,15 @@ pub struct Avif {
 	pub height: u32,
 }
 
-/// The capture's PNG as AVIF, its provenance written in: when, where, of what, by what.
-pub async fn provenance(c: &Capture, title: &str, source_review_id: &str) -> eyre::Result<Avif> {
+/// The capture's PNG as WebP, its provenance written in: when, where, of what, by what.
+pub async fn provenance(c: &Capture, title: &str, source_review_id: &str) -> eyre::Result<Webp> {
 	let exif = exif(c.captured_at, &c.page_url, title, source_review_id, &format!("review_archive {SCANNER_VERSION}"))?;
-	encode(c.png.clone(), exif).await
+	encode(c.png.clone(), image::ImageFormat::Png, exif).await
 }
 
-/// For what refuses AVIF (Telegram's `sendPhoto`).
-pub fn to_png(avif: &[u8]) -> eyre::Result<Vec<u8>> {
-	let img = image::load_from_memory_with_format(avif, image::ImageFormat::Avif)?;
+/// For Telegram's `sendPhoto`, documented for JPEG/PNG.
+pub fn to_png(webp: &[u8]) -> eyre::Result<Vec<u8>> {
+	let img = image::load_from_memory_with_format(webp, image::ImageFormat::WebP)?;
 	let mut out = std::io::Cursor::new(Vec::new());
 	img.write_to(&mut out, image::ImageFormat::Png)?;
 	Ok(out.into_inner())
@@ -63,27 +62,49 @@ pub(crate) fn exif(captured_at: Timestamp, page_url: &str, title: &str, review_i
 	Ok(out.into_inner())
 }
 
-/// CPU-bound for seconds on a large card, so off the async threads.
-pub(crate) async fn encode(png: Vec<u8>, exif: Vec<u8>) -> eyre::Result<Avif> {
+/// `exif` is a bare TIFF block, as [`exif`] writes it.
+pub(crate) async fn encode(image: Vec<u8>, format: image::ImageFormat, exif: Vec<u8>) -> eyre::Result<Webp> {
 	let lease = v_utils::memory_lease::Lease::acquire().await?;
-	let avif = tokio::task::spawn_blocking(move || {
-		let rgb = image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.into_rgb8();
+	let webp = tokio::task::spawn_blocking(move || {
+		let rgb = image::load_from_memory_with_format(&image, format)?.into_rgb8();
 		let (width, height) = rgb.dimensions();
-		let pixels: Vec<ravif::RGB8> = rgb.pixels().map(|p| ravif::RGB8::new(p[0], p[1], p[2])).collect();
-		let encoded = ravif::Encoder::new()
-			.with_quality(QUALITY)
-			.with_speed(SPEED)
-			.with_exif(exif)
-			.encode_rgb(ravif::Img::new(&pixels[..], width as usize, height as usize))?;
-		Ok(Avif {
-			bytes: encoded.avif_file,
+		let encoded = libwebp::Encoder::from_rgb(&rgb, width, height)
+			.encode_simple(false, QUALITY)
+			.map_err(|e| eyre::eyre!("encoding WebP: {e:?}"))?;
+		Ok(Webp {
+			bytes: with_exif(&encoded, width, height, &exif),
 			width,
 			height,
 		})
 	})
 	.await?;
 	drop(lease);
-	avif
+	webp
+}
+
+/// libwebp's simple file (`RIFF … WEBP VP8 …`) extended with an `EXIF` chunk, which the format
+/// only allows after a `VP8X` header that flags it.
+fn with_exif(simple: &[u8], width: u32, height: u32, exif: &[u8]) -> Vec<u8> {
+	assert!(simple.starts_with(b"RIFF") && &simple[8..16] == b"WEBPVP8 ", "libwebp writes lossy RGB as a simple file");
+	let chunk = |out: &mut Vec<u8>, fourcc: &[u8; 4], data: &[u8]| {
+		out.extend_from_slice(fourcc);
+		out.extend_from_slice(&u32::try_from(data.len()).expect("a capture is far below 4 GiB").to_le_bytes());
+		out.extend_from_slice(data);
+		if data.len() % 2 == 1 {
+			out.push(0);
+		}
+	};
+	let mut vp8x = vec![0x08, 0, 0, 0]; // the Exif flag
+	vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+	vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+	let mut body = b"WEBP".to_vec();
+	chunk(&mut body, b"VP8X", &vp8x);
+	body.extend_from_slice(&simple[12..]);
+	chunk(&mut body, b"EXIF", exif);
+	let mut out = b"RIFF".to_vec();
+	out.extend_from_slice(&u32::try_from(body.len()).expect("a capture is far below 4 GiB").to_le_bytes());
+	out.extend_from_slice(&body);
+	out
 }
 
 #[cfg(test)]
@@ -98,15 +119,15 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn exif_survives_in_the_avif() {
+	async fn exif_survives_in_the_webp() {
 		let c = Capture {
 			png: png(5, 3),
 			captured_at: "2026-09-26T12:00:00Z".parse().unwrap(),
 			page_url: "https://maps.google.com/?cid=1".into(),
 		};
-		let avif = provenance(&c, "Café ☕", "r1").await.unwrap();
-		assert_eq!((avif.width, avif.height), (5, 3));
-		let exif = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&avif.bytes)).unwrap();
+		let webp = provenance(&c, "Café ☕", "r1").await.unwrap();
+		assert_eq!((webp.width, webp.height), (5, 3));
+		let exif = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&webp.bytes)).unwrap();
 		let text = |tag| match &exif.get_field(tag, In::PRIMARY).unwrap_or_else(|| panic!("{tag} written")).value {
 			Value::Ascii(v) => String::from_utf8(v[0].clone()).unwrap(),
 			v => panic!("{v:?}"),
@@ -118,12 +139,12 @@ mod tests {
 		assert_eq!(text(Tag::ImageUniqueID), "r1");
 		assert!(text(Tag::Software).starts_with("review_archive "));
 
-		let back = image::load_from_memory_with_format(&to_png(&avif.bytes).unwrap(), image::ImageFormat::Png).unwrap();
+		let back = image::load_from_memory_with_format(&to_png(&webp.bytes).unwrap(), image::ImageFormat::Png).unwrap();
 		assert_eq!((back.width(), back.height()), (5, 3));
 	}
 
 	#[tokio::test]
 	async fn rejects_non_png() {
-		assert!(encode(b"GIF89a".to_vec(), Vec::new()).await.is_err());
+		assert!(encode(b"GIF89a".to_vec(), image::ImageFormat::Png, Vec::new()).await.is_err());
 	}
 }

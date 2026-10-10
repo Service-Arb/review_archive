@@ -96,7 +96,7 @@
           src = pureSrc;
           inherit cargoLock;
           cargoBuildFlags = [ "-p" "review_archive_server" ];
-          nativeBuildInputs = with pkgs; [ pkg-config nasm ];
+          nativeBuildInputs = with pkgs; [ pkg-config ];
           # ev_lib's `sentry` turns on reqwest's native-tls, which is OpenSSL on Linux
           # (Security.framework on Darwin, which needs nothing here).
           buildInputs = [ pkgs.dav1d ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.openssl ];
@@ -259,8 +259,8 @@
               mold
               pkg-config
               openssl # sentry's native-tls
-              dav1d # decoding AVIF captures, for Telegram
-              nasm # rav1e's assembly
+              dav1d # decoding the AVIF captures from before WebP
+              nasm # rav1e's assembly, for the AVIF fixtures in tests
               rust
               sqlite # inspecting the archive
               cargo-insta

@@ -10,9 +10,9 @@ pub mod blobs;
 mod events;
 pub mod export;
 mod jobs;
+mod legacy_blobs;
 mod members;
 pub mod people;
-mod png_blobs;
 mod tokens;
 mod webhooks;
 

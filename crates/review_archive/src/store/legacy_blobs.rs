@@ -1,5 +1,5 @@
-//! One-shot: the PNG blobs from before captures were AVIF, re-encoded with the provenance
-//! their `tEXt` chunks carry. Remove once prod has converted.
+//! One-shot: the blobs from before captures were WebP, re-encoded with their provenance: a PNG's
+//! from its `tEXt` chunks, an AVIF's Exif as is. Remove once prod has converted.
 
 use std::path::{Path, PathBuf};
 
@@ -7,51 +7,54 @@ use eyre::WrapErr;
 use futures::{StreamExt, TryStreamExt};
 
 use super::{Store, blobs::BlobStore};
-use crate::avif;
+use crate::webp;
 
 impl Store {
-	/// Every `.png` blob a capture names becomes AVIF, the rows and pending payloads naming
-	/// it follow, then the PNG goes; one no capture names is just removed. Resumable per blob.
-	pub(crate) async fn convert_png_blobs(&self, blobs: &BlobStore) -> eyre::Result<()> {
-		let pngs = pngs_under(blobs.root())?;
-		if pngs.is_empty() {
+	/// Every `.png`/`.avif` blob a capture names becomes WebP, the rows and pending payloads
+	/// naming it follow, then the old file goes; one no capture names is just removed.
+	/// Resumable per blob.
+	pub(crate) async fn convert_legacy_blobs(&self, blobs: &BlobStore) -> eyre::Result<()> {
+		let olds = legacy_under(blobs.root())?;
+		if olds.is_empty() {
 			return Ok(());
 		}
-		tracing::info!(count = pngs.len(), "converting PNG captures to AVIF");
+		tracing::info!(count = olds.len(), "converting captures to WebP");
 		let mut done = 0;
 		// one at a time: an encode's buffers are the pod's memory budget, and nobody waits on this
-		futures::stream::iter(&pngs)
+		futures::stream::iter(&olds)
 			.then(|path| async move { self.convert(blobs, path).await.wrap_err_with(|| format!("converting {}", path.display())) })
 			.try_for_each(|()| {
 				done += 1;
 				if done % 500 == 0 {
-					tracing::info!(done, of = pngs.len(), "converting PNG captures");
+					tracing::info!(done, of = olds.len(), "converting captures to WebP");
 				}
 				std::future::ready(Ok(()))
 			})
 			.await?;
-		tracing::info!(count = pngs.len(), "PNG captures converted");
+		tracing::info!(count = olds.len(), "captures converted to WebP");
 		Ok(())
 	}
 
 	async fn convert(&self, blobs: &BlobStore, path: &Path) -> eyre::Result<()> {
-		let old = path.file_stem().and_then(|s| s.to_str()).expect("listed by its .png extension").to_owned();
+		let old = path.file_stem().and_then(|s| s.to_str()).expect("listed by its extension").to_owned();
+		let ext = path.extension().and_then(|e| e.to_str()).expect("listed by its extension");
 		let named: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM captures WHERE sha256 = ?").bind(&old).fetch_one(&self.pool).await?;
 		if named > 0 {
-			let png = match tokio::fs::read(path).await {
+			let bytes = match tokio::fs::read(path).await {
 				Ok(b) => b,
 				Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), // another process converted it meanwhile
 				Err(e) => return Err(e.into()),
 			};
-			let new = blobs.put(&reencode(png).await?.bytes).await?;
+			let new = blobs.put(&reencode(bytes, ext).await?.bytes).await?;
 			let mut tx = self.write().await?;
 			sqlx::query("UPDATE captures SET sha256 = ?2 WHERE sha256 = ?1").bind(&old).bind(&new).execute(&mut *tx).await?;
 			sqlx::query(
-				"UPDATE webhook_deliveries SET payload = REPLACE(REPLACE(payload, ?1, ?2), '/captures/' || ?2 || '.png', '/captures/' || ?2 || '.avif')
+				"UPDATE webhook_deliveries SET payload = REPLACE(REPLACE(payload, ?1, ?2), '/captures/' || ?2 || '.' || ?3, '/captures/' || ?2 || '.webp')
 				 WHERE payload LIKE '%' || ?1 || '%'",
 			)
 			.bind(&old)
 			.bind(&new)
+			.bind(ext)
 			.execute(&mut *tx)
 			.await?;
 			tx.commit().await?;
@@ -63,7 +66,18 @@ impl Store {
 	}
 }
 
-async fn reencode(png: Vec<u8>) -> eyre::Result<avif::Avif> {
+async fn reencode(bytes: Vec<u8>, ext: &str) -> eyre::Result<webp::Webp> {
+	match ext {
+		"png" => reencode_png(bytes).await,
+		"avif" => {
+			let exif = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes))?.buf().to_vec();
+			webp::encode(bytes, image::ImageFormat::Avif, exif).await
+		}
+		_ => unreachable!("listed by these extensions"),
+	}
+}
+
+async fn reencode_png(png: Vec<u8>) -> eyre::Result<webp::Webp> {
 	let text: std::collections::HashMap<String, String> = png::Decoder::new(std::io::Cursor::new(&png))
 		.read_info()?
 		.info()
@@ -73,11 +87,11 @@ async fn reencode(png: Vec<u8>) -> eyre::Result<avif::Avif> {
 		.collect();
 	let get = |k: &str| text.get(k).map(String::as_str).ok_or_else(|| eyre::eyre!("no {k:?} tEXt chunk"));
 	let taken = get("Creation Time")?.parse().wrap_err("Creation Time")?;
-	let exif = avif::exif(taken, get("Source")?, get("Title")?, get("Review ID")?, get("Software")?)?;
-	avif::encode(png, exif).await
+	let exif = webp::exif(taken, get("Source")?, get("Title")?, get("Review ID")?, get("Software")?)?;
+	webp::encode(png, image::ImageFormat::Png, exif).await
 }
 
-fn pngs_under(root: &Path) -> eyre::Result<Vec<PathBuf>> {
+fn legacy_under(root: &Path) -> eyre::Result<Vec<PathBuf>> {
 	let shards = match std::fs::read_dir(root) {
 		Ok(d) => d,
 		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()), // nothing stored yet
@@ -91,7 +105,7 @@ fn pngs_under(root: &Path) -> eyre::Result<Vec<PathBuf>> {
 		}
 		for f in std::fs::read_dir(&shard)? {
 			let f = f?.path();
-			if f.extension().is_some_and(|e| e == "png") {
+			if f.extension().is_some_and(|e| e == "png" || e == "avif") {
 				out.push(f);
 			}
 		}

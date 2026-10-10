@@ -66,7 +66,7 @@ async fn live_scan_of_a_real_place() {
 	assert!(archive.review(review_archive::core::ReviewId(captured.id)).await.unwrap().captures[0].width >= 600);
 }
 
-/// The library without a store: reviews and AVIFs in memory.
+/// The library without a store: reviews and WebPs in memory.
 #[tokio::test]
 #[ignore = "live: needs Chrome and the network"]
 async fn live_capture_without_a_store() {
@@ -92,7 +92,7 @@ async fn live_capture_without_a_store() {
 		}
 	};
 	assert_eq!(got.scan.reviews.len(), 5, "{:?}", got.scan.warnings);
-	assert!(got.scan.reviews.iter().all(|r| r.capture.is_none()), "taken out into avifs");
-	assert!(got.avifs.values().next().unwrap().width >= 600);
+	assert!(got.scan.reviews.iter().all(|r| r.capture.is_none()), "taken out into webps");
+	assert!(got.webps.values().next().unwrap().width >= 600);
 	assert!(archive.store().is_err());
 }
