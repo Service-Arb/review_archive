@@ -208,6 +208,8 @@
               # volume is empty on first boot
               "TMPDIR=/data/tmp"
               "FONTCONFIG_FILE=${fontsConf}"
+              # fixed, so freed image buffers return to the OS and the pod can shrink back to its base after a memory lease (examples/memory_footprint.rs)
+              "MALLOC_MMAP_THRESHOLD_=131072"
             ];
           };
         };
