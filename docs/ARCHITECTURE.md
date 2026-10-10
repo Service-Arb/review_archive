@@ -128,6 +128,9 @@ with its own platform implements `sources::ReviewSource` and records through
 - **One write lock per transaction.** A write that reads first begins `IMMEDIATE`, so `serve`'s
   worker, its HTTP side and a hand-run `scan` never fail on each other's writes. A scan's
   reviews, events, cut, run end, job end and token charges commit together.
+- **One `serve` per data dir does the background work.** `serve.lock` in the data dir, held
+  for the process's life, gates the worker, the deliverer and the blob conversion; a second
+  `serve` on the same dir (a rolling update's newcomer) answers HTTP and waits for it.
 - **One browser, one queue.** A single worker uses the browser: queued jobs first
     (`POST /targets/{id}/scan`, `POST /captures`), oldest first — but no more than `worker.jobs_in_a_row`
   while a target is overdue — then the most overdue target, with a `schedule.pause_{min,max}` pause

@@ -4,7 +4,11 @@
 mod config;
 mod settings;
 
-use std::path::PathBuf;
+use std::{
+	fs::{OpenOptions, TryLockError},
+	path::PathBuf,
+	time::Duration,
+};
 
 use clap::{Args, Parser, Subcommand};
 use ev_lib::{alerts, error_monitoring};
@@ -385,6 +389,7 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 		let _ = tx.send(true);
 		Ok::<_, eyre::Report>(())
 	};
+	let mut leader_stop = rx.clone();
 	let deliver = worker::deliver(&archive, &config.worker, rx.clone());
 	let mut stop = rx.clone();
 	let work = async {
@@ -399,7 +404,40 @@ async fn serve(archive: Archive, config: &AppConfig, settings: &Settings, args: 
 			_ = stop.wait_for(|stopped| *stopped) => Ok(()),
 		}
 	};
-	tokio::try_join!(http, work, deliver, convert, signal)?;
+	// A rolling update runs two of us on one data dir: the newcomer serves HTTP at once, the
+	// background side only once the outgoing process is gone, which drops its flock.
+	let lock_path = config.data_dir.join("serve.lock");
+	let background = async {
+		let lock = OpenOptions::new()
+			.create(true)
+			.write(true)
+			.truncate(false)
+			.open(&lock_path)
+			.wrap_err_with(|| format!("opening {}", lock_path.display()))?;
+		let mut logged = false;
+		loop {
+			match lock.try_lock() {
+				Ok(()) => break,
+				Err(TryLockError::WouldBlock) if !logged => {
+					tracing::info!(lock = %lock_path.display(), "another serve holds the data dir: HTTP only until it exits");
+					logged = true;
+				}
+				Err(TryLockError::WouldBlock) => {}
+				Err(TryLockError::Error(e)) => return Err(eyre::Report::new(e).wrap_err(format!("locking {}", lock_path.display()))),
+			}
+			tokio::select! {
+				() = tokio::time::sleep(Duration::from_secs(1)) => {}
+				_ = leader_stop.wait_for(|stopped| *stopped) => return Ok(()),
+			}
+		}
+		if logged {
+			tracing::info!("took over the data dir");
+		}
+		tokio::try_join!(work, deliver, convert)?;
+		drop(lock);
+		Ok(())
+	};
+	tokio::try_join!(http, background, signal)?;
 	Ok(())
 }
 
